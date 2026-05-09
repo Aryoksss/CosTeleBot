@@ -648,23 +648,56 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     const dlExt = path.extname(fileName).toLowerCase();
     const isArchiveTarget = ['.zip', '.rar', '.7z'].includes(dlExt);
 
-    // Khusus Gofile CDN: axios hampir selalu kena 429. Pakai Playwright (sesi browser persistent,
-    // cookies + UA + TLS fingerprint identik dengan resolver) yang tidak kena rate-limit.
+    // Khusus Gofile CDN: butuh Authorization Bearer token + axios streaming untuk file 1GB+.
     if (/gofile\.io/i.test(downloadLink)) {
       log.info(`[Gofile] Download via axios streaming + Bearer token: ${path.basename(zipPath)}`);
+      const dlStartedAt = Date.now();
       let lastLogMB = 0;
+      let lastTgUpdate = 0;
+
+      // Bar visual 20 segment berbasis Unicode block
+      const makeBar = (pct) => {
+        const width = 20;
+        const filled = Math.round((pct / 100) * width);
+        return '█'.repeat(filled) + '░'.repeat(width - filled);
+      };
+      const fmtMB = (b) => (b / 1048576).toFixed(1);
+      const fmtETA = (sec) => {
+        if (!isFinite(sec) || sec < 0) return '~';
+        if (sec < 60) return `${Math.round(sec)}s`;
+        const m = Math.floor(sec / 60);
+        const s = Math.round(sec % 60);
+        return `${m}m ${s}s`;
+      };
+
       await gofileApi.downloadGofileFile(downloadLink, zipPath, (dlBytes, totBytes) => {
+        const elapsed = (Date.now() - dlStartedAt) / 1000;
         const mb = dlBytes / 1048576;
-        const totMB = totBytes ? (totBytes / 1048576).toFixed(1) : '?';
-        const pct = totBytes ? Math.floor((dlBytes / totBytes) * 100) : null;
-        // Log ke console tiap ~25MB agar kelihatan progress tapi tidak spam
-        if (mb - lastLogMB >= 25) {
-          log.info(`[Gofile] Progress: ${mb.toFixed(1)} / ${totMB} MB${pct !== null ? ` (${pct}%)` : ''}`);
+        const speedMBps = elapsed > 0 ? mb / elapsed : 0;
+        const pct = totBytes ? (dlBytes / totBytes) * 100 : null;
+        const etaSec = (totBytes && speedMBps > 0.01) ? ((totBytes - dlBytes) / 1048576) / speedMBps : null;
+
+        // Log ke console tiap ~25MB
+        if (mb - lastLogMB >= 25 || (totBytes && dlBytes === totBytes)) {
+          log.info(`[Gofile] ${fmtMB(dlBytes)} / ${totBytes ? fmtMB(totBytes) : '?'} MB${pct !== null ? ` (${pct.toFixed(1)}%)` : ''} @ ${speedMBps.toFixed(1)} MB/s`);
           lastLogMB = mb;
         }
-        const pText = pct !== null
-          ? `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${pct}% — ${mb.toFixed(1)} / ${totMB} MB</code>`
-          : `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${mb.toFixed(1)} MB ter-download</code>`;
+
+        // Throttle edit Telegram message ke ~2.5 detik agar tidak kena rate-limit edit
+        const now = Date.now();
+        if (now - lastTgUpdate < 2500 && !(totBytes && dlBytes === totBytes)) return;
+        lastTgUpdate = now;
+
+        let pText;
+        if (pct !== null) {
+          pText = `⬇️ <b>${fileName}</b>\n` +
+            `<code>${makeBar(pct)} ${pct.toFixed(1)}%</code>\n` +
+            `<code>${fmtMB(dlBytes)} / ${fmtMB(totBytes)} MB · ${speedMBps.toFixed(1)} MB/s · ETA ${fmtETA(etaSec)}</code>`;
+        } else {
+          pText = `⬇️ <b>${fileName}</b>\n` +
+            `<code>${fmtMB(dlBytes)} MB @ ${speedMBps.toFixed(1)} MB/s</code>`;
+        }
+
         if (jobId) queueManager.updateJob(jobId, pText);
         status(pText).catch(() => { });
       }, accountToken);
