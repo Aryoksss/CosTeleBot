@@ -103,79 +103,118 @@ async function resolveGofile(gofileUrl) {
 }
 
 /**
- * Download file dari Gofile CDN langsung lewat Playwright (sesi browser persistent).
- * Berbeda dengan axios, ini meniru perilaku browser penuh: UA + TLS fingerprint + cookies
- * (termasuk accountToken) identik dengan resolver — yang sama sekali tidak kena 429.
+ * Download file Gofile via axios streaming (tidak buffer ke RAM — aman untuk file 1GB+).
+ * Gofile CDN butuh `Authorization: Bearer <accountToken>` yang didapat dari resolveGofile().
  *
- * Chromium download manager streaming file ke disk, jadi file besar (>1GB) aman untuk VPS 512MB.
- *
- * @param {string} directUrl  direct link dari resolveGofile (store*.gofile.io/...)
- * @param {string} destPath   path file tujuan
- * @param {function} [onProgress] (downloadedBytes) => void — dipanggil ~setiap detik
- * @returns {Promise<number>} ukuran file akhir dalam byte
+ * @param {string} directUrl    direct link dari resolveGofile (store*.gofile.io/...)
+ * @param {string} destPath     path file tujuan
+ * @param {function} [onProgress] (downloadedBytes, totalBytes) => void — dipanggil tiap ~1 detik
+ * @param {string} [accountToken] Gofile account token (dari resolveGofile().accountToken)
+ * @returns {Promise<number>}   ukuran file akhir dalam byte
  */
 async function downloadGofileFile(directUrl, destPath, onProgress = null, accountToken = null) {
-  let ctx;
+  const axios = require('axios');
   const proxy = getProxyConfig();
   console.log(`[Gofile-DL] START url=${directUrl.slice(0, 80)}... proxy=${proxy ? proxy.server : 'none'}`);
-  try {
-    ctx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts({ acceptDownloads: true }));
-    console.log(`[Gofile-DL] context OK`);
 
-    // Gofile CDN mewajibkan header `Authorization: Bearer <accountToken>` untuk akses direct link.
-    // Token diterima sebagai argumen dari resolveGofile() agar tidak ada race antar context.
-    // Fallback: baca dari cookies context bila caller tidak forward.
-    if (!accountToken) {
-      const cookies = await ctx.cookies();
-      const tokenCookie = cookies.find(c => c.name === 'accountToken');
-      accountToken = tokenCookie ? tokenCookie.value : null;
+  if (!accountToken) {
+    // Fallback: kalau caller tidak forward, coba ambil dari persistent profile cookies.
+    // Butuh spawn Playwright sekali — lebih lambat tapi tetap works.
+    console.log(`[Gofile-DL] accountToken tidak di-forward, ambil dari cookies disk...`);
+    let tmpCtx;
+    try {
+      tmpCtx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts());
+      const cookies = await tmpCtx.cookies();
+      const c = cookies.find(x => x.name === 'accountToken');
+      if (c) accountToken = c.value;
+    } finally {
+      if (tmpCtx) await tmpCtx.close().catch(() => { });
     }
-    console.log(`[Gofile-DL] accountToken: ${accountToken ? '***(' + accountToken.length + ' chars)' : 'NONE'}`);
-
-    console.log(`[Gofile-DL] fetching via context.request.get...`);
-    const reqHeaders = {
-      'Referer': 'https://gofile.io/',
-      'User-Agent': UA,
-    };
-    if (accountToken) reqHeaders['Authorization'] = `Bearer ${accountToken}`;
-
-    const res = await ctx.request.get(directUrl, {
-      headers: reqHeaders,
-      timeout: 300000, // 5 menit
-    });
-    const status = res.status();
-    const ct = res.headers()['content-type'] || '';
-    const cl = parseInt(res.headers()['content-length'] || '0', 10);
-    console.log(`[Gofile-DL] response status=${status} content-type=${ct} content-length=${cl}`);
-
-    if (status !== 200) {
-      throw new Error(`Gofile CDN HTTP ${status}`);
-    }
-    if (ct.startsWith('text/html')) {
-      const body = (await res.text()).slice(0, 300);
-      throw new Error(`Gofile CDN balas HTML (link expired atau session invalid). Preview: ${body.replace(/\s+/g, ' ')}`);
-    }
-
-    // Stream body ke disk dengan progress polling.
-    // Playwright response.body() return Buffer full — oke untuk file ≤ 500MB di VPS 1GB RAM,
-    // tapi untuk file > 1GB kita butuh streaming. Strategi: coba response.body() dulu;
-    // kalau butuh true streaming, pakai axios dengan cookies + Referer.
-    console.log(`[Gofile-DL] downloading body to memory (will flush to disk)...`);
-    const body = await res.body();
-    console.log(`[Gofile-DL] body received: ${(body.length / 1048576).toFixed(1)}MB`);
-    fs.writeFileSync(destPath, body);
-    if (onProgress) onProgress(body.length);
-
-    const size = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
-    console.log(`[Gofile-DL] END size=${(size / 1048576).toFixed(1)}MB`);
-    return size;
-  } catch (err) {
-    console.error(`[Gofile-DL] error: ${err.message}`);
-    console.error(`[Gofile-DL] stack: ${err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : 'n/a'}`);
-    throw err;
-  } finally {
-    if (ctx) await ctx.close().catch(() => { });
   }
+  console.log(`[Gofile-DL] accountToken: ${accountToken ? '***(' + accountToken.length + ' chars)' : 'NONE'}`);
+
+  // Siapkan proxy agent untuk axios jika GOFILE_PROXY di-set (SOCKS5/HTTP).
+  const reqCfg = {
+    method: 'GET',
+    url: directUrl,
+    responseType: 'stream',
+    timeout: 3600000, // 1 jam untuk file raksasa
+    headers: {
+      'User-Agent': UA,
+      'Referer': 'https://gofile.io/',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+    // maxContentLength: infinity ensures axios doesn't cut big files
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+    validateStatus: () => true,
+  };
+  if (accountToken) reqCfg.headers['Authorization'] = `Bearer ${accountToken}`;
+  if (proxy) {
+    try {
+      const { HttpsProxyAgent } = require('https-proxy-agent');
+      const { SocksProxyAgent } = require('socks-proxy-agent');
+      const proxyUrl = proxy.username
+        ? `${proxy.server.replace('://', `://${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`)}`
+        : proxy.server;
+      reqCfg.httpsAgent = proxy.server.startsWith('socks')
+        ? new SocksProxyAgent(proxyUrl)
+        : new HttpsProxyAgent(proxyUrl);
+      reqCfg.httpAgent = reqCfg.httpsAgent;
+      console.log(`[Gofile-DL] axios via proxy agent: ${proxy.server}`);
+    } catch (e) {
+      console.log(`[Gofile-DL] proxy agent load gagal (${e.message}), fallback no-proxy`);
+    }
+  }
+
+  console.log(`[Gofile-DL] axios GET streaming...`);
+  const res = await axios(reqCfg);
+  const status = res.status;
+  const ct = String(res.headers['content-type'] || '').toLowerCase();
+  const total = parseInt(res.headers['content-length'] || '0', 10);
+  console.log(`[Gofile-DL] response status=${status} content-type=${ct} content-length=${total} (${(total / 1048576).toFixed(1)}MB)`);
+
+  if (status !== 200) {
+    try { res.data.destroy(); } catch (_) { }
+    throw new Error(`Gofile CDN HTTP ${status}`);
+  }
+  if (ct.startsWith('text/html')) {
+    try { res.data.destroy(); } catch (_) { }
+    throw new Error(`Gofile CDN balas HTML (link expired / accountToken invalid). Pastikan resolve terbaru dan accountToken tidak bocor sesi lama.`);
+  }
+
+  // Stream ke disk dengan progress callback tiap ~1 detik.
+  return await new Promise((resolve, reject) => {
+    const writer = fs.createWriteStream(destPath);
+    let downloaded = 0;
+    let lastTick = Date.now();
+    res.data.on('data', (chunk) => {
+      downloaded += chunk.length;
+      const now = Date.now();
+      if (onProgress && now - lastTick >= 1000) {
+        onProgress(downloaded, total);
+        lastTick = now;
+      }
+    });
+    res.data.on('error', (err) => {
+      writer.close();
+      if (fs.existsSync(destPath)) { try { fs.unlinkSync(destPath); } catch (_) { } }
+      reject(new Error(`Stream error: ${err.message}`));
+    });
+    writer.on('error', (err) => {
+      try { res.data.destroy(); } catch (_) { }
+      if (fs.existsSync(destPath)) { try { fs.unlinkSync(destPath); } catch (_) { } }
+      reject(new Error(`Write error: ${err.message}`));
+    });
+    writer.on('finish', () => {
+      if (onProgress) onProgress(downloaded, total); // tick final
+      const size = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
+      console.log(`[Gofile-DL] END size=${(size / 1048576).toFixed(1)}MB downloaded=${(downloaded / 1048576).toFixed(1)}MB`);
+      resolve(size);
+    });
+    res.data.pipe(writer);
+  });
 }
 
 module.exports = {

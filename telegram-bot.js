@@ -651,16 +651,20 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     // Khusus Gofile CDN: axios hampir selalu kena 429. Pakai Playwright (sesi browser persistent,
     // cookies + UA + TLS fingerprint identik dengan resolver) yang tidak kena rate-limit.
     if (/gofile\.io/i.test(downloadLink)) {
-      log.info(`[Gofile] Download via Playwright (bypass 429): ${path.basename(zipPath)}`);
+      log.info(`[Gofile] Download via axios streaming + Bearer token: ${path.basename(zipPath)}`);
       let lastLogMB = 0;
-      await gofileApi.downloadGofileFile(downloadLink, zipPath, (dlBytes) => {
+      await gofileApi.downloadGofileFile(downloadLink, zipPath, (dlBytes, totBytes) => {
         const mb = dlBytes / 1048576;
-        // Log ke console tiap ~20MB agar kelihatan progress tapi tidak spam
-        if (mb - lastLogMB >= 20) {
-          log.info(`[Gofile] Progress: ${mb.toFixed(1)} MB`);
+        const totMB = totBytes ? (totBytes / 1048576).toFixed(1) : '?';
+        const pct = totBytes ? Math.floor((dlBytes / totBytes) * 100) : null;
+        // Log ke console tiap ~25MB agar kelihatan progress tapi tidak spam
+        if (mb - lastLogMB >= 25) {
+          log.info(`[Gofile] Progress: ${mb.toFixed(1)} / ${totMB} MB${pct !== null ? ` (${pct}%)` : ''}`);
           lastLogMB = mb;
         }
-        const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${mb.toFixed(1)} MB ter-download</code>`;
+        const pText = pct !== null
+          ? `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${pct}% — ${mb.toFixed(1)} / ${totMB} MB</code>`
+          : `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${mb.toFixed(1)} MB ter-download</code>`;
         if (jobId) queueManager.updateJob(jobId, pText);
         status(pText).catch(() => { });
       }, accountToken);
