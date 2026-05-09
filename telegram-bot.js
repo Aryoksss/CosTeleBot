@@ -845,7 +845,22 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
   } catch (err) {
     log.error(`[User ${chatId}] processDownload gagal: ${err.message}`);
     log.error(`[User ${chatId}] Stack: ${err.stack ? err.stack.split('\n').slice(0, 4).join(' | ') : 'n/a'}`);
-    await status(`❌ <b>Error:</b> <code>${err.message}</code>`);
+
+    // Pesan actionable khusus untuk error yang sering muncul
+    let userMsg = `❌ <b>Error:</b> <code>${escHtml(err.message.slice(0, 300))}</code>`;
+    if (/Monthly download limit exceeded|1000GB per 30 days/i.test(err.message)) {
+      userMsg = `❌ <b>Kuota Gofile VPS habis</b>\n\n` +
+        `Gofile batasi <b>1000 GB/30 hari per IP</b>. IP VPS sekarang sudah over quota — rolling window, reset 30 hari dari download pertama.\n\n` +
+        `<b>Solusi:</b>\n` +
+        `• Aktifkan proxy (WARP) di VPS untuk rotate IP\n` +
+        `• Tunggu quota reset\n` +
+        `• Download manual dari link asli`;
+    } else if (/HTTP 429/i.test(err.message)) {
+      userMsg = `❌ <b>Gofile rate-limit.</b> Server CDN menolak 3x berturut-turut.\n<code>${escHtml(err.message.slice(0, 200))}</code>`;
+    } else if (/ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(err.message)) {
+      userMsg = `❌ <b>Koneksi ke server gagal.</b> Cek koneksi internet VPS.\n<code>${escHtml(err.message.slice(0, 200))}</code>`;
+    }
+    await status(userMsg);
     await rimraf(unzipDir); // Bersihkan juga di catch kalau ada error lain
   } finally {
     // Hanya hapus file zip saja di sini (kalau masih ada)
