@@ -449,6 +449,8 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     // Tandai status jadi Ekstraksi
     if (jobId) queueManager.updateJob(jobId, '📦 Mengekstrak berkas arsip...');
 
+    let fallbackRaw = false;
+
     if (isArchive(zipPath)) {
       await status('📦 <b>Mengekstrak arsip...</b>');
       try {
@@ -456,9 +458,10 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
         if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
       } catch (extErr) {
         log.warn(`Ekstraksi gagal: ${extErr.message}, mengirim mentahan...`);
-        await status(`⚠️ <b>Gagal ekstrak:</b> ${extErr.message}. Mengirim file mentahan...`);
+        await status(`⚠️ <b>Gagal ekstrak arsip.</b> Mengirim file mentahan langsung ke Tuan...`);
         if (!fs.existsSync(unzipDir)) fs.mkdirSync(unzipDir);
         fs.renameSync(zipPath, path.join(unzipDir, path.basename(zipPath)));
+        fallbackRaw = true; // Tandai bahwa ini file mentahan, jangan filter!
       }
     } else {
       // Bukan arsip (contoh: unduhan file .mp4 langsung), pindahkan agar tetap dikirim
@@ -468,7 +471,10 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
 
     const files = collectFiles(unzipDir);
     const medias = files.filter(isMedia);
-    const docs = files.filter(f => !isMedia(f) && !isArchive(f));
+    // Jika fallbackRaw, kirim SEMUA file termasuk arsip mentahan sebagai dokumen
+    const docs = fallbackRaw
+      ? files.filter(f => !isMedia(f))
+      : files.filter(f => !isMedia(f) && !isArchive(f));
     const total = medias.length + docs.length;
 
     if (total === 0) return status('⚠️ Arsip kosong atau berpassword proteksi tingkat tinggi.');
