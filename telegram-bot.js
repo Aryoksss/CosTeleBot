@@ -411,8 +411,8 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
           btns.push([{ text: `⬇️ ${f.name}`, callback_data: `dls_gofile_${f.id}` }]);
         });
 
-        // Simpan url utama ke state agar callback query ntar tau url asalnya
-        userStates.set(chatId, { step: 'SELECT_GOFILE_FILE', url: url });
+        // Simpan url utama + semua file beserta direct link ke state agar tidak perlu resolve ulang
+        userStates.set(chatId, { step: 'SELECT_GOFILE_FILE', url: url, files: gofileRes.files, cookie: gofileRes.cookie });
 
         await bot.editMessageText(textOpts, {
           chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
@@ -1252,12 +1252,22 @@ function startBot() {
       const state = userStates.get(chatId);
       if (!state || state.step !== 'SELECT_GOFILE_FILE') return bot.sendMessage(chatId, 'Sesi kadaluarsa. Coba klik download ulang dari menu.');
 
-      const gofileUrl = state.url + '#file=' + fileId;
       userStates.delete(chatId);
 
-      queueManager.addJob(chatId, `Gofile (File ${fileId})`, async (jobId) => {
-        await processDownload(bot, chatId, gofileUrl, null, 'gofile', jobId);
-      }, bot);
+      // Gunakan direct link dari cache state (TANPA resolve Playwright lagi) untuk mencegah 429 rate limit
+      const cachedFile = state.files && state.files.find(f => f.id === fileId);
+      if (cachedFile && cachedFile.link) {
+        log.info(`[Gofile] Menggunakan cache direct link untuk file: ${cachedFile.name}`);
+        queueManager.addJob(chatId, `Gofile: ${cachedFile.name}`, async (jobId) => {
+          await processDownload(bot, chatId, cachedFile.link, null, 'direct', jobId);
+        }, bot);
+      } else {
+        // Fallback: resolve ulang jika cache tidak ada (misal bot restart di tengah sesi)
+        const gofileUrl = state.url + '#file=' + fileId;
+        queueManager.addJob(chatId, `Gofile (File ${fileId})`, async (jobId) => {
+          await processDownload(bot, chatId, gofileUrl, null, 'gofile', jobId);
+        }, bot);
+      }
       return;
     }
 
