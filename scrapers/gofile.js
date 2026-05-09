@@ -8,14 +8,40 @@ chromium.use(StealthPlugin());
 const PROFILE_DIR = path.resolve('./browser_profile_gofile');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+/**
+ * Proxy opsional untuk bypass banned IP datacenter (DO/AWS/GCP/Azure).
+ * Set GOFILE_PROXY=socks5://127.0.0.1:40000 (Cloudflare WARP proxy mode) di .env.
+ * Format didukung Playwright: http://host:port, https://host:port, socks5://host:port.
+ */
+function getProxyConfig() {
+  const raw = process.env.GOFILE_PROXY || process.env.HTTPS_PROXY || '';
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    const cfg = { server: `${u.protocol}//${u.host}` };
+    if (u.username) cfg.username = decodeURIComponent(u.username);
+    if (u.password) cfg.password = decodeURIComponent(u.password);
+    return cfg;
+  } catch (_) {
+    return null;
+  }
+}
+
+function buildLaunchOpts(extra = {}) {
+  const proxy = getProxyConfig();
+  return {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    userAgent: UA,
+    ...(proxy ? { proxy } : {}),
+    ...extra,
+  };
+}
+
 async function resolveGofile(gofileUrl) {
   let ctx;
   try {
-    ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      userAgent: UA,
-    });
+    ctx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts());
 
     const page = await ctx.newPage();
     const files = [];
@@ -82,12 +108,7 @@ async function resolveGofile(gofileUrl) {
 async function downloadGofileFile(directUrl, destPath, onProgress = null) {
   let ctx;
   try {
-    ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      userAgent: UA,
-      acceptDownloads: true,
-    });
+    ctx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts({ acceptDownloads: true }));
 
     const page = await ctx.newPage();
     await page.goto('about:blank');
