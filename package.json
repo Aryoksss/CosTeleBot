@@ -12,12 +12,12 @@
     "axios": "^1.14.0",
     "cheerio": "^1.0.0",
     "dotenv": "^17.4.0",
-    "https-proxy-agent": "^9.0.0",
+    "https-proxy-agent": "^7.0.6",
     "node-telegram-bot-api": "^0.67.0",
     "playwright": "^1.59.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "sharp": "^0.34.5",
-    "socks-proxy-agent": "^10.0.0"
+    "socks-proxy-agent": "^8.0.5"
   }
 }

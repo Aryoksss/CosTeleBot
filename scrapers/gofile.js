@@ -179,8 +179,21 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
   if (accountToken) reqCfg.headers['Authorization'] = `Bearer ${accountToken}`;
   if (proxy) {
     try {
-      const { HttpsProxyAgent } = require('https-proxy-agent');
-      const { SocksProxyAgent } = require('socks-proxy-agent');
+      // https-proxy-agent v7 + socks-proxy-agent v8 = CommonJS compatible.
+      // v9+/v9+ ESM-only yang butuh dynamic import.
+      let HttpsProxyAgent, SocksProxyAgent;
+      try {
+        ({ HttpsProxyAgent } = require('https-proxy-agent'));
+        ({ SocksProxyAgent } = require('socks-proxy-agent'));
+      } catch (requireErr) {
+        // Fallback: dynamic import untuk package ESM-only
+        console.log(`[Gofile-DL] require gagal (${requireErr.code}), fallback dynamic import`);
+        const https = await import('https-proxy-agent');
+        const socks = await import('socks-proxy-agent');
+        HttpsProxyAgent = https.HttpsProxyAgent;
+        SocksProxyAgent = socks.SocksProxyAgent;
+      }
+
       const proxyUrl = proxy.username
         ? `${proxy.server.replace('://', `://${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`)}`
         : proxy.server;
