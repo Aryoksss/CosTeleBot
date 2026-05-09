@@ -1,10 +1,17 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
+const { chromium } = require('playwright-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const path = require('path');
+
+chromium.use(StealthPlugin());
 
 const BASE_URL = 'https://rule34video.com';
+const PROFILE_DIR = path.resolve('./browser_profile_r34');
+
 const r34Axios = axios.create({
     headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
         'Referer': BASE_URL
     },
     timeout: 30000
@@ -51,7 +58,6 @@ async function parseVideoList(url) {
  * Menyedot katalog video (pencarian atau update terbaru).
  */
 async function scrapeListing(page = 1, query = null) {
-    // KVS search uses ?from_videos=N for pagination (N = page number)
     let url = query
         ? `${BASE_URL}/search/${encodeURIComponent(query)}/${page > 1 ? '?from_videos=' + page : ''}`
         : `${BASE_URL}/latest-updates/${page}/`;
@@ -60,20 +66,33 @@ async function scrapeListing(page = 1, query = null) {
 }
 
 /**
- * Mendapatkan SEMUA link download `.mp4` dari halaman pemutar video.
+ * Mendapatkan SEMUA link download `.mp4` menggunakan Playwright
+ * agar token autentikasi (v-acctoken) bisa terbentuk dengan benar.
  * Return: Array of { label, url } diurutkan dari resolusi tertinggi ke terendah.
  */
 async function scrapePostDetail(url) {
+    let ctx;
     try {
-        const res = await r34Axios.get(url);
-        const $ = cheerio.load(res.data);
+        ctx = await chromium.launchPersistentContext(PROFILE_DIR, {
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        });
+
+        const page = await ctx.newPage();
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        // Tunggu sebentar sampai JS merender link download
+        await page.waitForTimeout(2500);
+
+        const content = await page.content();
+        const $ = cheerio.load(content);
 
         const downloads = [];
         $('a').each((i, el) => {
             const href = $(el).attr('href');
             const text = $(el).text().trim();
             if (href && (href.includes('get_file') || href.includes('download=true'))) {
-                downloads.push({ label: text || 'MP4', url: href });
+                downloads.push({ label: text || 'MP4', url: href.startsWith('http') ? href : BASE_URL + href });
             }
         });
 
@@ -85,10 +104,13 @@ async function scrapePostDetail(url) {
             return (aIdx === -1 ? 99 : aIdx) - (bIdx === -1 ? 99 : bIdx);
         });
 
+        console.log(`[R34Video] Ditemukan ${downloads.length} link download dari ${url}`);
         return downloads;
     } catch (e) {
         console.error(`[R34Video] Error fetching detail: ${url} — ${e.message}`);
         return [];
+    } finally {
+        if (ctx) await ctx.close();
     }
 }
 
