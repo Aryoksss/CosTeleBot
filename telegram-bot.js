@@ -296,25 +296,30 @@ async function extractArchive(archivePath, destDir, password = null) {
   const ext = path.extname(archivePath).toLowerCase();
   const { execSync } = require('child_process');
 
-  if (ext === '.zip' || ext === '.rar') {
+  if (ext === '.zip' || ext === '.rar' || ext === '.7z') {
     const candidates = [password, 'cosplaytele', '4KHD', '4khd', null].filter((p, i, arr) => arr.indexOf(p) === i);
     let success = false;
     for (const pw of candidates) {
       try {
-        if (ext === '.zip') {
-          const pwFlag = pw ? `-p"${pw}"` : '';
-          execSync(`7z x "${archivePath}" ${pwFlag} -o"${destDir}" -y`, { stdio: 'ignore' });
-        } else {
-          // Untuk Linux VPS, .rar jauh lebih handal di-decode menggunakan modul unrar asli bawaan VPS
-          const pwFlag = pw ? `-p"${pw}"` : '-p-'; // -p- menolak password kosong prompt
-          execSync(`unrar x -y ${pwFlag} "${archivePath}" "${destDir}/"`, { stdio: 'ignore' });
-        }
+        // Gunakan 7z untuk semua tipe arsip (cross-platform: Windows & Linux)
+        const pwFlag = pw ? `-p"${pw}"` : '';
+        execSync(`7z x "${archivePath}" ${pwFlag} -o"${destDir}" -y`, { stdio: 'ignore' });
         success = true;
-        log.ok(`Archive extracted via Native OS (pw=${pw || 'none'})`);
+        log.ok(`Archive extracted via 7z (ext=${ext}, pw=${pw || 'none'})`);
         break;
       } catch (e) { }
+      // Fallback ke unrar khusus .rar jika 7z gagal (hanya tersedia di Linux VPS)
+      if (ext === '.rar') {
+        try {
+          const pwFlag = pw ? `-p"${pw}"` : '-p-';
+          execSync(`unrar x -y ${pwFlag} "${archivePath}" "${destDir}/"`, { stdio: 'ignore' });
+          success = true;
+          log.ok(`Archive extracted via unrar fallback (pw=${pw || 'none'})`);
+          break;
+        } catch (e) { }
+      }
     }
-    if (!success) throw new Error("Gagal ekstrak Arsip via OS Native, password mungkin salah/corrupted.");
+    if (!success) throw new Error(`Gagal ekstrak arsip '${path.basename(archivePath)}' — password salah atau file rusak.`);
   }
 
   // Nested extract
@@ -449,6 +454,7 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     // Tandai status jadi Ekstraksi
     if (jobId) queueManager.updateJob(jobId, '📦 Mengekstrak berkas arsip...');
 
+    log.info(`[Process] File siap diproses: ${path.basename(zipPath)} (${(fs.existsSync(zipPath) ? fs.statSync(zipPath).size / 1024 : 0).toFixed(0)} KB)`);
     let fallbackRaw = false;
 
     if (isArchive(zipPath)) {
