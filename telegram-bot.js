@@ -634,14 +634,24 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     // cookies + UA + TLS fingerprint identik dengan resolver) yang tidak kena rate-limit.
     if (/gofile\.io/i.test(downloadLink)) {
       log.info(`[Gofile] Download via Playwright (bypass 429): ${path.basename(zipPath)}`);
+      let lastLogMB = 0;
       await gofileApi.downloadGofileFile(downloadLink, zipPath, (dlBytes) => {
-        const mb = (dlBytes / 1048576).toFixed(1);
-        const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${mb} MB ter-download</code>`;
+        const mb = dlBytes / 1048576;
+        // Log ke console tiap ~20MB agar kelihatan progress tapi tidak spam
+        if (mb - lastLogMB >= 20) {
+          log.info(`[Gofile] Progress: ${mb.toFixed(1)} MB`);
+          lastLogMB = mb;
+        }
+        const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${mb.toFixed(1)} MB ter-download</code>`;
         if (jobId) queueManager.updateJob(jobId, pText);
         status(pText).catch(() => { });
       });
       // Tracking trafik ke botStats (biasanya ditangani downloadStream)
-      if (fs.existsSync(zipPath)) botStats.downloadedBytes += fs.statSync(zipPath).size;
+      if (fs.existsSync(zipPath)) {
+        const finalMB = fs.statSync(zipPath).size / 1048576;
+        log.ok(`[Gofile] Download selesai: ${finalMB.toFixed(1)} MB → ${path.basename(zipPath)}`);
+        botStats.downloadedBytes += fs.statSync(zipPath).size;
+      }
     } else {
       // Gofile CDN kadang validasi Referer/UA. Kirim header yg match session browser resolver.
       const dlExtra = {};
@@ -778,6 +788,8 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     await rimraf(unzipDir);
 
   } catch (err) {
+    log.error(`[User ${chatId}] processDownload gagal: ${err.message}`);
+    log.error(`[User ${chatId}] Stack: ${err.stack ? err.stack.split('\n').slice(0, 4).join(' | ') : 'n/a'}`);
     await status(`❌ <b>Error:</b> <code>${err.message}</code>`);
     await rimraf(unzipDir); // Bersihkan juga di catch kalau ada error lain
   } finally {

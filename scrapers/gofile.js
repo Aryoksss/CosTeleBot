@@ -40,8 +40,11 @@ function buildLaunchOpts(extra = {}) {
 
 async function resolveGofile(gofileUrl) {
   let ctx;
+  const proxy = getProxyConfig();
   try {
+    console.log(`[Gofile] resolveGofile START url=${gofileUrl.split('#')[0]} proxy=${proxy ? proxy.server : 'none'}`);
     ctx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts());
+    console.log(`[Gofile] Playwright context OK`);
 
     const page = await ctx.newPage();
     const files = [];
@@ -70,8 +73,12 @@ async function resolveGofile(gofileUrl) {
       });
     });
 
-    await page.goto(gofileUrl.split('#')[0], { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => { });
+    await page.goto(gofileUrl.split('#')[0], { waitUntil: 'domcontentloaded', timeout: 30000 }).catch((e) => {
+      console.log(`[Gofile] page.goto gagal/timeout: ${e.message}`);
+    });
+    console.log(`[Gofile] page loaded, menunggu XHR /contents/...`);
     await Promise.race([apiInterception, page.waitForTimeout(8000)]);
+    console.log(`[Gofile] Files ditemukan: ${files.length}`);
 
     // Ambil cookies (untuk fallback axios) + accountToken secara spesifik
     const cookies = await ctx.cookies();
@@ -86,10 +93,12 @@ async function resolveGofile(gofileUrl) {
     };
 
   } catch (err) {
-    console.error(`Gofile resolve error: ${err.message}`);
+    console.error(`[Gofile] resolve error: ${err.message}`);
+    console.error(`[Gofile] stack: ${err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : 'n/a'}`);
     return null;
   } finally {
-    if (ctx) await ctx.close();
+    if (ctx) await ctx.close().catch(() => { });
+    console.log(`[Gofile] resolveGofile END`);
   }
 }
 
@@ -107,14 +116,18 @@ async function resolveGofile(gofileUrl) {
  */
 async function downloadGofileFile(directUrl, destPath, onProgress = null) {
   let ctx;
+  const proxy = getProxyConfig();
+  console.log(`[Gofile-DL] START url=${directUrl.slice(0, 80)}... proxy=${proxy ? proxy.server : 'none'}`);
   try {
     ctx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts({ acceptDownloads: true }));
+    console.log(`[Gofile-DL] context OK, buka page`);
 
     const page = await ctx.newPage();
     await page.goto('about:blank');
 
     // Mulai listener SEBELUM trigger download event
     const downloadPromise = page.waitForEvent('download', { timeout: 120000 });
+    console.log(`[Gofile-DL] waiting for download event (max 120s)...`);
 
     // Trigger download via anchor click (paling reliable cross-platform)
     await page.evaluate((url) => {
@@ -127,10 +140,12 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null) {
     }, directUrl);
 
     const download = await downloadPromise;
+    console.log(`[Gofile-DL] download event terpicu, mulai streaming`);
 
     // Polling ukuran file sementara Chromium untuk progress bar realistic.
     // download.path() return path cache Chromium, file sudah mulai terisi streaming.
     const tmpPath = await download.path();
+    console.log(`[Gofile-DL] chromium tmp path: ${tmpPath}`);
     let stopPolling = false;
     const pollTimer = (async () => {
       while (!stopPolling) {
@@ -148,6 +163,7 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null) {
     await download.saveAs(destPath);
     stopPolling = true;
     await pollTimer;
+    console.log(`[Gofile-DL] saveAs complete → ${destPath}`);
 
     // Final progress tick
     if (onProgress && fs.existsSync(destPath)) {
@@ -155,9 +171,14 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null) {
     }
 
     const size = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
+    console.log(`[Gofile-DL] END size=${(size / 1048576).toFixed(1)}MB`);
     return size;
+  } catch (err) {
+    console.error(`[Gofile-DL] error: ${err.message}`);
+    console.error(`[Gofile-DL] stack: ${err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : 'n/a'}`);
+    throw err;
   } finally {
-    if (ctx) await ctx.close();
+    if (ctx) await ctx.close().catch(() => { });
   }
 }
 
