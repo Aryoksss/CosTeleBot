@@ -607,17 +607,28 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     // Untuk media (mp4/jpg/dll), biarkan lewat karena beberapa CDN balas `application/octet-stream`.
     const dlExt = path.extname(fileName).toLowerCase();
     const isArchiveTarget = ['.zip', '.rar', '.7z'].includes(dlExt);
-    // Gofile CDN kadang validasi Referer/UA. Kirim header yg match session browser resolver.
-    const dlExtra = {};
+
+    // Khusus Gofile CDN: axios hampir selalu kena 429. Pakai Playwright (sesi browser persistent,
+    // cookies + UA + TLS fingerprint identik dengan resolver) yang tidak kena rate-limit.
     if (/gofile\.io/i.test(downloadLink)) {
-      dlExtra.referer = 'https://gofile.io/';
-      dlExtra.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      log.info(`[Gofile] Download via Playwright (bypass 429): ${path.basename(zipPath)}`);
+      await gofileApi.downloadGofileFile(downloadLink, zipPath, (dlBytes) => {
+        const mb = (dlBytes / 1048576).toFixed(1);
+        const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${mb} MB ter-download</code>`;
+        if (jobId) queueManager.updateJob(jobId, pText);
+        status(pText).catch(() => { });
+      });
+      // Tracking trafik ke botStats (biasanya ditangani downloadStream)
+      if (fs.existsSync(zipPath)) botStats.downloadedBytes += fs.statSync(zipPath).size;
+    } else {
+      // Gofile CDN kadang validasi Referer/UA. Kirim header yg match session browser resolver.
+      const dlExtra = {};
+      await downloadStream(downloadLink, zipPath, async (pct, dl, tot) => {
+        const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${pct}%  ─  ${(dl / 1048576).toFixed(1)} MB / ${(tot ? (tot / 1048576).toFixed(1) : '?')} MB</code>`;
+        if (jobId) queueManager.updateJob(jobId, pText);
+        await status(pText);
+      }, cookie, { expectBinary: isArchiveTarget, ...dlExtra });
     }
-    await downloadStream(downloadLink, zipPath, async (pct, dl, tot) => {
-      const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${pct}%  ─  ${(dl / 1048576).toFixed(1)} MB / ${(tot ? (tot / 1048576).toFixed(1) : '?')} MB</code>`;
-      if (jobId) queueManager.updateJob(jobId, pText);
-      await status(pText);
-    }, cookie, { expectBinary: isArchiveTarget, ...dlExtra });
 
     const finalSize = fs.existsSync(zipPath) ? fs.statSync(zipPath).size : 0;
     if (finalSize > 0) statsDb.addDownloadSize(chatId, finalSize);
