@@ -64,25 +64,43 @@ async function scrapePostDetail(postUrl) {
   try {
     const { data: html } = await httpClient.get(postUrl);
     const $ = cheerio.load(html);
-    
+
     const links = {
       gofile: null,
       sorafolder: null,
       telegram: null,
       terabox: null,
-      mediafire: null
+      mediafire: null,
+      password: null
     };
 
     $('a[href]').each((i, el) => {
       const h = $(el).attr('href');
       if (!h) return;
-      
+
       if (h.includes('gofile.io')) links.gofile = h;
       else if (h.includes('sorafolder.com')) links.sorafolder = h;
       else if (h.includes('t.me')) links.telegram = h;
       else if (h.includes('terabox.com')) links.terabox = h;
       else if (h.includes('mediafire.com')) links.mediafire = h;
     });
+
+    // Scrape password arsip dari body post. Cosplaytele biasa taruh di <strong>/<b>/text dengan
+    // format "Password: xxx" atau "Pass: xxx" atau "PW: xxx" (case-insensitive).
+    const bodyText = $('.entry-content, article, .post-content, body').text();
+    const pwPatterns = [
+      /password\s*[:=]\s*([A-Za-z0-9_\-.@#$!]+)/i,
+      /\bpass\s*[:=]\s*([A-Za-z0-9_\-.@#$!]+)/i,
+      /\bpw\s*[:=]\s*([A-Za-z0-9_\-.@#$!]+)/i,
+      /unzip\s*password\s*[:=]\s*([A-Za-z0-9_\-.@#$!]+)/i,
+    ];
+    for (const re of pwPatterns) {
+      const m = bodyText.match(re);
+      if (m && m[1] && m[1].length >= 3 && m[1].length <= 64) {
+        links.password = m[1].trim();
+        break;
+      }
+    }
 
     return links;
   } catch (err) {

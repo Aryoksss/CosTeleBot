@@ -445,9 +445,20 @@ async function extractArchive(archivePath, destDir, password = null) {
   const ext = path.extname(archivePath).toLowerCase();
   const { spawnSync } = require('child_process');
 
+  // Password candidates order:
+  // 1. Yang dilewatkan caller (scraped dari post / input user) → paling prioritas
+  // 2. Dari env ARCHIVE_PASSWORDS (CSV), untuk override global tanpa edit kode
+  // 3. Daftar default diketahui (cosplaytele.com paling umum saat ini, lalu varian lama)
+  // 4. null (arsip tanpa password)
+  const envPasswords = String(process.env.ARCHIVE_PASSWORDS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const defaults = ['cosplaytele.com', 'Cosplaytele.com', 'cosplaytele', 'Cosplaytele', '4KHD', '4khd'];
+  const candidates = [password, ...envPasswords, ...defaults, null]
+    .filter((p, i, arr) => arr.indexOf(p) === i); // dedup
+
   if (ext === '.zip' || ext === '.rar' || ext === '.7z') {
-    const candidates = [password, 'cosplaytele', '4KHD', '4khd', null].filter((p, i, arr) => arr.indexOf(p) === i);
     let success = false;
+    let lastStderr = '';
     for (const pw of candidates) {
       try {
         // Pakai spawnSync argv-array (bukan shell string concat) agar password
@@ -455,13 +466,19 @@ async function extractArchive(archivePath, destDir, password = null) {
         const args = ['x', archivePath];
         if (pw) args.push(`-p${pw}`); else args.push('-p'); // -p (no pw) cegah prompt interaktif
         args.push(`-o${destDir}`, '-y');
-        const r = spawnSync(PATH_7ZA, args, { stdio: 'ignore' });
+        const r = spawnSync(PATH_7ZA, args, { encoding: 'utf8' });
         if (r.status === 0) {
           success = true;
           log.ok(`Archive extracted via 7z (ext=${ext}, pw=${pw ? '***' : 'none'})`);
           break;
+        } else {
+          // Simpan stderr attempt terakhir untuk diagnostic
+          lastStderr = String(r.stderr || r.stdout || '').slice(0, 300);
+          log.warn(`[7z] pw='${pw ? '***' : 'none'}' → exit=${r.status}: ${lastStderr.split('\n').find(l => l.includes('ERROR') || l.includes('Wrong') || l.includes('Cannot')) || lastStderr.slice(0, 120)}`);
         }
-      } catch (e) { }
+      } catch (e) {
+        lastStderr = e.message;
+      }
       // Fallback ke unrar khusus .rar jika 7z gagal (hanya tersedia di Linux VPS)
       if (ext === '.rar') {
         try {
@@ -477,7 +494,12 @@ async function extractArchive(archivePath, destDir, password = null) {
         } catch (e) { }
       }
     }
-    if (!success) throw new Error(`Gagal ekstrak arsip '${path.basename(archivePath)}' — password salah atau file rusak.`);
+    if (!success) {
+      const hint = lastStderr.toLowerCase().includes('wrong password')
+        ? 'password tidak cocok'
+        : (lastStderr.toLowerCase().includes('headers error') ? 'header terenkripsi / password salah di header-level' : 'file korup');
+      throw new Error(`Gagal ekstrak arsip '${path.basename(archivePath)}' — ${hint}. Detail: ${lastStderr.slice(0, 160)}`);
+    }
   }
 
   // Nested extract
@@ -658,7 +680,24 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
         if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
       } catch (extErr) {
         log.warn(`Ekstraksi gagal: ${extErr.message}, mengirim mentahan...`);
-        await status(`⚠️ <b>Gagal ekstrak arsip.</b> Mengirim file mentahan langsung ke Tuan...`);
+        // Kalau arsip oversize lebih besar dari limit Telegram, kirim dokumen mentahan
+        // akan silent-skip di sendOne (size > VIDEO_MAX_BYTES) — jadi user gak dapat apa-apa.
+        // Berikan pesan jelas + link download manual alih-alih silent-fail.
+        const archSize = fs.existsSync(zipPath) ? fs.statSync(zipPath).size : 0;
+        const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1024 / 1024);
+        if (archSize > CONFIG.VIDEO_MAX_BYTES) {
+          const sizeMB = (archSize / 1024 / 1024).toFixed(1);
+          await status(
+            `⚠️ <b>Password arsip tidak cocok</b> dan file <b>${sizeMB}MB</b> melebihi limit upload ${limitMB}MB.\n\n` +
+            `Silakan download manual via link asli:\n<code>${escHtml(url)}</code>\n\n` +
+            `Lalu extract pakai salah satu password: <code>cosplaytele.com</code>, <code>cosplaytele</code>, <code>4KHD</code>.\n` +
+            `Atau set password custom di env <code>ARCHIVE_PASSWORDS=pw1,pw2</code>.`
+          );
+          if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+          await rimraf(unzipDir);
+          return;
+        }
+        await status(`⚠️ <b>Gagal ekstrak arsip.</b> Mengirim file mentahan (${(archSize / 1024 / 1024).toFixed(1)}MB) langsung...`);
         if (!fs.existsSync(unzipDir)) fs.mkdirSync(unzipDir);
         fs.renameSync(zipPath, path.join(unzipDir, path.basename(zipPath)));
         fallbackRaw = true; // Tandai bahwa ini file mentahan, jangan filter!
@@ -1750,7 +1789,7 @@ function startBot() {
       const links = await cosplayteleScraper.scrapePostDetail(post.url);
       if (links && links.gofile) {
         queueManager.addJob(chatId, `Gofile: ${post.title}`, async (jobId) => {
-          await processDownload(bot, chatId, links.gofile, null, 'gofile', jobId);
+          await processDownload(bot, chatId, links.gofile, links.password || null, 'gofile', jobId);
         }, bot);
       } else {
         bot.sendMessage(chatId, '⚠️ Link gofile tidak ditemukan untuk post ini.');
@@ -1770,7 +1809,7 @@ function startBot() {
           try {
             queueManager.updateJob(jobId, '⚙️ Mencari direct link MediaFire...');
             const directMFUrl = await mediafireApi.getDirectLink(links.mediafire);
-            await processDownload(bot, chatId, directMFUrl, null, 'direct', jobId);
+            await processDownload(bot, chatId, directMFUrl, links.password || null, 'direct', jobId);
           } catch (e) {
             bot.sendMessage(chatId, `⚠️ <b>Gagal (Job #${jobId})!</b> ${e.message}`, { parse_mode: 'HTML' });
           }
@@ -1805,7 +1844,7 @@ function startBot() {
             const directSoraUrl = await sorafolderApi.getDirectLink(links.sorafolder);
             clearInterval(timerInterval);
             if (m) bot.deleteMessage(chatId, m.message_id).catch(() => { });
-            await processDownload(bot, chatId, directSoraUrl, null, 'direct', jobId);
+            await processDownload(bot, chatId, directSoraUrl, links.password || null, 'direct', jobId);
           } catch (e) {
             clearInterval(timerInterval);
             bot.sendMessage(chatId, `⚠️ <b>Gagal (Job #${jobId})!</b> ${e.message}`, { parse_mode: 'HTML' });
