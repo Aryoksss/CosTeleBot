@@ -308,13 +308,30 @@ async function getApiResult(teraboxUrl) {
   };
 }
 
-async function downloadStream(url, destPath, onProgress, cookie = null, opts = {}) {
+async function _downloadStreamOnce(url, destPath, onProgress, cookie = null, opts = {}) {
   const headers = {};
   if (cookie) headers['Cookie'] = cookie;
   if (opts.referer) headers['Referer'] = opts.referer;
   if (opts.userAgent) headers['User-Agent'] = opts.userAgent;
 
-  const res = await axios({ url, method: 'GET', responseType: 'stream', timeout: 600000, headers });
+  let res;
+  try {
+    res = await axios({ url, method: 'GET', responseType: 'stream', timeout: 600000, headers, validateStatus: () => true });
+  } catch (e) {
+    // Network/DNS error — wrap agar retry loop bisa deteksi
+    const err = new Error(e.message);
+    err.isNetworkError = true;
+    throw err;
+  }
+
+  // Tangani HTTP error eksplisit (429, 5xx, 403) agar retry loop bisa decide.
+  if (res.status >= 400) {
+    try { res.data.destroy(); } catch (_) { }
+    const err = new Error(`Request failed with status code ${res.status}`);
+    err.httpStatus = res.status;
+    err.retryAfter = parseInt(res.headers['retry-after'] || '0', 10) || 0;
+    throw err;
+  }
 
   // Validasi content-type untuk cegah file HTML error (Kemono 403/rate-limit, Gofile link expired) disimpan sbg .jpg/.rar.
   // Aktif hanya jika pemanggil opt-in lewat opts.expectMedia atau opts.expectBinary.
@@ -357,6 +374,34 @@ async function downloadStream(url, destPath, onProgress, cookie = null, opts = {
       reject(err);
     });
   });
+}
+
+/**
+ * Wrapper dengan retry exponential-backoff untuk 429 (rate-limit) dan 5xx.
+ * Retry max 3x, delay awal 2s → 4s → 8s, atau pakai header `Retry-After` dari server.
+ * Error non-transient (HTML response, 4xx selain 429, filesystem) langsung dilempar tanpa retry.
+ */
+async function downloadStream(url, destPath, onProgress, cookie = null, opts = {}) {
+  const MAX_RETRIES = 3;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await _downloadStreamOnce(url, destPath, onProgress, cookie, opts);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const retriable = e.httpStatus === 429 || (e.httpStatus >= 500 && e.httpStatus < 600) || e.isNetworkError;
+      if (!retriable || attempt === MAX_RETRIES) throw e;
+
+      // Retry-After header (detik) > exponential fallback (2/4/8s).
+      const backoff = e.retryAfter > 0 ? Math.min(e.retryAfter * 1000, 60000) : Math.pow(2, attempt) * 1000;
+      log.warn(`[downloadStream] HTTP ${e.httpStatus || 'net'} pada attempt ${attempt}/${MAX_RETRIES}, retry dalam ${backoff}ms: ${url.slice(0, 100)}`);
+      await sleep(backoff);
+      // Hapus partial file sebelum retry agar tidak korup.
+      if (fs.existsSync(destPath)) { try { fs.unlinkSync(destPath); } catch (_) { } }
+    }
+  }
+  throw lastErr;
 }
 
 /**
