@@ -2,9 +2,11 @@ const fs = require('fs');
 const path = require('path');
 
 const HISTORY_FILE = path.join(__dirname, 'history.json');
+const TMP_FILE = HISTORY_FILE + '.tmp';
 const MAX_HISTORY = 500;
 
 let historyCache = null;
+let saveTimer = null;
 
 function loadHistory() {
   if (historyCache) return;
@@ -24,11 +26,20 @@ function loadHistory() {
 function saveHistory() {
   if (!historyCache) return;
   try {
-    // Stringify tanpa pretty print agar ukuran file super ringan.
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(historyCache));
+    // Tulis atomic: .tmp lalu rename, agar tidak korup saat dua writer bersamaan.
+    fs.writeFileSync(TMP_FILE, JSON.stringify(historyCache));
+    fs.renameSync(TMP_FILE, HISTORY_FILE);
   } catch (e) {
     console.error('Gagal menyimpan history.json:', e.message);
   }
+}
+
+function scheduleSave() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveHistory();
+  }, 300);
 }
 
 /**
@@ -51,15 +62,24 @@ function markSeen(userId, category, link) {
   loadHistory();
   if (!historyCache[userId]) historyCache[userId] = {};
   if (!historyCache[userId][category]) historyCache[userId][category] = [];
-  
+
   if (!historyCache[userId][category].includes(link)) {
     historyCache[userId][category].push(link);
     // Batasi maksimum memory (buang ingatan paling lama di index 0)
     if (historyCache[userId][category].length > MAX_HISTORY) {
-        historyCache[userId][category].shift();
+      historyCache[userId][category].shift();
     }
-    saveHistory();
+    scheduleSave();
   }
 }
+
+// Pastikan data tersimpan sebelum proses mati
+function flushOnExit() {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  saveHistory();
+}
+process.on('beforeExit', flushOnExit);
+process.on('SIGINT', () => { flushOnExit(); process.exit(0); });
+process.on('SIGTERM', () => { flushOnExit(); process.exit(0); });
 
 module.exports = { hasSeen, markSeen };

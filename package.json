@@ -2,34 +2,20 @@
   "name": "4khd-scraper",
   "version": "1.0.0",
   "description": "Web scraper for 4khd.com - scrapes post listings and detail pages",
-  "main": "scraper.js",
+  "main": "telegram-bot.js",
   "scripts": {
-    "start": "node scraper.js",
-    "scrape": "node scraper.js",
-    "scrape:detail": "node scraper.js --detail",
-    "download": "node downloader.js",
-    "download:headed": "node downloader.js --headed",
-    "status": "node downloader.js --status",
-    "bot": "node telegram-bot.js",
-    "vps": "node vps-downloader.js"
+    "start": "node telegram-bot.js",
+    "bot": "node telegram-bot.js"
   },
   "dependencies": {
     "7zip-bin": "^5.2.0",
     "axios": "^1.14.0",
-    "axios-retry": "^4.0.0",
     "cheerio": "^1.0.0",
-    "cli-progress": "^3.12.0",
     "dotenv": "^17.4.0",
-    "https-proxy-agent": "^9.0.0",
-    "jsdom": "^29.0.1",
-    "node-7z": "^3.0.0",
     "node-telegram-bot-api": "^0.67.0",
-    "node-unrar-js": "^2.0.2",
-    "p-limit": "^7.3.0",
     "playwright": "^1.59.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
-    "sharp": "^0.34.5",
-    "unzipper": "^0.12.3"
+    "sharp": "^0.34.5"
   }
 }

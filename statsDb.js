@@ -2,9 +2,11 @@ const fs = require('fs');
 const path = require('path');
 
 const DB_FILE = path.join(__dirname, 'stats.json');
+const TMP_FILE = DB_FILE + '.tmp';
 
 // Memory Cache
 let statsData = {};
+let saveTimer = null;
 
 /**
  * Muat data dari JSON
@@ -25,14 +27,27 @@ function loadDB() {
 }
 
 /**
- * Simpan data ke JSON
+ * Simpan data ke JSON secara atomic (tulis ke .tmp lalu rename).
+ * Mencegah korupsi saat dua write bersamaan.
  */
 function saveDB() {
     try {
-        fs.writeFileSync(DB_FILE, JSON.stringify(statsData, null, 2), 'utf8');
+        fs.writeFileSync(TMP_FILE, JSON.stringify(statsData, null, 2), 'utf8');
+        fs.renameSync(TMP_FILE, DB_FILE);
     } catch (e) {
-        console.error(`[StatsDB] Gagal menyumpan database stats: ${e.message}`);
+        console.error(`[StatsDB] Gagal menyimpan database stats: ${e.message}`);
     }
+}
+
+/**
+ * Debounced save: coalesce banyak panggilan write dalam 300ms jadi satu I/O.
+ */
+function scheduleSave() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        saveDB();
+    }, 300);
 }
 
 function getInitUser(chatId) {
@@ -52,7 +67,7 @@ function getInitUser(chatId) {
  */
 function addGacha(chatId) {
     getInitUser(chatId).gachaCasts += 1;
-    saveDB();
+    scheduleSave();
 }
 
 /**
@@ -60,7 +75,7 @@ function addGacha(chatId) {
  */
 function addDownloadSize(chatId, bytes) {
     getInitUser(chatId).downloadBytes += bytes;
-    saveDB();
+    scheduleSave();
 }
 
 /**
@@ -69,6 +84,15 @@ function addDownloadSize(chatId, bytes) {
 function getUserStats(chatId) {
     return getInitUser(chatId);
 }
+
+// Pastikan data tersimpan sebelum proses mati
+function flushOnExit() {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    saveDB();
+}
+process.on('beforeExit', flushOnExit);
+process.on('SIGINT', () => { flushOnExit(); process.exit(0); });
+process.on('SIGTERM', () => { flushOnExit(); process.exit(0); });
 
 // Inisialisasi awal saat ditarik
 loadDB();

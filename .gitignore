@@ -3,3 +3,7 @@ tmp_downloads/
 .env
 .DS_Store
 browser_profile_gofile/
+browser_profile_r34/
+stats.json
+history.json
+*.tmp

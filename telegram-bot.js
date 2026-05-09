@@ -71,6 +71,9 @@ const fs = require('fs');
 const os = require('os');
 const fsp = fs.promises;
 const path = require('path');
+// 7zip-bin menyediakan binary 7za lintas OS agar tidak tergantung `7z` di PATH.
+let PATH_7ZA = '7z';
+try { PATH_7ZA = require('7zip-bin').path7za || '7z'; } catch (_) { }
 // Modul unzipper dan node-unrar-js telah dinonaktifkan untuk menghemat RAM (Telah menggunakan native P7zip OS)
 const sharp = require('sharp'); // Auto-Compressor
 const cosplayteleScraper = require('./scrapers/cosplaytele');
@@ -91,6 +94,15 @@ sharp.cache(false);   // Matikan seluruh RAM cache agar RAM tidak bengkak
 
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
+// Admin ID dibaca dari env ADMIN_IDS (CSV). Fallback ke legacy hardcoded jika kosong.
+const ADMIN_IDS = new Set(
+  String(process.env.ADMIN_IDS || '6663343995')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
+const isAdmin = (chatId) => ADMIN_IDS.has(String(chatId));
+
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN,
   ALLOWED_USER_IDS: [], // kosong = semua
@@ -103,6 +115,10 @@ const CONFIG = {
   SEND_DELAY: 600,
   // Limit dinamis: 48MB untuk Telegram biasa, atau 1950MB jika pakai Local API Server
   VIDEO_MAX_BYTES: process.env.LOCAL_API_URL ? 1950 * 1024 * 1024 : 48 * 1024 * 1024,
+  // Telegram: photo ~10MB hard-limit; kita pakai 9MB aman.
+  PHOTO_MAX_BYTES: 9 * 1024 * 1024,
+  // TTL cache state in-memory (ms): 30 menit cukup untuk satu sesi browse/gacha.
+  CACHE_TTL_MS: 30 * 60 * 1000,
 };
 
 // ─── LOGGER & UTILS ──────────────────────────────────────────────────────────
@@ -227,6 +243,35 @@ const menuTracker = new Map(); // chatId -> lastMessageId (Untuk auto-clean menu
 const kemonoTracker = new Map(); // chatId -> array of message_ids (Untuk auto-clean media gacha)
 const r34BrowseCache = new Map(); // chatId -> { posts: [], page, query }
 
+// Last-seen timestamp untuk TTL cleanup agar Map di atas tidak tumbuh monotonic seumur uptime VPS.
+const stateTouchedAt = new Map(); // chatId -> ms timestamp terakhir touch
+function touchState(chatId) {
+  stateTouchedAt.set(chatId, Date.now());
+}
+// Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
+// Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache]) {
+  const origSet = m.set.bind(m);
+  m.set = (key, value) => {
+    touchState(key);
+    return origSet(key, value);
+  };
+}
+function sweepStaleStates() {
+  const now = Date.now();
+  for (const [chatId, ts] of stateTouchedAt.entries()) {
+    if (now - ts < CONFIG.CACHE_TTL_MS) continue;
+    userStates.delete(chatId);
+    browseCache.delete(chatId);
+    menuTracker.delete(chatId);
+    kemonoTracker.delete(chatId);
+    r34BrowseCache.delete(chatId);
+    stateTouchedAt.delete(chatId);
+  }
+}
+// Jalankan setiap 5 menit. unref() agar interval tidak block process exit.
+setInterval(sweepStaleStates, 5 * 60 * 1000).unref();
+
 // ─── ADMIN STATS TRACKER ─────────────────────────────────────────────────────
 const botStats = {
   startTime: Date.now(),
@@ -263,11 +308,34 @@ async function getApiResult(teraboxUrl) {
   };
 }
 
-async function downloadStream(url, destPath, onProgress, cookie = null) {
+async function downloadStream(url, destPath, onProgress, cookie = null, opts = {}) {
   const headers = {};
   if (cookie) headers['Cookie'] = cookie;
+  if (opts.referer) headers['Referer'] = opts.referer;
+  if (opts.userAgent) headers['User-Agent'] = opts.userAgent;
 
   const res = await axios({ url, method: 'GET', responseType: 'stream', timeout: 600000, headers });
+
+  // Validasi content-type untuk cegah file HTML error (Kemono 403/rate-limit, Gofile link expired) disimpan sbg .jpg/.rar.
+  // Aktif hanya jika pemanggil opt-in lewat opts.expectMedia atau opts.expectBinary.
+  if (opts.expectMedia || opts.expectBinary) {
+    const ct = String(res.headers['content-type'] || '').toLowerCase();
+    // Tolak text/html + text/plain + application/json (error page dari CDN)
+    const bad = ct.startsWith('text/') || ct.startsWith('application/json') || ct.startsWith('application/xhtml');
+    if (bad) {
+      res.data.destroy();
+      throw new Error(`Link expired atau session invalid (server balas ${ct || 'unknown'} bukan file). Coba klik Download ulang dari menu.`);
+    }
+    // Untuk expectMedia (image/video), cek lebih ketat
+    if (opts.expectMedia) {
+      const ok = ct.startsWith('image/') || ct.startsWith('video/') || ct.startsWith('application/octet-stream') || ct.startsWith('binary/');
+      if (!ok) {
+        res.data.destroy();
+        throw new Error(`Bukan media (content-type=${ct || 'unknown'})`);
+      }
+    }
+  }
+
   const total = parseInt(res.headers['content-length'] || '0', 10);
   let downloaded = 0, lastPct = 0;
 
@@ -291,31 +359,76 @@ async function downloadStream(url, destPath, onProgress, cookie = null) {
   });
 }
 
+/**
+ * Validasi magic-byte arsip. Return true jika header cocok ekstensi.
+ * ZIP : 50 4B 03 04 | 50 4B 05 06 | 50 4B 07 08
+ * RAR4: 52 61 72 21 1A 07 00
+ * RAR5: 52 61 72 21 1A 07 01 00
+ * 7Z  : 37 7A BC AF 27 1C
+ */
+function isLikelyValidArchive(filePath) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(8);
+    const read = fs.readSync(fd, buf, 0, 8, 0);
+    fs.closeSync(fd);
+    if (read < 4) return false;
+
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.zip') {
+      return buf[0] === 0x50 && buf[1] === 0x4B &&
+        ((buf[2] === 0x03 && buf[3] === 0x04) ||
+          (buf[2] === 0x05 && buf[3] === 0x06) ||
+          (buf[2] === 0x07 && buf[3] === 0x08));
+    }
+    if (ext === '.rar') {
+      return buf[0] === 0x52 && buf[1] === 0x61 && buf[2] === 0x72 && buf[3] === 0x21 &&
+        buf[4] === 0x1A && buf[5] === 0x07;
+    }
+    if (ext === '.7z') {
+      return buf[0] === 0x37 && buf[1] === 0x7A && buf[2] === 0xBC && buf[3] === 0xAF &&
+        buf[4] === 0x27 && buf[5] === 0x1C;
+    }
+    return true; // ekstensi non-arsip, biarkan lolos
+  } catch (e) {
+    return false;
+  }
+}
+
 async function extractArchive(archivePath, destDir, password = null) {
   await fsp.mkdir(destDir, { recursive: true });
   const ext = path.extname(archivePath).toLowerCase();
-  const { execSync } = require('child_process');
+  const { spawnSync } = require('child_process');
 
   if (ext === '.zip' || ext === '.rar' || ext === '.7z') {
     const candidates = [password, 'cosplaytele', '4KHD', '4khd', null].filter((p, i, arr) => arr.indexOf(p) === i);
     let success = false;
     for (const pw of candidates) {
       try {
-        // Gunakan 7z untuk semua tipe arsip (cross-platform: Windows & Linux)
-        const pwFlag = pw ? `-p"${pw}"` : '';
-        execSync(`7z x "${archivePath}" ${pwFlag} -o"${destDir}" -y`, { stdio: 'ignore' });
-        success = true;
-        log.ok(`Archive extracted via 7z (ext=${ext}, pw=${pw || 'none'})`);
-        break;
+        // Pakai spawnSync argv-array (bukan shell string concat) agar password
+        // tidak bisa disalahgunakan untuk shell injection walaupun mengandung " ; & ` $().
+        const args = ['x', archivePath];
+        if (pw) args.push(`-p${pw}`); else args.push('-p'); // -p (no pw) cegah prompt interaktif
+        args.push(`-o${destDir}`, '-y');
+        const r = spawnSync(PATH_7ZA, args, { stdio: 'ignore' });
+        if (r.status === 0) {
+          success = true;
+          log.ok(`Archive extracted via 7z (ext=${ext}, pw=${pw ? '***' : 'none'})`);
+          break;
+        }
       } catch (e) { }
       // Fallback ke unrar khusus .rar jika 7z gagal (hanya tersedia di Linux VPS)
       if (ext === '.rar') {
         try {
-          const pwFlag = pw ? `-p"${pw}"` : '-p-';
-          execSync(`unrar x -y ${pwFlag} "${archivePath}" "${destDir}/"`, { stdio: 'ignore' });
-          success = true;
-          log.ok(`Archive extracted via unrar fallback (pw=${pw || 'none'})`);
-          break;
+          const args = ['x', '-y'];
+          args.push(pw ? `-p${pw}` : '-p-');
+          args.push(archivePath, `${destDir}/`);
+          const r = spawnSync('unrar', args, { stdio: 'ignore' });
+          if (r.status === 0) {
+            success = true;
+            log.ok(`Archive extracted via unrar fallback (pw=${pw ? '***' : 'none'})`);
+            break;
+          }
         } catch (e) { }
       }
     }
@@ -363,7 +476,7 @@ async function sendOne(bot, chatId, filePath, explicitCaption = null) {
   }
 }
 
-async function processDownload(bot, chatId, url, password, source = 'terabox', jobId = null) {
+async function processDownload(bot, chatId, url, password, source = 'terabox', jobId = null, opts = {}) {
   log.info(`[User ${chatId}] Memulai processDownload: ${url}`);
   const tmpBase = path.join(CONFIG.TEMP_DIR, `job_${Date.now()}`);
   let zipPath = `${tmpBase}_raw.zip`;
@@ -433,6 +546,9 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       // Gunakan nama akhir dari url jika memungkinkan
       fileName = decodeURIComponent(url.split('/').pop().split('?')[0]) || 'archive.zip';
       zipPath = `${tmpBase}_raw${path.extname(fileName)}`;
+      // Gofile direct CDN butuh cookie dari session resolver (accountToken). Kalau caller kasih
+      // cookie via opts.cookie, pakai; tanpa itu server balas HTML 12KB (login/error page).
+      if (opts.cookie) cookie = opts.cookie;
     } else {
       await status('⚙️ <b>Mapping via xAPIverse...</b>');
       const api = await getApiResult(url);
@@ -442,14 +558,36 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     }
 
     await status(`⬇️ <b>Mengunduh ${fileName}...</b>\n📦`);
+    // expectBinary hanya untuk file non-media (arsip) agar HTML error page ditolak di layer HTTP.
+    // Untuk media (mp4/jpg/dll), biarkan lewat karena beberapa CDN balas `application/octet-stream`.
+    const dlExt = path.extname(fileName).toLowerCase();
+    const isArchiveTarget = ['.zip', '.rar', '.7z'].includes(dlExt);
+    // Gofile CDN kadang validasi Referer/UA. Kirim header yg match session browser resolver.
+    const dlExtra = {};
+    if (/gofile\.io/i.test(downloadLink)) {
+      dlExtra.referer = 'https://gofile.io/';
+      dlExtra.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    }
     await downloadStream(downloadLink, zipPath, async (pct, dl, tot) => {
       const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${pct}%  ─  ${(dl / 1048576).toFixed(1)} MB / ${(tot ? (tot / 1048576).toFixed(1) : '?')} MB</code>`;
       if (jobId) queueManager.updateJob(jobId, pText);
       await status(pText);
-    }, cookie);
+    }, cookie, { expectBinary: isArchiveTarget, ...dlExtra });
 
     const finalSize = fs.existsSync(zipPath) ? fs.statSync(zipPath).size : 0;
     if (finalSize > 0) statsDb.addDownloadSize(chatId, finalSize);
+
+    // Sanity check ukuran: file arsip <50 KB hampir pasti HTML error page / truncated.
+    if (isArchiveTarget && finalSize > 0 && finalSize < 50 * 1024) {
+      if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+      return status(`❌ <b>Download gagal.</b> Link CDN balik ukuran ${(finalSize / 1024).toFixed(0)}KB (terlalu kecil, kemungkinan link expired/rate-limited). Coba klik Download lagi dari menu.`);
+    }
+
+    // Validate magic-byte: tolak file yang ekstensinya .zip/.rar/.7z tapi isinya bukan arsip (HTML/JSON error).
+    if (isArchiveTarget && !isLikelyValidArchive(zipPath)) {
+      if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+      return status(`❌ <b>File korup.</b> Yang terdownload bukan arsip valid (kemungkinan link expired atau session Gofile bocor). Coba klik Download lagi.`);
+    }
 
     // Tandai status jadi Ekstraksi
     if (jobId) queueManager.updateJob(jobId, '📦 Mengekstrak berkas arsip...');
@@ -684,8 +822,8 @@ async function doKemonoGacha(bot, chatId, creatorUrl) {
         if (!ext.match(/\.(jpg|jpeg|png|webp|gif|mp4|mov|webm)$/i)) ext = '.jpg'; // Fallback
         const dest = path.join(jobDir, `media_${i}${ext}`);
 
-        // Mengunduh diam-diam
-        await downloadStream(u, dest, null, null);
+        // Mengunduh diam-diam + validasi content-type agar HTML error tidak tersimpan sbg .jpg
+        await downloadStream(u, dest, null, null, { expectMedia: true });
         downloadedFiles.push(dest);
       } catch (e) {
         log.warn(`[Kemono DL] Gagal download ${u}`);
@@ -991,7 +1129,7 @@ async function sendMainMenu(bot, chatId) {
     [{ text: '🧹 Clear Chat', callback_data: 'menu_clear' }, { text: '📥 Manual Terabox DL', callback_data: 'menu_terabox' }]
   ];
 
-  if (String(chatId) === '6663343995') {
+  if (isAdmin(chatId)) {
     keyboard.splice(4, 0, [{ text: '💻 Dasbor Admin', callback_data: 'menu_vps' }]);
   }
 
@@ -1098,17 +1236,41 @@ function startBot() {
     }
   });
 
+  /**
+   * Bulk-delete message lewat endpoint Bot API `deleteMessages` (batch max 100).
+   * Lebih cepat + jauh lebih ramah rate-limit daripada loop deleteMessage per pesan.
+   * Silent-fail per batch (pesan yg tidak bisa dihapus akan diabaikan).
+   */
+  async function bulkWipeMessages(bot, chatId, fromId, count = 800) {
+    const ids = [];
+    const start = Math.max(1, fromId - count);
+    for (let i = fromId; i > start; i--) ids.push(i);
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+    for (const chunk of chunks) {
+      try {
+        if (typeof bot.deleteMessages === 'function') {
+          await bot.deleteMessages(chatId, chunk);
+        } else {
+          // Fallback untuk versi lib lama
+          await bot._request('deleteMessages', {
+            form: { chat_id: chatId, message_ids: JSON.stringify(chunk) }
+          });
+        }
+      } catch (e) {
+        // Fallback per-id bila server menolak batch (mis. pesan di luar 48 jam window).
+        for (const id of chunk) {
+          bot.deleteMessage(chatId, id).catch(() => { });
+        }
+      }
+      await sleep(120); // sedikit jeda antar batch agar ramah ke API
+    }
+  }
+
   bot.onText(/\/clear/, async (msg) => {
     log.info(`[User ${msg.chat.id}] Execute /clear (WIPING ALL)`);
     const sentMsg = await bot.sendMessage(msg.chat.id, '🧹 <i>Tornado Pembersih Aktif! Menghapus hampir seribu riwayat pesan terakhir secara mendalam...</i>', { parse_mode: 'HTML' });
-
-    // Looping mundur menghapus hingga 800 pesan terakhir dengan delay
-    // Mencegah EFATAL: AggregateError akibat API/Socket exhaustion
-    for (let i = msg.message_id; i > Math.max(0, msg.message_id - 1000); i--) {
-      bot.deleteMessage(msg.chat.id, i).catch(() => { });
-      await sleep(25); // Delay 25ms untuk mempercepat namun tidak spamming
-    }
-
+    await bulkWipeMessages(bot, msg.chat.id, msg.message_id, 1000);
     // Hapus chat sapu bersihnya juga setelah beberapa detik
     setTimeout(() => {
       bot.deleteMessage(msg.chat.id, sentMsg.message_id).catch(() => { });
@@ -1118,7 +1280,7 @@ function startBot() {
 
   bot.onText(/^\/stat(?:\s|$)/, async (msg) => {
     bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    if (String(msg.chat.id) !== '6663343995') return; // Hanya admin ID 6663343995
+    if (!isAdmin(msg.chat.id)) return; // Hanya admin (lihat ADMIN_IDS env)
 
     const uptimeSec = Math.floor((Date.now() - botStats.startTime) / 1000);
     const hrs = Math.floor(uptimeSec / 3600);
@@ -1141,7 +1303,7 @@ function startBot() {
     const exp = Math.floor(s.downloadBytes / (1024 * 1024)) + (s.gachaCasts * 50); // 1 MB = 1 EXP, 1 Gacha = 50 EXP
 
     let rank = 'Newbie 🪓';
-    if (String(msg.chat.id) === '6663343995') rank = 'DEWA 👑👑👑 (Maha Kuasa)';
+    if (isAdmin(msg.chat.id)) rank = 'DEWA 👑👑👑 (Maha Kuasa)';
     else if (exp >= 10000000) rank = 'DEWA 👑 (Legendary God)';
     else if (exp >= 100000) rank = 'Legend 🐉';
     else if (exp >= 25000) rank = 'Senior ⚔️';
@@ -1259,7 +1421,8 @@ function startBot() {
       if (cachedFile && cachedFile.link) {
         log.info(`[Gofile] Menggunakan cache direct link untuk file: ${cachedFile.name}`);
         queueManager.addJob(chatId, `Gofile: ${cachedFile.name}`, async (jobId) => {
-          await processDownload(bot, chatId, cachedFile.link, null, 'direct', jobId);
+          // PENTING: forward cookie session Gofile agar CDN tidak balik HTML error page.
+          await processDownload(bot, chatId, cachedFile.link, null, 'direct', jobId, { cookie: state.cookie });
         }, bot);
       } else {
         // Fallback: resolve ulang jika cache tidak ada (misal bot restart di tengah sesi)
@@ -1372,7 +1535,7 @@ function startBot() {
       return;
     }
     if (action === 'menu_vps') {
-      if (String(chatId) !== '6663343995') {
+      if (!isAdmin(chatId)) {
         return bot.answerCallbackQuery(query.id, { text: '⛔ Akses Ditolak: Anda bukan Admin Server!', show_alert: true });
       }
       bot.answerCallbackQuery(query.id).catch(() => { });
@@ -1396,7 +1559,7 @@ function startBot() {
       const exp = Math.floor(s.downloadBytes / (1024 * 1024)) + (s.gachaCasts * 50); // 1 MB = 1 EXP, 1 Gacha = 50 EXP
 
       let rank = 'Newbie 🪓';
-      if (String(chatId) === '6663343995') rank = 'DEWA 👑👑👑 (Maha Kuasa)';
+      if (isAdmin(chatId)) rank = 'DEWA 👑👑👑 (Maha Kuasa)';
       else if (exp >= 10000000) rank = 'DEWA 👑 (Legendary God)';
       else if (exp >= 100000) rank = 'Legend 🐉';
       else if (exp >= 25000) rank = 'Senior ⚔️';
@@ -1423,10 +1586,7 @@ function startBot() {
     if (action === 'menu_clear') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       const sentMsg = await bot.sendMessage(chatId, '🧹 <i>Tornado Pembersih Aktif! Menghapus hampir seribu riwayat pesan terakhir secara mendalam...</i>', { parse_mode: 'HTML' });
-      for (let i = query.message.message_id; i > Math.max(0, query.message.message_id - 800); i--) {
-        bot.deleteMessage(chatId, i).catch(() => { });
-        await sleep(25);
-      }
+      await bulkWipeMessages(bot, chatId, query.message.message_id, 800);
       setTimeout(() => { bot.deleteMessage(chatId, sentMsg.message_id).catch(() => { }); }, 4000);
       return;
     }
