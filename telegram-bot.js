@@ -535,11 +535,15 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       if (statusMsg) bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
     }, 5000);
 
+    // Bersihkan folder temp SETELAH pengiriman selesai
+    await rimraf(unzipDir);
+
   } catch (err) {
     await status(`❌ <b>Error:</b> <code>${err.message}</code>`);
+    await rimraf(unzipDir); // Bersihkan juga di catch kalau ada error lain
   } finally {
+    // Hanya hapus file zip saja di sini (kalau masih ada)
     if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-    await rimraf(unzipDir);
   }
 }
 
