@@ -449,9 +449,22 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     // Tandai status jadi Ekstraksi
     if (jobId) queueManager.updateJob(jobId, '📦 Mengekstrak berkas arsip...');
 
-    await status('📦 <b>Mengekstrak arsip...</b>');
-    await extractArchive(zipPath, unzipDir, password);
-    if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+    if (isArchive(zipPath)) {
+      await status('📦 <b>Mengekstrak arsip...</b>');
+      try {
+        await extractArchive(zipPath, unzipDir, password);
+        if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+      } catch (extErr) {
+        log.warn(`Ekstraksi gagal: ${extErr.message}, mengirim mentahan...`);
+        await status(`⚠️ <b>Gagal ekstrak:</b> ${extErr.message}. Mengirim file mentahan...`);
+        if (!fs.existsSync(unzipDir)) fs.mkdirSync(unzipDir);
+        fs.renameSync(zipPath, path.join(unzipDir, path.basename(zipPath)));
+      }
+    } else {
+      // Bukan arsip (contoh: unduhan file .mp4 langsung), pindahkan agar tetap dikirim
+      if (!fs.existsSync(unzipDir)) fs.mkdirSync(unzipDir);
+      fs.renameSync(zipPath, path.join(unzipDir, path.basename(zipPath)));
+    }
 
     const files = collectFiles(unzipDir);
     const medias = files.filter(isMedia);
