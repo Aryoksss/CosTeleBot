@@ -169,7 +169,43 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
   }
 
   console.log(`[Gofile-DL] axios GET streaming...`);
-  const res = await axios(reqCfg);
+
+  // Retry loop untuk 429 (rate-limit per CDN node) dan 5xx. Max 3 attempt dengan backoff 3s/6s/12s.
+  const MAX_RETRIES = 3;
+  let res = null;
+  let lastAttemptErr = null;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      res = await axios(reqCfg);
+      const status = res.status;
+      const retriable = status === 429 || (status >= 500 && status < 600);
+      if (!retriable) break; // sukses atau error non-retriable, lanjut
+
+      // Log body singkat untuk visibility (biasanya pesan rate-limit dari CDN)
+      let bodyPreview = '';
+      try {
+        const chunks = [];
+        for await (const c of res.data) { chunks.push(c); if (chunks.reduce((a, b) => a + b.length, 0) > 500) break; }
+        bodyPreview = Buffer.concat(chunks).toString('utf8').slice(0, 200).replace(/\s+/g, ' ');
+      } catch (_) { }
+      console.log(`[Gofile-DL] attempt ${attempt}/${MAX_RETRIES} → HTTP ${status} body="${bodyPreview}"`);
+
+      if (attempt === MAX_RETRIES) {
+        throw new Error(`Gofile CDN HTTP ${status} setelah ${MAX_RETRIES} retry: ${bodyPreview || '(empty)'}`);
+      }
+      const retryAfter = parseInt(res.headers['retry-after'] || '0', 10);
+      const backoff = retryAfter > 0 ? Math.min(retryAfter * 1000, 30000) : Math.pow(2, attempt) * 3000;
+      console.log(`[Gofile-DL] retry dalam ${backoff}ms...`);
+      await new Promise(r => setTimeout(r, backoff));
+    } catch (e) {
+      if (e.message && e.message.startsWith('Gofile CDN HTTP')) throw e; // sudah kita format
+      lastAttemptErr = e;
+      if (attempt === MAX_RETRIES) throw e;
+      console.log(`[Gofile-DL] attempt ${attempt} network error: ${e.message}, retry...`);
+      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 2000));
+    }
+  }
+
   const status = res.status;
   const ct = String(res.headers['content-type'] || '').toLowerCase();
   const total = parseInt(res.headers['content-length'] || '0', 10);
@@ -179,9 +215,15 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
     try { res.data.destroy(); } catch (_) { }
     throw new Error(`Gofile CDN HTTP ${status}`);
   }
-  if (ct.startsWith('text/html')) {
-    try { res.data.destroy(); } catch (_) { }
-    throw new Error(`Gofile CDN balas HTML (link expired / accountToken invalid). Pastikan resolve terbaru dan accountToken tidak bocor sesi lama.`);
+  if (ct.startsWith('text/html') || ct.startsWith('text/plain')) {
+    // Baca body sebagai text untuk error message yang berguna
+    let body = '';
+    try {
+      const chunks = [];
+      for await (const c of res.data) chunks.push(c);
+      body = Buffer.concat(chunks).toString('utf8').slice(0, 300).replace(/\s+/g, ' ');
+    } catch (_) { }
+    throw new Error(`Gofile CDN balas ${ct} (bukan binary). Body: ${body || '(empty)'}. Mungkin link expired, rate-limit, atau IP VPS di-block.`);
   }
 
   // Stream ke disk dengan progress callback tiap ~1 detik.
