@@ -114,61 +114,57 @@ async function resolveGofile(gofileUrl) {
  * @param {function} [onProgress] (downloadedBytes) => void — dipanggil ~setiap detik
  * @returns {Promise<number>} ukuran file akhir dalam byte
  */
-async function downloadGofileFile(directUrl, destPath, onProgress = null) {
+async function downloadGofileFile(directUrl, destPath, onProgress = null, accountToken = null) {
   let ctx;
   const proxy = getProxyConfig();
   console.log(`[Gofile-DL] START url=${directUrl.slice(0, 80)}... proxy=${proxy ? proxy.server : 'none'}`);
   try {
     ctx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts({ acceptDownloads: true }));
-    console.log(`[Gofile-DL] context OK, buka page`);
+    console.log(`[Gofile-DL] context OK`);
 
-    const page = await ctx.newPage();
-    await page.goto('about:blank');
-
-    // Mulai listener SEBELUM trigger download event
-    const downloadPromise = page.waitForEvent('download', { timeout: 120000 });
-    console.log(`[Gofile-DL] waiting for download event (max 120s)...`);
-
-    // Trigger download via anchor click (paling reliable cross-platform)
-    await page.evaluate((url) => {
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = '';
-      a.rel = 'noopener';
-      document.body.appendChild(a);
-      a.click();
-    }, directUrl);
-
-    const download = await downloadPromise;
-    console.log(`[Gofile-DL] download event terpicu, mulai streaming`);
-
-    // Polling ukuran file sementara Chromium untuk progress bar realistic.
-    // download.path() return path cache Chromium, file sudah mulai terisi streaming.
-    const tmpPath = await download.path();
-    console.log(`[Gofile-DL] chromium tmp path: ${tmpPath}`);
-    let stopPolling = false;
-    const pollTimer = (async () => {
-      while (!stopPolling) {
-        try {
-          if (tmpPath && fs.existsSync(tmpPath)) {
-            const s = fs.statSync(tmpPath).size;
-            if (onProgress) onProgress(s);
-          }
-        } catch (_) { }
-        await new Promise(r => setTimeout(r, 1500));
-      }
-    })();
-
-    // Simpan ke path target. Playwright streaming internally — tidak buffer ke RAM.
-    await download.saveAs(destPath);
-    stopPolling = true;
-    await pollTimer;
-    console.log(`[Gofile-DL] saveAs complete → ${destPath}`);
-
-    // Final progress tick
-    if (onProgress && fs.existsSync(destPath)) {
-      onProgress(fs.statSync(destPath).size);
+    // Gofile CDN mewajibkan header `Authorization: Bearer <accountToken>` untuk akses direct link.
+    // Token diterima sebagai argumen dari resolveGofile() agar tidak ada race antar context.
+    // Fallback: baca dari cookies context bila caller tidak forward.
+    if (!accountToken) {
+      const cookies = await ctx.cookies();
+      const tokenCookie = cookies.find(c => c.name === 'accountToken');
+      accountToken = tokenCookie ? tokenCookie.value : null;
     }
+    console.log(`[Gofile-DL] accountToken: ${accountToken ? '***(' + accountToken.length + ' chars)' : 'NONE'}`);
+
+    console.log(`[Gofile-DL] fetching via context.request.get...`);
+    const reqHeaders = {
+      'Referer': 'https://gofile.io/',
+      'User-Agent': UA,
+    };
+    if (accountToken) reqHeaders['Authorization'] = `Bearer ${accountToken}`;
+
+    const res = await ctx.request.get(directUrl, {
+      headers: reqHeaders,
+      timeout: 300000, // 5 menit
+    });
+    const status = res.status();
+    const ct = res.headers()['content-type'] || '';
+    const cl = parseInt(res.headers()['content-length'] || '0', 10);
+    console.log(`[Gofile-DL] response status=${status} content-type=${ct} content-length=${cl}`);
+
+    if (status !== 200) {
+      throw new Error(`Gofile CDN HTTP ${status}`);
+    }
+    if (ct.startsWith('text/html')) {
+      const body = (await res.text()).slice(0, 300);
+      throw new Error(`Gofile CDN balas HTML (link expired atau session invalid). Preview: ${body.replace(/\s+/g, ' ')}`);
+    }
+
+    // Stream body ke disk dengan progress polling.
+    // Playwright response.body() return Buffer full — oke untuk file ≤ 500MB di VPS 1GB RAM,
+    // tapi untuk file > 1GB kita butuh streaming. Strategi: coba response.body() dulu;
+    // kalau butuh true streaming, pakai axios dengan cookies + Referer.
+    console.log(`[Gofile-DL] downloading body to memory (will flush to disk)...`);
+    const body = await res.body();
+    console.log(`[Gofile-DL] body received: ${(body.length / 1048576).toFixed(1)}MB`);
+    fs.writeFileSync(destPath, body);
+    if (onProgress) onProgress(body.length);
 
     const size = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
     console.log(`[Gofile-DL] END size=${(size / 1048576).toFixed(1)}MB`);

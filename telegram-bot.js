@@ -562,6 +562,7 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     let downloadLink = '';
     let fileName = '';
     let cookie = '';
+    let accountToken = opts.accountToken || null;
     zipPath = '';
 
     if (source === 'gofile') {
@@ -591,8 +592,14 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
           btns.push([{ text: `⬇️ ${f.name}`, callback_data: `dls_gofile_${f.id}` }]);
         });
 
-        // Simpan url utama + semua file beserta direct link ke state agar tidak perlu resolve ulang
-        userStates.set(chatId, { step: 'SELECT_GOFILE_FILE', url: url, files: gofileRes.files, cookie: gofileRes.cookie });
+        // Simpan url utama + files + cookie + accountToken (wajib untuk download CDN).
+        userStates.set(chatId, {
+          step: 'SELECT_GOFILE_FILE',
+          url: url,
+          files: gofileRes.files,
+          cookie: gofileRes.cookie,
+          accountToken: gofileRes.accountToken,
+        });
 
         await bot.editMessageText(textOpts, {
           chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
@@ -606,7 +613,18 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       downloadLink = targetFile.link;
       fileName = targetFile.name || 'gofile_archive.zip';
       cookie = gofileRes.cookie;
+      accountToken = gofileRes.accountToken;
       zipPath = `${tmpBase}_raw${path.extname(fileName)}`;
+    } else if (source === 'gofile_direct') {
+      // Link CDN Gofile langsung (store*.gofile.io/download/web/...) dengan accountToken
+      // dari resolve sebelumnya (dari callback dls_gofile_*). Bypass resolve Playwright
+      // biar tidak double-launch browser + tidak terkena rate-limit resolve.
+      await status('⚙️ <b>Menyambungkan tautan Gofile CDN...</b>');
+      downloadLink = url;
+      fileName = opts.fileName || decodeURIComponent(url.split('/').pop().split('?')[0]) || 'archive.rar';
+      zipPath = `${tmpBase}_raw${path.extname(fileName)}`;
+      cookie = opts.cookie || '';
+      accountToken = opts.accountToken || accountToken;
     } else if (source === 'direct') {
       await status('⚙️ <b>Menyambungkan tautan aslinya...</b>');
       downloadLink = url;
@@ -645,7 +663,7 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
         const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${mb.toFixed(1)} MB ter-download</code>`;
         if (jobId) queueManager.updateJob(jobId, pText);
         status(pText).catch(() => { });
-      });
+      }, accountToken);
       // Tracking trafik ke botStats (biasanya ditangani downloadStream)
       if (fs.existsSync(zipPath)) {
         const finalMB = fs.statSync(zipPath).size / 1048576;
@@ -1528,8 +1546,13 @@ function startBot() {
       if (cachedFile && cachedFile.link) {
         log.info(`[Gofile] Menggunakan cache direct link untuk file: ${cachedFile.name}`);
         queueManager.addJob(chatId, `Gofile: ${cachedFile.name}`, async (jobId) => {
-          // PENTING: forward cookie session Gofile agar CDN tidak balik HTML error page.
-          await processDownload(bot, chatId, cachedFile.link, null, 'direct', jobId, { cookie: state.cookie });
+          // PENTING: forward cookie + accountToken session Gofile agar CDN tidak balik HTML error page.
+          // Untuk link CDN gofile.io, processDownload akan pakai jalur Playwright + Authorization: Bearer.
+          await processDownload(bot, chatId, cachedFile.link, null, 'gofile_direct', jobId, {
+            cookie: state.cookie,
+            accountToken: state.accountToken,
+            fileName: cachedFile.name,
+          });
         }, bot);
       } else {
         // Fallback: resolve ulang jika cache tidak ada (misal bot restart di tengah sesi)
