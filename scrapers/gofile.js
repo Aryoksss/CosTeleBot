@@ -41,10 +41,23 @@ function buildLaunchOpts(extra = {}) {
 async function resolveGofile(gofileUrl) {
   let ctx;
   const proxy = getProxyConfig();
+
+  // Strategi: setiap resolve pakai context BARU (non-persistent) agar Gofile ngasih
+  // accountToken guest fresh. Ini bypass limit 1000GB/30-hari karena setiap download
+  // counter-nya nol (account baru). Persistent profile di-skip untuk Gofile karena
+  // lebih banyak mudarat (quota expired) daripada manfaat (cached cookies tidak perlu
+  // untuk situs yang guest-auto).
   try {
-    console.log(`[Gofile] resolveGofile START url=${gofileUrl.split('#')[0]} proxy=${proxy ? proxy.server : 'none'}`);
-    ctx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts());
-    console.log(`[Gofile] Playwright context OK`);
+    console.log(`[Gofile] resolveGofile START url=${gofileUrl.split('#')[0]} proxy=${proxy ? proxy.server : 'none'} (fresh guest)`);
+    // launch() bukan launchPersistentContext — tidak akan bikin/pakai disk profile.
+    const browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      ...(proxy ? { proxy } : {}),
+    });
+    ctx = await browser.newContext({ userAgent: UA });
+    ctx._browser = browser; // simpan ref untuk close di finally
+    console.log(`[Gofile] fresh context OK`);
 
     const page = await ctx.newPage();
     const files = [];
@@ -97,7 +110,11 @@ async function resolveGofile(gofileUrl) {
     console.error(`[Gofile] stack: ${err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : 'n/a'}`);
     return null;
   } finally {
-    if (ctx) await ctx.close().catch(() => { });
+    if (ctx && ctx._browser) {
+      await ctx._browser.close().catch(() => { });
+    } else if (ctx) {
+      await ctx.close().catch(() => { });
+    }
     console.log(`[Gofile] resolveGofile END`);
   }
 }
@@ -118,17 +135,26 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
   console.log(`[Gofile-DL] START url=${directUrl.slice(0, 80)}... proxy=${proxy ? proxy.server : 'none'}`);
 
   if (!accountToken) {
-    // Fallback: kalau caller tidak forward, coba ambil dari persistent profile cookies.
-    // Butuh spawn Playwright sekali — lebih lambat tapi tetap works.
-    console.log(`[Gofile-DL] accountToken tidak di-forward, ambil dari cookies disk...`);
-    let tmpCtx;
+    // Fallback: kalau caller tidak forward, fetch accountToken fresh dari Gofile.
+    // Ini terjadi kalau dipanggil dari code-path lama yang belum update. Harusnya
+    // jarang karena flow baru selalu forward token dari resolveGofile().
+    console.log(`[Gofile-DL] accountToken tidak di-forward, fetch fresh guest...`);
+    let tmpBrowser;
     try {
-      tmpCtx = await chromium.launchPersistentContext(PROFILE_DIR, buildLaunchOpts());
+      tmpBrowser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        ...(proxy ? { proxy } : {}),
+      });
+      const tmpCtx = await tmpBrowser.newContext({ userAgent: UA });
+      const tmpPage = await tmpCtx.newPage();
+      await tmpPage.goto('https://gofile.io/', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => { });
+      await tmpPage.waitForTimeout(2000);
       const cookies = await tmpCtx.cookies();
       const c = cookies.find(x => x.name === 'accountToken');
       if (c) accountToken = c.value;
     } finally {
-      if (tmpCtx) await tmpCtx.close().catch(() => { });
+      if (tmpBrowser) await tmpBrowser.close().catch(() => { });
     }
   }
   console.log(`[Gofile-DL] accountToken: ${accountToken ? '***(' + accountToken.length + ' chars)' : 'NONE'}`);
