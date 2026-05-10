@@ -82,6 +82,7 @@ const mediafireApi = require('./scrapers/mediafire');
 const sorafolderApi = require('./scrapers/sorafolder');
 const kemonoScraper = require('./scrapers/kemono');
 const r34Scraper = require('./scrapers/rule34video');
+const pinterestScraper = require('./scrapers/pinterest');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 
@@ -242,6 +243,7 @@ const browseCache = new Map(); // chatId -> { posts: [], page, category, query }
 const menuTracker = new Map(); // chatId -> lastMessageId (Untuk auto-clean menu lama)
 const kemonoTracker = new Map(); // chatId -> array of message_ids (Untuk auto-clean media gacha)
 const r34BrowseCache = new Map(); // chatId -> { posts: [], page, query }
+const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, prevBookmarks: [] }
 
 // Last-seen timestamp untuk TTL cleanup agar Map di atas tidak tumbuh monotonic seumur uptime VPS.
 const stateTouchedAt = new Map(); // chatId -> ms timestamp terakhir touch
@@ -250,7 +252,7 @@ function touchState(chatId) {
 }
 // Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
 // Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
-for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache]) {
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache]) {
   const origSet = m.set.bind(m);
   m.set = (key, value) => {
     touchState(key);
@@ -266,6 +268,7 @@ function sweepStaleStates() {
     menuTracker.delete(chatId);
     kemonoTracker.delete(chatId);
     r34BrowseCache.delete(chatId);
+    pinBrowseCache.delete(chatId);
     stateTouchedAt.delete(chatId);
   }
 }
@@ -1244,6 +1247,163 @@ async function doR34PostDetail(bot, chatId, post) {
   }
 }
 
+// ─── PINTEREST SEARCH HANDLERS ───────────────────────────────────────────────
+/**
+ * Search Pinterest + tampilkan listing. `bookmark` = null untuk page pertama.
+ * prevBookmarks di cache untuk support navigasi "Prev" (Pinterest bookmark one-way,
+ * jadi kita track history bookmark-bookmark sebelumnya).
+ */
+async function doPinSearch(bot, chatId, query, bookmark = null) {
+  log.info(`[User ${chatId}] Request Pinterest search: "${query}" bookmark=${bookmark ? bookmark.slice(0, 20) + '...' : 'first'}`);
+  const loadMsg = await bot.sendMessage(chatId, `📌 <b>Memuat Pinterest...</b>\n<i>Query: ${escHtml(query)}</i>`, { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+
+  try {
+    const { pins, nextBookmark } = await pinterestScraper.scrapeSearch(query, bookmark);
+    if (!pins.length) {
+      return bot.editMessageText(`⚠️ Tidak ada pin ditemukan untuk <b>${escHtml(query)}</b>.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] }
+      });
+    }
+
+    // Tampilkan 8 pin per page
+    const shown = pins.slice(0, 8);
+    const prev = pinBrowseCache.get(chatId);
+    const prevBookmarks = prev?.query === query ? (prev.prevBookmarks || []) : [];
+    // Kalau ini bukan first page, simpan bookmark sekarang supaya bisa Prev
+    if (bookmark && !prevBookmarks.includes(bookmark)) prevBookmarks.push(bookmark);
+
+    pinBrowseCache.set(chatId, {
+      pins: shown,
+      query,
+      currentBookmark: bookmark,
+      nextBookmark,
+      prevBookmarks,
+    });
+
+    let text = `📌 <b>Pinterest:</b> <i>${escHtml(query)}</i>\n\n`;
+    shown.forEach((p, i) => {
+      const icon = p.type === 'video' ? '🎬' : '🖼️';
+      text += `${i + 1}. ${icon} ${escHtml(p.title.slice(0, 70))}\n`;
+    });
+    text += `\n<i>${pins.length} hasil di halaman ini</i>`;
+
+    // Tombol "Kirim" per pin, 2 per baris
+    const buttons = [];
+    for (let i = 0; i < shown.length; i += 2) {
+      const row = [{ text: `${i + 1}. ${shown[i].type === 'video' ? '🎬' : '🖼️'} Kirim`, callback_data: `pin_dl_${i}` }];
+      if (i + 1 < shown.length) {
+        row.push({ text: `${i + 2}. ${shown[i + 1].type === 'video' ? '🎬' : '🖼️'} Kirim`, callback_data: `pin_dl_${i + 1}` });
+      }
+      buttons.push(row);
+    }
+
+    // Navigasi halaman
+    const navRow = [];
+    if (prevBookmarks.length > 0) navRow.push({ text: '◀ Prev', callback_data: 'pin_prev' });
+    if (nextBookmark) navRow.push({ text: 'Next ▶', callback_data: 'pin_next' });
+    if (navRow.length) buttons.push(navRow);
+    buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+
+    await bot.editMessageText(text, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: buttons }
+    });
+  } catch (err) {
+    log.error(`[Pinterest] doPinSearch error: ${err.message}`);
+    bot.editMessageText(`❌ Gagal: ${err.message}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+  }
+}
+
+/**
+ * Kirim satu pin (image/video) ke chat. Image langsung pakai URL (Telegram download sendiri),
+ * video di-download ke disk dulu lalu streaming upload agar reliable di VPS.
+ */
+async function doPinSendItem(bot, chatId, pin) {
+  const loadMsg = await bot.sendMessage(chatId, `📌 <b>Mengirim...</b>`, { parse_mode: 'HTML' });
+
+  try {
+    statsDb.addGacha(chatId);
+    const caption = escHtml(pin.title.slice(0, 900));
+
+    if (pin.type === 'image') {
+      // Telegram bisa fetch URL image langsung — lebih cepat daripada download dulu
+      try {
+        await bot.sendPhoto(chatId, pin.imageUrl, {
+          caption: `📌 <b>${caption}</b>\n<a href="${pin.pinUrl}">Buka di Pinterest</a>`,
+          parse_mode: 'HTML',
+        });
+        bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
+        return;
+      } catch (e) {
+        log.warn(`[Pinterest] sendPhoto URL gagal (${e.message}), fallback download...`);
+        // Fallback: download + sendPhoto dari stream. Image biasanya < 5MB.
+        const jobDir = path.join(CONFIG.TEMP_DIR, 'pin_' + Date.now());
+        await fsp.mkdir(jobDir, { recursive: true });
+        const ext = path.extname(pin.imageUrl.split('?')[0]) || '.jpg';
+        const dest = path.join(jobDir, `pin_${pin.id}${ext}`);
+        await downloadStream(pin.imageUrl, dest, null, null, { expectMedia: true });
+        const sz = fs.statSync(dest).size;
+        statsDb.addDownloadSize(chatId, sz);
+        try {
+          await bot.sendPhoto(chatId, fs.createReadStream(dest), {
+            caption: `📌 <b>${caption}</b>\n<a href="${pin.pinUrl}">Buka di Pinterest</a>`,
+            parse_mode: 'HTML',
+          });
+        } catch (e2) {
+          await bot.sendDocument(chatId, fs.createReadStream(dest), {
+            caption: `📌 <b>${caption}</b>`, parse_mode: 'HTML',
+          });
+        }
+        await rimraf(jobDir);
+      }
+    } else if (pin.type === 'video') {
+      // Video harus di-download dulu karena Telegram sendVideo by URL sering gagal untuk
+      // domain yang tidak whitelisted mereka.
+      const jobDir = path.join(CONFIG.TEMP_DIR, 'pin_' + Date.now());
+      await fsp.mkdir(jobDir, { recursive: true });
+      const dest = path.join(jobDir, `pin_${pin.id}.mp4`);
+
+      await bot.editMessageText(`📌 <b>Mengunduh video...</b>`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      }).catch(() => { });
+
+      await downloadStream(pin.videoUrl, dest, null, null, { expectMedia: true });
+      const sz = fs.statSync(dest).size;
+      statsDb.addDownloadSize(chatId, sz);
+
+      if (sz > CONFIG.VIDEO_MAX_BYTES) {
+        await rimraf(jobDir);
+        const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1024 / 1024);
+        return bot.editMessageText(
+          `⚠️ Video ${(sz / 1048576).toFixed(1)}MB melebihi limit ${limitMB}MB.\n` +
+          `<a href="${pin.pinUrl}">Buka di Pinterest</a>`,
+          { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }
+        );
+      }
+
+      try {
+        await bot.sendVideo(chatId, fs.createReadStream(dest), {
+          caption: `📌 <b>${caption}</b>\n<a href="${pin.pinUrl}">Buka di Pinterest</a>`,
+          parse_mode: 'HTML',
+          supports_streaming: true,
+        });
+        bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
+      } catch (e) {
+        log.warn(`[Pinterest] sendVideo gagal (${e.message}), fallback doc`);
+        await bot.sendDocument(chatId, fs.createReadStream(dest), { caption });
+      }
+      await rimraf(jobDir);
+    }
+  } catch (e) {
+    log.error(`[Pinterest] send error: ${e.message}`);
+    bot.editMessageText(`❌ Gagal kirim: <code>${escHtml(e.message.slice(0, 200))}</code>`, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    }).catch(() => { });
+  }
+}
+
 // ─── COSPLAYTELE BROWSE HANDLERS ─────────────────────────────────────────────
 async function doCosplayteleBrowse(bot, chatId, category = 'home', page = 1, query = null) {
   log.info(`[User ${chatId}] Request Cosplaytele (Cat: ${category}, Page: ${page}, Query: ${query || 'none'})`);
@@ -1303,6 +1463,7 @@ async function sendMainMenu(bot, chatId) {
     [{ text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' }],
     [{ text: '📊 Profile', callback_data: 'menu_profile' }],
     [{ text: '🎬 R34 Video Browse', callback_data: 'menu_r34_browse' }, { text: '🎬 R34 Gacha', callback_data: 'menu_r34_gacha' }],
+    [{ text: '📌 Pinterest Search', callback_data: 'pin_search_prompt' }],
     [{ text: '🧹 Clear Chat', callback_data: 'menu_clear' }, { text: '📥 Manual Terabox DL', callback_data: 'menu_terabox' }]
   ];
 
@@ -1327,6 +1488,7 @@ function startBot() {
     { command: '/gacha', description: '🎲 Gacha Cosplay Random (Surprise Me)' },
     { command: '/maple', description: '🍁 Gacha Patreon' },
     { command: '/r34', description: '🎬 Rule34 Video (Browse & Gacha)' },
+    { command: '/pin', description: '📌 Pinterest Search (image/video)' },
     { command: '/search', description: 'Cari Karakter / Album Cosplay' },
     { command: '/tasks', description: '🚦 Pantau Dasbor Antrean' },
     { command: '/stats', description: '🔰 Lihat Profil' },
@@ -1382,6 +1544,27 @@ function startBot() {
           ]
         }
       });
+      autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
+    }
+  });
+
+  bot.onText(/^\/pin(?:\s+(.+))?$/, async (msg, match) => {
+    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
+    const query = match[1] && match[1].trim();
+    if (query) {
+      log.info(`[User ${msg.chat.id}] Execute /pin search: ${query}`);
+      doPinSearch(bot, msg.chat.id, query);
+    } else {
+      log.info(`[User ${msg.chat.id}] Execute /pin (prompt)`);
+      userStates.set(msg.chat.id, { step: 'AWAITING_PIN_SEARCH' });
+      const sentMsg = await bot.sendMessage(msg.chat.id,
+        `📌 <b>Pinterest Search</b>\n\nKetik query pencarian (karakter, tag, atau kata kunci).\n` +
+        `Hasil berupa gambar atau video direct.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
+        }
+      );
       autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
     }
   });
@@ -1537,6 +1720,14 @@ function startBot() {
       userStates.delete(chatId);
       log.info(`[User ${chatId}] Pencarian R34Video: ${text}`);
       doR34Browse(bot, chatId, 1, text);
+      return;
+    }
+
+    // If awaiting Pinterest search query
+    if (state && state.step === 'AWAITING_PIN_SEARCH') {
+      userStates.delete(chatId);
+      log.info(`[User ${chatId}] Pencarian Pinterest: ${text}`);
+      doPinSearch(bot, chatId, text);
       return;
     }
 
@@ -1716,6 +1907,46 @@ function startBot() {
       }
       return;
     }
+
+    // ── Pinterest Callbacks ──
+    if (action === 'pin_search_prompt') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      userStates.set(chatId, { step: 'AWAITING_PIN_SEARCH' });
+      const sentMsg = await bot.sendMessage(chatId,
+        `📌 <b>Pinterest Search</b>\n\nKetik query pencarian di kolom chat:`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
+        }
+      );
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action === 'pin_next') {
+      const cache = pinBrowseCache.get(chatId);
+      if (!cache) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /pin.');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doPinSearch(bot, chatId, cache.query, cache.nextBookmark);
+    }
+    if (action === 'pin_prev') {
+      const cache = pinBrowseCache.get(chatId);
+      if (!cache || !cache.prevBookmarks?.length) return bot.sendMessage(chatId, '⚠️ Tidak ada halaman sebelumnya.');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      // Pop bookmark terakhir, pakai yang sebelumnya (atau null = page 1)
+      const prevList = [...cache.prevBookmarks];
+      prevList.pop(); // buang current page bookmark
+      const targetBookmark = prevList.pop() || null; // ambil yang lebih lama
+      // Re-apply: prevBookmarks akan di-rebuild oleh doPinSearch sendiri
+      pinBrowseCache.set(chatId, { ...cache, prevBookmarks: prevList });
+      return doPinSearch(bot, chatId, cache.query, targetBookmark);
+    }
+    if (action.startsWith('pin_dl_')) {
+      const idx = parseInt(action.replace('pin_dl_', ''), 10);
+      const cache = pinBrowseCache.get(chatId);
+      if (!cache || !cache.pins[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /pin.');
+      return doPinSendItem(bot, chatId, cache.pins[idx]);
+    }
+
     if (action === 'menu_vps') {
       if (!isAdmin(chatId)) {
         return bot.answerCallbackQuery(query.id, { text: '⛔ Akses Ditolak: Anda bukan Admin Server!', show_alert: true });
