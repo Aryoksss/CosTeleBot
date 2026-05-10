@@ -45,7 +45,7 @@ function scheduleSave() {
 /**
  * Mengecek apakah pengguna sudah pernah melihat tautan ini (berdasarkan kategori)
  * @param {number|string} userId ID Telegram Pengguna
- * @param {string} category 'cosplay' | 'r34' | 'kemono'
+ * @param {string} category 'cosplay' | 'r34' | 'kemono' | 'jav' | 'pinterest' | 'ero'
  * @param {string} link URL Post asli
  */
 function hasSeen(userId, category, link) {

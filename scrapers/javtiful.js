@@ -218,6 +218,22 @@ async function scrapeCategory(slug, page = 1) {
   return scrapeListingByUrl(url, `category "${slug}" page=${page}`);
 }
 
+/**
+ * Trending page - 23 video trending daily.
+ */
+async function scrapeTrending() {
+  return scrapeListingByUrl(`${BASE_URL}/trending`, 'trending');
+}
+
+/**
+ * Latest video catalog - paginated up to ~2000 pages (~46k video).
+ * Dipakai untuk gacha random dari seluruh database.
+ */
+async function scrapeLatest(page = 1) {
+  const url = page > 1 ? `${BASE_URL}/videos?page=${page}` : `${BASE_URL}/videos`;
+  return scrapeListingByUrl(url, `latest page=${page}`);
+}
+
 // ─── DETAIL PAGE ─────────────────────────────────────────────────────────────
 
 function parseJsonLd(html) {
@@ -428,6 +444,8 @@ module.exports = {
   scrapeSearch,
   scrapeActress,
   scrapeCategory,
+  scrapeTrending,
+  scrapeLatest,
   scrapeDetail,
   probeSourceSize,
   detectJavCode,

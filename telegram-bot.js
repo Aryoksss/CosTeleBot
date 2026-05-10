@@ -1822,6 +1822,122 @@ async function doJavShowRelated(bot, chatId, item) {
   });
 }
 
+/**
+ * Javtiful Gacha — pilih 1 video acak dari trending/latest pool.
+ * Anti-repeat: cek history.js (category 'jav') supaya user gak dapat video sama berulang.
+ * Mode:
+ *   'trending' → pool 23 video trending daily
+ *   'latest'   → pool 46K+ video dari /videos paginated (default, lebih surprise)
+ *   'cosplay'  → shortcut /category/cosplay (niche gacha)
+ */
+async function doJavGacha(bot, chatId, mode = 'latest') {
+  log.info(`[User ${chatId}] /jav gacha mode=${mode}`);
+
+  const gMsg = await bot.sendMessage(chatId,
+    `🎲 <b>JAV Gacha ${mode === 'trending' ? '🔥 Trending' : mode === 'cosplay' ? '👘 Cosplay' : '🎰 Random'}...</b>\n` +
+    `<i>Mengacak dari ribuan video...</i>`,
+    { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, gMsg.message_id);
+  statsDb.addGacha(chatId);
+
+  try {
+    let pool = [];
+    let randomPage = 1;
+
+    if (mode === 'trending') {
+      // Trending: 1 page aja (23 video fresh)
+      const r = await javtifulScraper.scrapeTrending();
+      pool = r.items;
+    } else if (mode === 'cosplay') {
+      // Cosplay category: pick random page dari ~100 pages yang valid
+      randomPage = Math.floor(Math.random() * 50) + 1;
+      const r = await javtifulScraper.scrapeCategory('cosplay', randomPage);
+      pool = r.items;
+    } else {
+      // Latest /videos: ~2000 pages, jangkauan random lebar
+      randomPage = Math.floor(Math.random() * 200) + 1; // 1-200 untuk video relatif recent
+      const r = await javtifulScraper.scrapeLatest(randomPage);
+      pool = r.items;
+    }
+
+    if (!pool.length) {
+      return bot.editMessageText(`😔 Mesin gacha kosong. Coba lagi atau pilih mode lain.`, {
+        chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🎲 Reroll', callback_data: `javgacha_${mode}` },
+            { text: '🔙 Menu', callback_data: 'menu_awal' },
+          ]]
+        }
+      });
+    }
+
+    // Anti-repeat via historyTracker (category 'jav')
+    const unseen = pool.filter(v => !historyTracker.hasSeen(chatId, 'jav', v.link));
+    const picked = unseen.length > 0
+      ? unseen[Math.floor(Math.random() * unseen.length)]
+      : pool[Math.floor(Math.random() * pool.length)];
+    historyTracker.markSeen(chatId, 'jav', picked.link);
+
+    log.ok(`[Jav-Gacha] pool=${pool.length} unseen=${unseen.length} pick="${picked.title.slice(0, 60)}" (page ${randomPage})`);
+
+    // Simpan ke cache sbg pseudo listing 1-item supaya callback jav_0 jalan
+    // fromGacha flag supaya Back di detail balik ke menu gacha bukan listing.
+    javBrowseCache.set(chatId, {
+      items: [picked],
+      query: `gacha:${mode}`,
+      page: 1,
+      hasNext: false,
+      mode: 'gacha',
+      contextLabel: mode === 'trending' ? 'Gacha Trending' : mode === 'cosplay' ? 'Gacha Cosplay' : 'Gacha Random',
+      fromGacha: { mode },
+    });
+
+    // Tampilkan pick dengan pengantar dramatis + langsung tombol Detail + Reroll
+    const parts = [];
+    if (picked.javCode) parts.push(`🆔 <code>${picked.javCode}</code>`);
+    if (picked.durationText) parts.push(`⏱️ ${picked.durationText}`);
+    const metaLine = parts.length ? '\n' + parts.join(' · ') : '';
+
+    const text = `🎰 <b>JAV SSR Acquired!</b>\n\n` +
+      `🎥 <b>${escHtml(picked.title.slice(0, 150))}</b>${metaLine}\n\n` +
+      `<i>Mode: ${mode} · Page ${randomPage}</i>`;
+
+    const buttons = [
+      [{ text: '🎥 Lihat Detail + Download', callback_data: 'jav_0' }],
+      [
+        { text: '🎲 Reroll Random', callback_data: `javgacha_latest` },
+        { text: '🔥 Reroll Trending', callback_data: `javgacha_trending` },
+      ],
+      [
+        { text: '👘 Reroll Cosplay', callback_data: `javgacha_cosplay` },
+        { text: '🔙 Menu Utama', callback_data: 'menu_awal' },
+      ],
+    ];
+
+    // Kirim dengan thumbnail kalau ada — UX Gacha Cosplaytele style
+    bot.deleteMessage(chatId, gMsg.message_id).catch(() => { });
+    if (picked.thumb) {
+      try {
+        const sentMsg = await bot.sendPhoto(chatId, picked.thumb, {
+          caption: text, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons },
+        });
+        autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+        return;
+      } catch (e) {
+        log.warn(`[Jav-Gacha] sendPhoto gagal (${e.message}), fallback text`);
+      }
+    }
+    const sentMsg = await bot.sendMessage(chatId, text, {
+      parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons },
+    });
+    autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+  } catch (err) {
+    log.error(`[Jav-Gacha] error: ${err.message}`);
+    bot.editMessageText(`❌ Gacha gagal: ${err.message}`, { chat_id: chatId, message_id: gMsg.message_id }).catch(() => { });
+  }
+}
+
 async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
   // Ambil detail dari cache kalau ada, re-scrape kalau expired
   const cache = javBrowseCache.get(chatId);
@@ -2321,7 +2437,7 @@ async function sendMainMenu(bot, chatId) {
     [{ text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' }],
     [{ text: '📊 Profile', callback_data: 'menu_profile' }],
     [{ text: '🎬 R34 Video Browse', callback_data: 'menu_r34_browse' }, { text: '🎬 R34 Gacha', callback_data: 'menu_r34_gacha' }],
-    [{ text: '📌 Pinterest Search', callback_data: 'pin_search_prompt' }, { text: '🎥 Javtiful', callback_data: 'jav_search_prompt' }],
+    [{ text: '📌 Pinterest Search', callback_data: 'pin_search_prompt' }, { text: '🎥 Javtiful', callback_data: 'jav_menu' }],
     [{ text: '🔥 EroThots', callback_data: 'ero_search_prompt' }],
     [{ text: '🧹 Clear Chat', callback_data: 'menu_clear' }, { text: '📥 Manual Terabox DL', callback_data: 'menu_terabox' }]
   ];
@@ -2433,21 +2549,37 @@ function startBot() {
   bot.onText(/^\/jav(?:\s+(.+))?$/, async (msg, match) => {
     bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
     const query = match[1] && match[1].trim();
+
+    // Special shortcut: /jav gacha / /jav random / /jav trending
     if (query) {
+      const lc = query.toLowerCase();
+      if (lc === 'gacha' || lc === 'random' || lc === 'surprise') {
+        log.info(`[User ${msg.chat.id}] Execute /jav gacha (latest)`);
+        return doJavGacha(bot, msg.chat.id, 'latest');
+      }
+      if (lc === 'trending' || lc === 'hot') {
+        log.info(`[User ${msg.chat.id}] Execute /jav gacha (trending)`);
+        return doJavGacha(bot, msg.chat.id, 'trending');
+      }
       log.info(`[User ${msg.chat.id}] Execute /jav search: ${query}`);
       doJavBrowse(bot, msg.chat.id, query, 1, 'search');
     } else {
-      log.info(`[User ${msg.chat.id}] Execute /jav (prompt)`);
-      userStates.set(msg.chat.id, { step: 'AWAITING_JAV_SEARCH' });
+      log.info(`[User ${msg.chat.id}] Execute /jav (menu)`);
       const sentMsg = await bot.sendMessage(msg.chat.id,
-        `🎥 <b>Javtiful Search</b>\n\nKetik salah satu:\n` +
-        `• Kode JAV: <code>MIDE-232</code>, <code>ssni001</code>, <code>avsa 432</code>\n` +
-        `• Nama aktris: <code>matsumoto nanami</code>\n` +
-        `• Tag: <code>cosplay</code>, <code>amateur</code>, <code>maid</code>\n\n` +
-        `<i>💡 Bot otomatis normalisasi kode JAV dari format apapun.</i>`,
+        `🎥 <b>Javtiful</b>\n\nPilih mode:`,
         {
           parse_mode: 'HTML',
-          reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔍 Search', callback_data: 'jav_search_prompt' }],
+              [
+                { text: '🎰 Gacha Random', callback_data: 'javgacha_latest' },
+                { text: '🔥 Trending', callback_data: 'javgacha_trending' },
+              ],
+              [{ text: '👘 Gacha Cosplay', callback_data: 'javgacha_cosplay' }],
+              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+            ]
+          }
         }
       );
       autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
@@ -2907,11 +3039,37 @@ function startBot() {
     }
 
     // ── Javtiful Callbacks ──
+    if (action === 'jav_menu') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const sentMsg = await bot.sendMessage(chatId,
+        `🎥 <b>Javtiful</b>\n\nPilih mode:`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔍 Search', callback_data: 'jav_search_prompt' }],
+              [
+                { text: '🎰 Gacha Random', callback_data: 'javgacha_latest' },
+                { text: '🔥 Trending', callback_data: 'javgacha_trending' },
+              ],
+              [{ text: '👘 Gacha Cosplay', callback_data: 'javgacha_cosplay' }],
+              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+            ]
+          }
+        }
+      );
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
     if (action === 'jav_search_prompt') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       userStates.set(chatId, { step: 'AWAITING_JAV_SEARCH' });
       const sentMsg = await bot.sendMessage(chatId,
-        `🎥 <b>Javtiful Search</b>\n\nKetik kode JAV, kategori, atau kata kunci:`,
+        `🎥 <b>Javtiful Search</b>\n\nKetik salah satu:\n` +
+        `• Kode JAV: <code>MIDE-232</code>, <code>ssni001</code>, <code>avsa 432</code>\n` +
+        `• Nama aktris: <code>matsumoto nanami</code>\n` +
+        `• Tag: <code>cosplay</code>, <code>amateur</code>, <code>maid</code>\n\n` +
+        `<i>💡 Bot otomatis normalisasi kode JAV.</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
@@ -2919,6 +3077,12 @@ function startBot() {
       );
       autoCleanOldMenu(bot, chatId, sentMsg.message_id);
       return;
+    }
+    // Jav Gacha: javgacha_<mode>
+    if (action.startsWith('javgacha_')) {
+      const mode = action.replace('javgacha_', '');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doJavGacha(bot, chatId, mode);
     }
     if (action === 'jav_back_browse') {
       const cache = javBrowseCache.get(chatId);
