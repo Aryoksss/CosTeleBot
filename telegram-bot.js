@@ -22,8 +22,19 @@ class DownloadQueue {
     this.userLastServed = new Map();  // chatId -> timestamp
     this.activeJobs = new Map();      // id -> activeEntry
     this.jobCounter = 1;
-    this.maxConcurrency = 2;
-    this.maxPerUser = 3;
+    // Configurable via env untuk tuning per-VPS-spec.
+    // Default: 6 concurrent + 8 per-user (cocok untuk VPS 2 vCPU + 4 GB RAM).
+    // Tuning guide:
+    //   1 GB RAM:  QUEUE_CONCURRENCY=2-3
+    //   2 GB RAM:  QUEUE_CONCURRENCY=4-5
+    //   4 GB RAM:  QUEUE_CONCURRENCY=6-8  (default)
+    //   8 GB RAM:  QUEUE_CONCURRENCY=10-12
+    // Per job peak RAM ~250 MB (download + extract + sharp compress 4K + upload).
+    // Bottleneck nyata biasanya bandwidth + Telegram upload rate, bukan CPU.
+    this.maxConcurrency = parseInt(process.env.QUEUE_CONCURRENCY || '6', 10);
+    this.maxPerUser = parseInt(process.env.QUEUE_MAX_PER_USER || '8', 10);
+    // Pakai console.log langsung (bukan log.info) karena `log` belum didefinisikan saat constructor jalan.
+    console.log(`\x1b[36m[Queue]\x1b[0m config: maxConcurrency=${this.maxConcurrency} maxPerUser=${this.maxPerUser}`);
   }
 
   /**
