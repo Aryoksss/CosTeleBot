@@ -472,53 +472,61 @@ async function extractArchive(archivePath, destDir, password = null) {
     // Helper untuk mask password: tampilkan 2 char pertama + panjang agar user bisa bedakan
     // mana yang sedang dicoba, tanpa echo plaintext ke console.
     const maskPw = (pw) => pw ? `${pw.slice(0, 2)}***(len=${pw.length})` : 'none';
-    for (const pw of candidates) {
+
+    // Urutan tool per-ekstensi:
+    //   .rar  → unrar (native, support semua compression method RAR5) → 7z (fallback)
+    //   .zip  → 7z (native zip support sempurna)
+    //   .7z   → 7z (native)
+    // Alasan: p7zip di Linux kadang tidak support RAR5 method tertentu (BLAKE2, PPMd)
+    // → "Unsupported Method" walau password benar. Unrar dari WinRAR team handle semua.
+    const tools = ext === '.rar' ? ['unrar', '7z'] : ['7z', 'unrar'];
+
+    const run7z = (pw) => {
+      const args = ['x', archivePath];
+      if (pw) args.push(`-p${pw}`); else args.push('-p');
+      args.push(`-o${destDir}`, '-y');
+      return spawnSync(PATH_7ZA, args, { encoding: 'utf8' });
+    };
+    const runUnrar = (pw) => {
+      if (ext !== '.rar') return { status: -1, stderr: 'unrar hanya untuk .rar' };
+      const args = ['x', '-y'];
+      args.push(pw ? `-p${pw}` : '-p-');
+      args.push(archivePath, `${destDir}/`);
+      return spawnSync('unrar', args, { encoding: 'utf8' });
+    };
+
+    outer: for (const pw of candidates) {
       const pwMask = maskPw(pw);
-      try {
-        // Pakai spawnSync argv-array (bukan shell string concat) agar password
-        // tidak bisa disalahgunakan untuk shell injection walaupun mengandung " ; & ` $().
-        const args = ['x', archivePath];
-        if (pw) args.push(`-p${pw}`); else args.push('-p'); // -p (no pw) cegah prompt interaktif
-        args.push(`-o${destDir}`, '-y');
-        const r = spawnSync(PATH_7ZA, args, { encoding: 'utf8' });
-        if (r.status === 0) {
-          success = true;
-          log.ok(`Archive extracted via 7z (bin=${PATH_7ZA}, ext=${ext}, pw=${pwMask})`);
-          break;
-        } else {
-          // Simpan stderr attempt terakhir untuk diagnostic
-          lastStderr = String(r.stderr || r.stdout || '').slice(0, 300);
-          const signal = r.signal ? ` signal=${r.signal}` : '';
-          const errLine = lastStderr.split('\n').find(l => l.includes('ERROR') || l.includes('Wrong') || l.includes('Cannot'));
-          // exit=null biasanya berarti binary crash/tidak ditemukan (bukan wrong password)
-          const hint = (r.status === null && !r.signal && !errLine)
-            ? '(binary tidak jalan: kemungkinan 7za rusak atau tidak executable — coba install p7zip-full)'
-            : (errLine || lastStderr.slice(0, 120) || '(no stderr)');
-          log.warn(`[7z] pw=${pwMask} → exit=${r.status}${signal}: ${hint}`);
-        }
-      } catch (e) {
-        lastStderr = e.message;
-        log.warn(`[7z] pw=${pwMask} → spawn error: ${e.message}`);
-      }
-      // Fallback ke unrar khusus .rar jika 7z gagal (hanya tersedia di Linux VPS)
-      if (ext === '.rar') {
+      for (const tool of tools) {
         try {
-          const args = ['x', '-y'];
-          args.push(pw ? `-p${pw}` : '-p-');
-          args.push(archivePath, `${destDir}/`);
-          const r = spawnSync('unrar', args, { stdio: 'ignore' });
+          const r = tool === 'unrar' ? runUnrar(pw) : run7z(pw);
           if (r.status === 0) {
             success = true;
-            log.ok(`Archive extracted via unrar fallback (pw=${pwMask})`);
-            break;
+            log.ok(`Archive extracted via ${tool} (ext=${ext}, pw=${pwMask})`);
+            break outer;
           }
-        } catch (e) { }
+          // Non-zero exit: catat untuk diagnostic
+          if (r.status === -1) continue; // unrar skipped untuk non-rar
+          lastStderr = String(r.stderr || r.stdout || '').slice(0, 300);
+          const signal = r.signal ? ` signal=${r.signal}` : '';
+          const errLine = lastStderr.split('\n').find(l => l.includes('ERROR') || l.includes('Wrong') || l.includes('Cannot') || l.includes('Unsupported'));
+          const hint = (r.status === null && !r.signal && !errLine)
+            ? '(binary tidak jalan: kemungkinan rusak/tidak executable)'
+            : (errLine || lastStderr.slice(0, 120) || '(no stderr)');
+          // Kalau tool pertama gagal karena "Unsupported Method" / "Wrong password",
+          // stop coba tool kedua untuk pw ini — tool selanjutnya bakal handle.
+          log.warn(`[${tool}] pw=${pwMask} → exit=${r.status}${signal}: ${hint}`);
+        } catch (e) {
+          lastStderr = e.message;
+          log.warn(`[${tool}] pw=${pwMask} → spawn error: ${e.message}`);
+        }
       }
     }
     if (!success) {
       const hint = lastStderr.toLowerCase().includes('wrong password')
         ? 'password tidak cocok'
-        : (lastStderr.toLowerCase().includes('headers error') ? 'header terenkripsi / password salah di header-level' : 'file korup atau 7z binary bermasalah');
+        : (lastStderr.toLowerCase().includes('unsupported method') ? 'archive pakai compression method yang tidak didukung (upgrade p7zip atau install unrar non-free)'
+          : (lastStderr.toLowerCase().includes('headers error') ? 'header terenkripsi / password salah di header-level' : 'file korup'));
       throw new Error(`Gagal ekstrak arsip '${path.basename(archivePath)}' — ${hint}. Detail: ${lastStderr.slice(0, 160)}`);
     }
   }
