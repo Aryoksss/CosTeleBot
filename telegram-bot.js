@@ -72,8 +72,12 @@ const os = require('os');
 const fsp = fs.promises;
 const path = require('path');
 // 7zip-bin menyediakan binary 7za lintas OS agar tidak tergantung `7z` di PATH.
+// Di Linux, prefer sistem `/usr/bin/7z` dari p7zip-full (lebih stabil, library sistem lengkap).
+// Binary bundled dari 7zip-bin dipakai sebagai fallback (terutama Windows yang tidak punya 7z di PATH).
 let PATH_7ZA = '7z';
-try { PATH_7ZA = require('7zip-bin').path7za || '7z'; } catch (_) { }
+if (process.platform !== 'linux') {
+  try { PATH_7ZA = require('7zip-bin').path7za || '7z'; } catch (_) { }
+}
 // Modul unzipper dan node-unrar-js telah dinonaktifkan untuk menghemat RAM (Telah menggunakan native P7zip OS)
 const sharp = require('sharp'); // Auto-Compressor
 const cosplayteleScraper = require('./scrapers/cosplaytele');
@@ -465,7 +469,11 @@ async function extractArchive(archivePath, destDir, password = null) {
   if (ext === '.zip' || ext === '.rar' || ext === '.7z') {
     let success = false;
     let lastStderr = '';
+    // Helper untuk mask password: tampilkan 2 char pertama + panjang agar user bisa bedakan
+    // mana yang sedang dicoba, tanpa echo plaintext ke console.
+    const maskPw = (pw) => pw ? `${pw.slice(0, 2)}***(len=${pw.length})` : 'none';
     for (const pw of candidates) {
+      const pwMask = maskPw(pw);
       try {
         // Pakai spawnSync argv-array (bukan shell string concat) agar password
         // tidak bisa disalahgunakan untuk shell injection walaupun mengandung " ; & ` $().
@@ -475,15 +483,22 @@ async function extractArchive(archivePath, destDir, password = null) {
         const r = spawnSync(PATH_7ZA, args, { encoding: 'utf8' });
         if (r.status === 0) {
           success = true;
-          log.ok(`Archive extracted via 7z (ext=${ext}, pw=${pw ? '***' : 'none'})`);
+          log.ok(`Archive extracted via 7z (bin=${PATH_7ZA}, ext=${ext}, pw=${pwMask})`);
           break;
         } else {
           // Simpan stderr attempt terakhir untuk diagnostic
           lastStderr = String(r.stderr || r.stdout || '').slice(0, 300);
-          log.warn(`[7z] pw='${pw ? '***' : 'none'}' → exit=${r.status}: ${lastStderr.split('\n').find(l => l.includes('ERROR') || l.includes('Wrong') || l.includes('Cannot')) || lastStderr.slice(0, 120)}`);
+          const signal = r.signal ? ` signal=${r.signal}` : '';
+          const errLine = lastStderr.split('\n').find(l => l.includes('ERROR') || l.includes('Wrong') || l.includes('Cannot'));
+          // exit=null biasanya berarti binary crash/tidak ditemukan (bukan wrong password)
+          const hint = (r.status === null && !r.signal && !errLine)
+            ? '(binary tidak jalan: kemungkinan 7za rusak atau tidak executable — coba install p7zip-full)'
+            : (errLine || lastStderr.slice(0, 120) || '(no stderr)');
+          log.warn(`[7z] pw=${pwMask} → exit=${r.status}${signal}: ${hint}`);
         }
       } catch (e) {
         lastStderr = e.message;
+        log.warn(`[7z] pw=${pwMask} → spawn error: ${e.message}`);
       }
       // Fallback ke unrar khusus .rar jika 7z gagal (hanya tersedia di Linux VPS)
       if (ext === '.rar') {
@@ -494,7 +509,7 @@ async function extractArchive(archivePath, destDir, password = null) {
           const r = spawnSync('unrar', args, { stdio: 'ignore' });
           if (r.status === 0) {
             success = true;
-            log.ok(`Archive extracted via unrar fallback (pw=${pw ? '***' : 'none'})`);
+            log.ok(`Archive extracted via unrar fallback (pw=${pwMask})`);
             break;
           }
         } catch (e) { }
@@ -503,7 +518,7 @@ async function extractArchive(archivePath, destDir, password = null) {
     if (!success) {
       const hint = lastStderr.toLowerCase().includes('wrong password')
         ? 'password tidak cocok'
-        : (lastStderr.toLowerCase().includes('headers error') ? 'header terenkripsi / password salah di header-level' : 'file korup');
+        : (lastStderr.toLowerCase().includes('headers error') ? 'header terenkripsi / password salah di header-level' : 'file korup atau 7z binary bermasalah');
       throw new Error(`Gagal ekstrak arsip '${path.basename(archivePath)}' — ${hint}. Detail: ${lastStderr.slice(0, 160)}`);
     }
   }
