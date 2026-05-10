@@ -94,6 +94,7 @@ const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
 const { renderProgressBar, createProgressThrottler } = require('./utils/progressUi');
 const healthcheck = require('./utils/healthcheck');
+const backup = require('./utils/backup');
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -2674,6 +2675,7 @@ function startBot() {
     { command: '/tasks', description: '🚦 Pantau Dasbor Antrean' },
     { command: '/stats', description: '🔰 Lihat Profil' },
     { command: '/health', description: '🏥 Cek kesehatan bot + semua sumber' },
+    { command: '/backup', description: '💾 Export data kamu (JSON)' },
     { command: '/clear', description: '🧹 Bersihkan Seluruh Chat' }
   ]).catch(() => log.warn('Gagal set command menu.'));
 
@@ -2969,6 +2971,88 @@ function startBot() {
       log.error(`[Health] ${e.message}`);
       await bot.editMessageText(`❌ Healthcheck gagal: ${e.message}`, {
         chat_id: msg.chat.id, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      }).catch(() => { });
+    }
+  });
+
+  // /backup — export user data as JSON file
+  bot.onText(/^\/backup(?:\s|$)/, async (msg) => {
+    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
+    log.info(`[User ${msg.chat.id}] Execute /backup`);
+    try {
+      await fsp.mkdir(CONFIG.TEMP_DIR, { recursive: true });
+      const { path: filePath, filename, payload } = backup.writeBackupFile(msg.chat.id, CONFIG.TEMP_DIR);
+
+      const caption = `💾 <b>Backup Kamu</b>\n\n` +
+        `📊 ${payload.stats.gachaCasts} gacha · ${(payload.stats.downloadBytes / 1048576).toFixed(1)} MB download\n` +
+        `📚 ${payload.summary.totalHistoryEntries} history entries\n` +
+        `🏷️ Categories: ${payload.summary.categories.join(', ') || '(empty)'}\n\n` +
+        `<i>Simpan file ini. Untuk restore, kirim file ini kembali ke bot dengan caption <code>/restore</code>.</i>`;
+
+      await bot.sendDocument(msg.chat.id, fs.createReadStream(filePath), {
+        caption,
+        parse_mode: 'HTML',
+      }, {
+        filename,
+        contentType: 'application/json',
+      });
+
+      // Cleanup tmp file setelah 60 detik
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch (_) { } }
+      }, 60000);
+    } catch (e) {
+      log.error(`[Backup] ${e.message}`);
+      bot.sendMessage(msg.chat.id, `❌ Backup gagal: ${e.message}`, { parse_mode: 'HTML' }).catch(() => { });
+    }
+  });
+
+  // Handle document upload dengan caption /restore — restore backup JSON
+  bot.on('document', async (msg) => {
+    if (!msg.document) return;
+    const caption = (msg.caption || '').trim();
+    if (!/^\/restore\b/i.test(caption)) return;
+
+    const chatId = msg.chat.id;
+    log.info(`[User ${chatId}] Execute /restore via document: ${msg.document.file_name}`);
+    bot.deleteMessage(chatId, msg.message_id).catch(() => { });
+
+    const loadMsg = await bot.sendMessage(chatId, `💾 <b>Restoring backup...</b>\n<i>Mengunduh file...</i>`, { parse_mode: 'HTML' });
+
+    try {
+      // Download file via getFileLink
+      const fileLink = await bot.getFileLink(msg.document.file_id);
+      const axios = require('axios');
+      const r = await axios.get(fileLink, { responseType: 'text', timeout: 30000 });
+
+      let backupJson;
+      try {
+        backupJson = typeof r.data === 'object' ? r.data : JSON.parse(r.data);
+      } catch (e) {
+        return bot.editMessageText(`❌ File bukan JSON valid: ${e.message.slice(0, 100)}`, {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        });
+      }
+
+      const result = backup.restoreBackup(chatId, backupJson);
+      if (!result.restored) {
+        return bot.editMessageText(`❌ Restore gagal: ${result.error}`, {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        });
+      }
+
+      let msg2 = `✅ <b>Restore sukses!</b>\n\n`;
+      msg2 += `📚 History: ${result.entriesAdded} entry baru ditambahkan\n`;
+      if (result.statsRestored) msg2 += `📊 Stats: restored dari backup\n`;
+      else if (!result.sameUser) msg2 += `⚠️ <i>ChatId backup berbeda (${result.srcChatId}) — hanya history yang di-restore, bukan stats.</i>\n`;
+
+      await bot.editMessageText(msg2, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      });
+    } catch (e) {
+      log.error(`[Restore] ${e.message}`);
+      bot.editMessageText(`❌ Restore gagal: ${e.message.slice(0, 200)}`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
       }).catch(() => { });
     }
   });
