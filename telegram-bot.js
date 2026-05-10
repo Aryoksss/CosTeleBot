@@ -1020,85 +1020,249 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
 // ─── COSPLAYTELE MAPPING HANDLERS ──────────────────────────────────────────────
 async function sendPostDetail(bot, chatId, loadMsg, post, cacheIndex) {
   const links = await cosplayteleScraper.scrapePostDetail(post.url);
-  let resText = `🔗 <b>Links Ditemukan:</b>\n${post.title}\n\n`;
-  let dlButtons = [];
-
-  if (links) {
-    if (links.gofile) {
-      resText += `📁 <b>Gofile:</b> ${links.gofile}\n`;
-      dlButtons.push([{ text: '⬇️ Download via Gofile (Auto)', callback_data: `dlgofile_${cacheIndex}` }]);
-    }
-    if (links.mediafire) {
-      resText += `🔥 <b>MediaFire:</b> ${links.mediafire}\n`;
-      dlButtons.push([{ text: '⬇️ Download via MediaFire (Auto)', callback_data: `dlmediafire_${cacheIndex}` }]);
-    }
-    if (links.sorafolder) {
-      resText += `🔥 <b>SoraFolder:</b> ${links.sorafolder}\n`;
-      dlButtons.push([{ text: '⬇️ Download via SoraFolder (Auto)', callback_data: `dlsorafolder_${cacheIndex}` }]);
-    }
-    if (links.terabox) resText += `📥 <b>TeraBox:</b> ${links.terabox}\n`;
-  } else {
-    resText += 'Tidak ada link yang dikenali.';
+  if (!links) {
+    return bot.editMessageText('❌ Gagal memuat detail post.', {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Kembali', callback_data: 'back_browse' }]] },
+    }).catch(() => { });
   }
 
+  // Merge metadata: listing-level fields (dari parseAriaLabel) + detail-level
+  const meta = links.meta || {};
+  const cosplayer = post.cosplayer || meta.cosplayer;
+  const character = post.character || meta.character;
+  const series = post.series || meta.series;
+  const photoCount = post.photoCount ?? meta.photoCount;
+  const videoCount = post.videoCount ?? meta.videoCount;
+
+  // Pakai thumb dari detail (biasanya lebih HD) kalau ada, fallback post.thumb
+  const thumb = links.thumb || post.thumb;
+
+  // Bangun caption
+  let resText = '';
+  if (character || cosplayer) {
+    if (character) resText += `✨ <b>${escHtml(character)}</b>`;
+    if (series) resText += ` · <i>${escHtml(series)}</i>`;
+    resText += `\n`;
+    if (cosplayer) resText += `👤 ${escHtml(cosplayer)}\n`;
+  } else {
+    resText += `✨ <b>${escHtml(post.title)}</b>\n`;
+  }
+
+  const statsLine = [];
+  if (photoCount) statsLine.push(`📸 ${photoCount} foto`);
+  if (videoCount) statsLine.push(`🎬 ${videoCount} video`);
+  if (statsLine.length) resText += `${statsLine.join(' · ')}\n`;
+
+  // Download links info
+  resText += `\n<b>Links:</b>\n`;
+  if (links.gofile) resText += `📁 Gofile\n`;
+  if (links.mediafire) resText += `🔥 MediaFire\n`;
+  if (links.sorafolder) resText += `🌤️ SoraFolder\n`;
+  if (links.terabox) resText += `📥 TeraBox: <code>${escHtml(links.terabox.slice(0, 60))}</code>\n`;
+  if (!links.gofile && !links.mediafire && !links.sorafolder && !links.terabox) {
+    resText += `<i>Tidak ada link download terdeteksi.</i>\n`;
+  }
+
+  if (links.password) resText += `\n🔑 Password: <code>${escHtml(links.password)}</code>\n`;
+
+  // Build buttons
+  const dlButtons = [];
+
+  // Download auto (pakai existing callback names agar backward compat)
+  if (links.gofile) dlButtons.push([{ text: '⬇️ Download via Gofile (Auto)', callback_data: `dlgofile_${cacheIndex}` }]);
+  if (links.mediafire) dlButtons.push([{ text: '⬇️ Download via MediaFire (Auto)', callback_data: `dlmediafire_${cacheIndex}` }]);
+  if (links.sorafolder) dlButtons.push([{ text: '⬇️ Download via SoraFolder (Auto)', callback_data: `dlsorafolder_${cacheIndex}` }]);
+
+  // Preview gallery (kalau ada ≥3 image)
+  if (links.previewImages && links.previewImages.length >= 3) {
+    dlButtons.push([{ text: `👀 Preview (${links.previewImages.length} foto sampel)`, callback_data: `cptprev_${cacheIndex}` }]);
+  }
+
+  // Explore: browse by cosplayer / character / series
+  if (links.cosplayerSlug) {
+    dlButtons.push([{ text: `👤 More from ${(cosplayer || 'Cosplayer').slice(0, 25)}`, callback_data: `cptcos_${links.cosplayerSlug}` }]);
+  }
+  // Character + series tag buttons side-by-side
+  const tagRow = [];
+  if (links.characterTag) {
+    tagRow.push({ text: `🏷️ ${links.characterTag.name.slice(0, 20)}`, callback_data: `cpttag_${links.characterTag.slug}` });
+  }
+  if (links.seriesTag && links.seriesTag.slug !== links.characterTag?.slug) {
+    tagRow.push({ text: `🏷️ ${links.seriesTag.name.slice(0, 20)}`, callback_data: `cpttag_${links.seriesTag.slug}` });
+  }
+  if (tagRow.length) dlButtons.push(tagRow);
+
+  // Back navigation
   const stateInfo = browseCache.get(chatId);
   if (stateInfo && stateInfo.isGacha) {
-    dlButtons.push([{ text: '🎲 Cari Acak Lagi (Reroll)', callback_data: 'menu_gacha' }]);
-    dlButtons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+    dlButtons.push([
+      { text: '🎲 Gacha Lagi', callback_data: 'menu_gacha' },
+      { text: '🔙 Menu', callback_data: 'menu_awal' },
+    ]);
   } else {
     dlButtons.push([{ text: '🔙 Kembali ke Daftar', callback_data: 'back_browse' }]);
   }
 
-  const replyMarkupObj = dlButtons.length > 0 ? { inline_keyboard: dlButtons } : undefined;
+  // Cache detail untuk callback preview / downloads
+  const cache = browseCache.get(chatId) || { posts: [], page: 1, category: 'home' };
+  cache.detailCache = cache.detailCache || {};
+  cache.detailCache[cacheIndex] = links;
+  browseCache.set(chatId, cache);
+
+  const replyMarkupObj = { inline_keyboard: dlButtons };
 
   try {
-    if (post.thumb) {
+    if (thumb) {
       await bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
-      await bot.sendPhoto(chatId, post.thumb, {
-        caption: resText, parse_mode: 'HTML', reply_markup: replyMarkupObj
+      await bot.sendPhoto(chatId, thumb, {
+        caption: resText, parse_mode: 'HTML', reply_markup: replyMarkupObj,
       });
     } else {
-      bot.editMessageText(resText, {
-        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: replyMarkupObj
+      await bot.editMessageText(resText, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: replyMarkupObj,
       });
     }
   } catch (err) {
-    log.warn(`Gagal mengirim preview: ${err.message}`);
-    bot.editMessageText(resText, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: replyMarkupObj }).catch(() => { });
+    log.warn(`[Cosplaytele] Gagal kirim preview: ${err.message}`);
+    bot.editMessageText(resText, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      reply_markup: replyMarkupObj,
+    }).catch(() => { });
   }
 }
 
-async function doCosplayteleGacha(bot, chatId) {
-  const gMsg = await bot.sendMessage(chatId, '🎲 <b>Mengguncang Mesin Gacha...</b>\n<i>Mencari random album rahasia dari dimensi lain...</i>', { parse_mode: 'HTML' });
+/**
+ * Kirim sample preview images sebagai mediaGroup (3-10 foto sampel dari gallery post).
+ */
+async function doCptPreview(bot, chatId, cacheIndex) {
+  const cache = browseCache.get(chatId);
+  const detail = cache?.detailCache?.[cacheIndex];
+  if (!detail || !detail.previewImages || detail.previewImages.length === 0) {
+    return bot.sendMessage(chatId, '⚠️ Preview tidak tersedia. Klik Detail ulang.');
+  }
+
+  const loadMsg = await bot.sendMessage(chatId, `👀 <b>Mengirim ${Math.min(detail.previewImages.length, 10)} sample foto...</b>`, { parse_mode: 'HTML' });
+
+  try {
+    const sampleUrls = detail.previewImages.slice(0, 10);
+    const mediaGroup = sampleUrls.map((url, i) => ({
+      type: 'photo',
+      media: url,
+      caption: i === 0 ? `👀 Preview sample dari ${escHtml((detail.meta?.character || detail.title || 'Post').slice(0, 80))}` : undefined,
+      parse_mode: 'HTML',
+    }));
+
+    await bot.sendMediaGroup(chatId, mediaGroup);
+    bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
+  } catch (e) {
+    log.warn(`[Cosplaytele] Preview gagal: ${e.message}`);
+    bot.editMessageText(`⚠️ Gagal kirim preview: ${e.message.slice(0, 120)}`, {
+      chat_id: chatId, message_id: loadMsg.message_id,
+    }).catch(() => { });
+  }
+}
+
+/**
+ * Cosplaytele Gacha dengan multi-mode pool.
+ * Modes:
+ *   'random'    → random page 1-50 dari home (default, luas)
+ *   'trending24'→ /24-hours/ (60 trending hari ini)
+ *   'trending3d'→ /3-day/
+ *   'trending7d'→ /7-day/
+ *   'ero'       → random dari category cosplay-ero
+ *   'nude'      → random dari category nude
+ *   'video'     → random dari category video
+ */
+async function doCosplayteleGacha(bot, chatId, mode = 'random') {
+  log.info(`[User ${chatId}] Cosplaytele gacha mode=${mode}`);
+
+  const modeLabel = {
+    random: '🎲 Random',
+    trending24: '🔥 Trending 24j',
+    trending3d: '🔥 Trending 3d',
+    trending7d: '🔥 Trending 7d',
+    ero: '💋 Ero',
+    nude: '🔞 Nude',
+    video: '🎬 Video',
+  }[mode] || '🎲 Random';
+
+  const gMsg = await bot.sendMessage(chatId,
+    `🎲 <b>Cosplay Gacha ${modeLabel}...</b>\n<i>Mengacak album cosplay...</i>`,
+    { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, gMsg.message_id);
   statsDb.addGacha(chatId);
 
   try {
-    const randPage = Math.floor(Math.random() * 50) + 1; // Asumsi ada >50 page
-    const posts = await cosplayteleScraper.scrapeListing(randPage, 'home');
+    let posts = [];
+    let contextInfo = '';
 
-    if (!posts || posts.length === 0) {
-      return bot.editMessageText('❌ Mesin Gacha sedang macet, coba lagi nanti.', { chat_id: chatId, message_id: gMsg.message_id });
+    if (mode.startsWith('trending')) {
+      const windowKey = mode === 'trending24' ? '24-hours' : mode === 'trending3d' ? '3-day' : '7-day';
+      posts = await cosplayteleScraper.scrapeTrending(windowKey);
+      contextInfo = windowKey;
+    } else if (mode === 'ero') {
+      const randPage = Math.floor(Math.random() * 20) + 1;
+      posts = await cosplayteleScraper.scrapeCategory('cosplay-ero', randPage);
+      contextInfo = `ero page ${randPage}`;
+    } else if (mode === 'nude') {
+      const randPage = Math.floor(Math.random() * 20) + 1;
+      posts = await cosplayteleScraper.scrapeCategory('nude', randPage);
+      contextInfo = `nude page ${randPage}`;
+    } else if (mode === 'video') {
+      const randPage = Math.floor(Math.random() * 10) + 1;
+      posts = await cosplayteleScraper.scrapeCategory('video-cosplayy', randPage);
+      contextInfo = `video page ${randPage}`;
+    } else {
+      // Default random
+      const randPage = Math.floor(Math.random() * 50) + 1;
+      posts = await cosplayteleScraper.scrapeListing(randPage, 'home');
+      contextInfo = `page ${randPage}`;
     }
 
-    const unseenPosts = posts.filter(p => !historyTracker.hasSeen(chatId, 'cosplay', p.url));
-    const randomPost = unseenPosts.length > 0
-      ? unseenPosts[Math.floor(Math.random() * unseenPosts.length)]
-      : posts[Math.floor(Math.random() * posts.length)]; // Fallback jika semua pernah dilihat
+    if (!posts || posts.length === 0) {
+      return bot.editMessageText('❌ Pool gacha kosong. Coba mode lain.', {
+        chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🎲 Reroll', callback_data: `cptgacha_${mode}` },
+            { text: '🔙 Menu', callback_data: 'menu_awal' },
+          ]],
+        },
+      });
+    }
 
-    // Tandai sudah dilihat
-    historyTracker.markSeen(chatId, 'cosplay', randomPost.url);
+    // Anti-repeat
+    const unseen = posts.filter(p => !historyTracker.hasSeen(chatId, 'cosplay', p.url));
+    const pick = unseen.length > 0
+      ? unseen[Math.floor(Math.random() * unseen.length)]
+      : posts[Math.floor(Math.random() * posts.length)];
+    historyTracker.markSeen(chatId, 'cosplay', pick.url);
 
-    // Sengaja overwrite cache index 0 agar tombol Download Gofile nyambung ke index ini
-    browseCache.set(chatId, { posts: [randomPost], page: randPage, category: 'home', query: null, isGacha: true });
+    log.ok(`[Cpt-Gacha] mode=${mode} pool=${posts.length} unseen=${unseen.length} pick="${(pick.title || '?').slice(0, 60)}"`);
 
-    await bot.editMessageText(`🎲 <b>Berhasil! Anda mendapat item SSR!</b>\n\n🔍 Memeriksa link untuk:\n<b>${randomPost.title}</b>`, {
-      chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML'
+    // Simpan sbg pseudo-listing 1-item, flag isGacha agar back button balik ke menu gacha
+    browseCache.set(chatId, {
+      posts: [pick], page: 1, category: 'home', query: null,
+      mode: 'gacha', isGacha: true, gachaMode: mode,
     });
 
-    await sendPostDetail(bot, chatId, gMsg, randomPost, 0);
+    // Announcement dengan header dramatis
+    await bot.editMessageText(
+      `🎰 <b>SSR Acquired!</b>\n\n` +
+      (pick.character ? `✨ <b>${escHtml(pick.character)}</b>` : '') +
+      (pick.series ? ` · <i>${escHtml(pick.series)}</i>` : '') +
+      (pick.cosplayer ? `\n👤 ${escHtml(pick.cosplayer)}` : '') +
+      (pick.photoCount ? `\n📸 ${pick.photoCount}${pick.videoCount ? ` +${pick.videoCount}🎬` : ''}` : '') +
+      `\n\n<i>Mode: ${modeLabel} · ${contextInfo}</i>\n\n` +
+      `⏳ <i>Memuat link download...</i>`,
+      { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }
+    );
+
+    await sendPostDetail(bot, chatId, gMsg, pick, 0);
   } catch (e) {
-    log.error('Gacha gagal: ' + e.message);
+    log.error(`[Cpt-Gacha] ${e.message}`);
     bot.editMessageText(`❌ Error Gacha: ${e.message}`, { chat_id: chatId, message_id: gMsg.message_id }).catch(() => { });
   }
 }
@@ -2379,20 +2543,75 @@ async function doAggregateSearch(bot, chatId, query) {
 }
 
 // ─── COSPLAYTELE BROWSE HANDLERS ─────────────────────────────────────────────
-async function doCosplayteleBrowse(bot, chatId, category = 'home', page = 1, query = null) {
-  log.info(`[User ${chatId}] Request Cosplaytele (Cat: ${category}, Page: ${page}, Query: ${query || 'none'})`);
-  const loadMsg = await bot.sendMessage(chatId, `🔍 <b>Memuat Cosplaytele...</b>`, { parse_mode: 'HTML' });
+/**
+ * Unified browse handler untuk Cosplaytele.
+ * Mode: 'home' | 'search' | 'category' | 'tag' | 'cosplayer' | 'trending'
+ *   'home' / 'search'       → param = query (or null for home)
+ *   'category' / 'tag'      → param = slug
+ *   'cosplayer'             → param = cosplayer slug (same as category under the hood)
+ *   'trending'              → param = window key ('24-hours' | '3-day' | '7-day')
+ * contextLabel = human-readable header (cosplayer name, character name, etc.)
+ */
+async function doCosplayteleBrowse(bot, chatId, category = 'home', page = 1, query = null, mode = null, contextLabel = null) {
+  // Deteksi mode dari kombinasi arg (backward compat)
+  if (!mode) {
+    if (query) mode = 'search';
+    else if (category === 'home') mode = 'home';
+    else mode = 'category';
+  }
+
+  log.info(`[User ${chatId}] Cosplaytele ${mode} "${query || category}" page=${page}`);
+
+  const header = {
+    home: '✨ Cosplaytele',
+    search: `🔍 Search: ${contextLabel || query}`,
+    category: `📂 ${contextLabel || category}`,
+    tag: `🏷️ ${contextLabel || category}`,
+    cosplayer: `👤 ${contextLabel || category}`,
+    trending: `🔥 Trending (${contextLabel || category})`,
+  }[mode] || '✨ Cosplaytele';
+
+  const loadMsg = await bot.sendMessage(chatId, `${header}\n<i>Memuat...</i>`, { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
 
   try {
-    const posts = await cosplayteleScraper.scrapeListing(page, category, query);
-    if (!posts.length) return bot.editMessageText('⚠️ Tidak ada post ditemukan.', { chat_id: chatId, message_id: loadMsg.message_id });
+    let posts;
+    if (mode === 'search') posts = await cosplayteleScraper.scrapeSearch(query, page);
+    else if (mode === 'tag') posts = await cosplayteleScraper.scrapeTag(category, page);
+    else if (mode === 'cosplayer') posts = await cosplayteleScraper.scrapeCategory(category, page);
+    else if (mode === 'trending') posts = await cosplayteleScraper.scrapeTrending(category);
+    else if (mode === 'category') posts = await cosplayteleScraper.scrapeCategory(category, page);
+    else posts = await cosplayteleScraper.scrapeListing(page, 'home', query);
+
+    if (!posts.length) {
+      return bot.editMessageText(`⚠️ Tidak ada post untuk <b>${escHtml(contextLabel || query || category)}</b>.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] },
+      });
+    }
 
     const shown = posts.slice(0, CONFIG.POSTS_PER_PAGE);
-    browseCache.set(chatId, { posts: shown, page, category, query });
+    browseCache.set(chatId, { posts: shown, page, category, query, mode, contextLabel });
 
-    let text = `✨ <b>Cosplaytele</b> ${query ? `(Query: ${query})` : ''} · Halaman ${page}\n\n`;
-    shown.forEach((p, i) => text += `${i + 1}. ${p.title}\n`);
+    // Build rich listing dengan cosplayer + character + photo count
+    let text = `${header} · Halaman ${page}\n\n`;
+    shown.forEach((p, i) => {
+      const parts = [];
+      // Title utama (prefer formatted character+series dari parseAriaLabel)
+      if (p.character && p.cosplayer) {
+        parts.push(`<b>${escHtml(p.character)}</b>`);
+        if (p.series) parts.push(`<i>${escHtml(p.series)}</i>`);
+      } else {
+        parts.push(escHtml(p.title.slice(0, 70)));
+      }
+      text += `${i + 1}. ${parts.join(' · ')}\n`;
+
+      // Baris cosplayer + count
+      const sub = [];
+      if (p.cosplayer) sub.push(`👤 ${escHtml(p.cosplayer.slice(0, 40))}`);
+      if (p.photoCount) sub.push(`📸 ${p.photoCount}${p.videoCount ? ` +${p.videoCount}🎬` : ''}`);
+      if (sub.length) text += `    ${sub.join(' · ')}\n`;
+    });
 
     const buttons = [];
     for (let i = 0; i < shown.length; i += 2) {
@@ -2403,14 +2622,17 @@ async function doCosplayteleBrowse(bot, chatId, category = 'home', page = 1, que
 
     const navRow = [];
     if (page > 1) navRow.push({ text: '◀ Prev', callback_data: `cpage_${page - 1}` });
-    navRow.push({ text: 'Next ▶', callback_data: `cpage_${page + 1}` });
-    buttons.push(navRow);
+    // Hanya tampilkan Next untuk mode yang memang paginated (bukan trending)
+    if (mode !== 'trending') navRow.push({ text: 'Next ▶', callback_data: `cpage_${page + 1}` });
+    if (navRow.length) buttons.push(navRow);
+    buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
 
     await bot.editMessageText(text, {
       chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: buttons }
+      reply_markup: { inline_keyboard: buttons },
     });
   } catch (err) {
+    log.error(`[Cosplaytele] browse error: ${err.message}`);
     bot.editMessageText(`❌ Gagal: ${err.message}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
   }
 }
@@ -2485,10 +2707,20 @@ function startBot() {
     doCosplayteleBrowse(bot, msg.chat.id, 'home', 1);
   });
 
-  bot.onText(/\/gacha(?!\d)/, (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { }); // Auto-clean
-    log.info(`[User ${msg.chat.id}] Execute /gacha`);
-    doCosplayteleGacha(bot, msg.chat.id);
+  bot.onText(/^\/gacha(?:\s+(.+))?$/, async (msg, match) => {
+    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
+    const arg = match[1] && match[1].trim().toLowerCase();
+    log.info(`[User ${msg.chat.id}] Execute /gacha ${arg || '(default)'}`);
+    // Shortcut mode dari argument
+    const modeMap = {
+      random: 'random', rand: 'random',
+      trending: 'trending24', hot: 'trending24', '24h': 'trending24',
+      '3d': 'trending3d', '7d': 'trending7d',
+      ero: 'ero', nude: 'nude', video: 'video',
+    };
+    if (arg && modeMap[arg]) return doCosplayteleGacha(bot, msg.chat.id, modeMap[arg]);
+    // Default: random
+    doCosplayteleGacha(bot, msg.chat.id, 'random');
   });
 
   bot.onText(/\/maple/, (msg) => {
@@ -2884,7 +3116,73 @@ function startBot() {
     }
     if (action === 'menu_gacha') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return doCosplayteleGacha(bot, chatId);
+      // Buka submenu gacha dengan pilihan mode
+      const sentMsg = await bot.sendMessage(chatId,
+        `🎲 <b>Cosplay Gacha</b>\n\nPilih pool gacha:`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🎲 Random', callback_data: 'cptgacha_random' },
+                { text: '🔥 24h', callback_data: 'cptgacha_trending24' },
+              ],
+              [
+                { text: '🔥 3 Hari', callback_data: 'cptgacha_trending3d' },
+                { text: '🔥 7 Hari', callback_data: 'cptgacha_trending7d' },
+              ],
+              [
+                { text: '💋 Ero', callback_data: 'cptgacha_ero' },
+                { text: '🔞 Nude', callback_data: 'cptgacha_nude' },
+              ],
+              [{ text: '🎬 Video', callback_data: 'cptgacha_video' }],
+              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+            ]
+          }
+        });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    // Cosplaytele Gacha eksekusi: cptgacha_<mode>
+    if (action.startsWith('cptgacha_')) {
+      const mode = action.replace('cptgacha_', '');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doCosplayteleGacha(bot, chatId, mode);
+    }
+    // Cosplaytele browse by cosplayer slug (from detail button)
+    if (action.startsWith('cptcos_')) {
+      const slug = action.replace('cptcos_', '');
+      // Resolve human name dari detailCache kalau ada
+      const cache = browseCache.get(chatId);
+      let label = slug.replace(/-/g, ' ');
+      if (cache?.detailCache) {
+        for (const det of Object.values(cache.detailCache)) {
+          if (det?.cosplayerSlug === slug && det.meta?.cosplayer) { label = det.meta.cosplayer; break; }
+          const found = det?.allCategories?.find(c => c.slug === slug);
+          if (found) { label = found.name; break; }
+        }
+      }
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doCosplayteleBrowse(bot, chatId, slug, 1, null, 'cosplayer', label);
+    }
+    // Cosplaytele browse by tag slug (from detail button)
+    if (action.startsWith('cpttag_')) {
+      const slug = action.replace('cpttag_', '');
+      const cache = browseCache.get(chatId);
+      let label = slug.replace(/-/g, ' ');
+      if (cache?.detailCache) {
+        for (const det of Object.values(cache.detailCache)) {
+          const found = det?.allTags?.find(t => t.slug === slug);
+          if (found) { label = found.name; break; }
+        }
+      }
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doCosplayteleBrowse(bot, chatId, slug, 1, null, 'tag', label);
+    }
+    // Cosplaytele preview (kirim 10 sample image)
+    if (action.startsWith('cptprev_')) {
+      const idx = parseInt(action.replace('cptprev_', ''), 10);
+      return doCptPreview(bot, chatId, idx);
     }
     if (action === 'menu_awal') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
@@ -3287,7 +3585,10 @@ function startBot() {
     if (action.startsWith('cpage_')) {
       const page = parseInt(action.split('_')[1], 10);
       const cache = browseCache.get(chatId);
-      if (cache) doCosplayteleBrowse(bot, chatId, cache.category, page, cache.query);
+      if (cache) doCosplayteleBrowse(
+        bot, chatId, cache.category, page, cache.query,
+        cache.mode, cache.contextLabel,
+      );
       return;
     }
 
@@ -3328,26 +3629,37 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { }); // Hapus foto preview
 
       if (cache) {
-        // Kalau cache berasal dari aggregate search, balik ke menu aggregate
-        // (bukan full Cosplaytele listing yang tidak pernah user lihat).
         if (cache.fromAggregate) {
           return doAggregateSearch(bot, chatId, cache.query);
         }
         if (cache.isGacha) {
-          const sentMsg = await bot.sendMessage(chatId, `👋 <b>CosTele Bot</b>\n\nPilih mode operasi:`, {
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '🔍 Browse Cosplaytele', callback_data: 'menu_cosplaytele' }],
-                [{ text: '🎲 Gacha Cosplay (Acak!)', callback_data: 'menu_gacha' }],
-                [{ text: '🔎 Cari / Search Judul', callback_data: 'menu_search' }],
-                [{ text: '📥 Manual Terabox DL', callback_data: 'menu_terabox' }]
-              ]
-            }
-          });
+          // Balik ke menu gacha submenu
+          const sentMsg = await bot.sendMessage(chatId,
+            `🎲 <b>Cosplay Gacha</b>\n\nReroll atau pilih pool lain:`,
+            {
+              parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    { text: '🎲 Random', callback_data: 'cptgacha_random' },
+                    { text: '🔥 24h', callback_data: 'cptgacha_trending24' },
+                  ],
+                  [
+                    { text: '💋 Ero', callback_data: 'cptgacha_ero' },
+                    { text: '🔞 Nude', callback_data: 'cptgacha_nude' },
+                  ],
+                  [{ text: '🎬 Video', callback_data: 'cptgacha_video' }],
+                  [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+                ]
+              }
+            });
           return autoCleanOldMenu(bot, chatId, sentMsg.message_id);
         }
-        return doCosplayteleBrowse(bot, chatId, cache.category, cache.page, cache.query);
+        // Browse normal: pertahankan mode (home/search/category/tag/cosplayer)
+        return doCosplayteleBrowse(
+          bot, chatId, cache.category, cache.page, cache.query,
+          cache.mode, cache.contextLabel,
+        );
       }
       return bot.sendMessage(chatId, 'Sesi kadaluarsa, ketik /browse kembali.');
     }
