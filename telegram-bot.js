@@ -85,6 +85,7 @@ const r34Scraper = require('./scrapers/rule34video');
 const pinterestScraper = require('./scrapers/pinterest');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
+const intentDetector = require('./intentDetector');
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -244,6 +245,7 @@ const menuTracker = new Map(); // chatId -> lastMessageId (Untuk auto-clean menu
 const kemonoTracker = new Map(); // chatId -> array of message_ids (Untuk auto-clean media gacha)
 const r34BrowseCache = new Map(); // chatId -> { posts: [], page, query }
 const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, prevBookmarks: [] }
+const aggregateCache = new Map(); // chatId -> { query, sources: { cosplay: [], r34: [], pinterest: [] } }
 
 // Last-seen timestamp untuk TTL cleanup agar Map di atas tidak tumbuh monotonic seumur uptime VPS.
 const stateTouchedAt = new Map(); // chatId -> ms timestamp terakhir touch
@@ -252,7 +254,7 @@ function touchState(chatId) {
 }
 // Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
 // Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
-for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache]) {
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, aggregateCache]) {
   const origSet = m.set.bind(m);
   m.set = (key, value) => {
     touchState(key);
@@ -269,6 +271,7 @@ function sweepStaleStates() {
     kemonoTracker.delete(chatId);
     r34BrowseCache.delete(chatId);
     pinBrowseCache.delete(chatId);
+    aggregateCache.delete(chatId);
     stateTouchedAt.delete(chatId);
   }
 }
@@ -1404,6 +1407,129 @@ async function doPinSendItem(bot, chatId, pin) {
   }
 }
 
+// ─── SMART / AGGREGATE SEARCH ────────────────────────────────────────────────
+/**
+ * Tampilkan menu "pilih sumber" untuk query yang di-detect dari pesan bebas user.
+ * Kalau source sudah di-specify (misal "pinterest gintama"), langsung dispatch tanpa menu.
+ */
+async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
+  log.info(`[SmartSearch] user ${chatId} query="${query}" pref=${preferredSource}`);
+
+  // Auto-dispatch kalau preference kuat (bukan "all")
+  if (preferredSource === 'cosplay') return doCosplayteleBrowse(bot, chatId, 'home', 1, query);
+  if (preferredSource === 'r34') return doR34Browse(bot, chatId, 1, query);
+  if (preferredSource === 'pinterest') return doPinSearch(bot, chatId, query);
+
+  // 'all' atau tidak ada preference → tanya user dulu
+  const text = `🤖 <b>Smart Search</b>\n\nKetemu query: <b>${escHtml(query)}</b>\n\nPilih sumber pencarian:`;
+  const keyboard = [
+    [
+      { text: '📚 Cosplaytele', callback_data: `ssrc_cosplay` },
+      { text: '🎬 Rule34', callback_data: `ssrc_r34` },
+    ],
+    [{ text: '📌 Pinterest', callback_data: `ssrc_pinterest` }],
+    [{ text: '🌐 Cari di Semua Sumber', callback_data: `ssrc_all` }],
+    [{ text: '❌ Batal', callback_data: 'menu_awal' }],
+  ];
+
+  // Simpan query ke state agar callback tahu apa yang harus di-search
+  userStates.set(chatId, { step: 'SMART_SEARCH_PICK', query });
+
+  const sentMsg = await bot.sendMessage(chatId, text, {
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: keyboard },
+  });
+  autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+}
+
+/**
+ * Eksekusi search paralel di 3 sumber, tampilkan top-3 per source dalam satu pesan.
+ */
+async function doAggregateSearch(bot, chatId, query) {
+  log.info(`[Aggregate] user ${chatId} query="${query}"`);
+  const loadMsg = await bot.sendMessage(chatId,
+    `🌐 <b>Mencari "${escHtml(query)}" di semua sumber...</b>\n<i>Paralel query ke Cosplaytele + Rule34 + Pinterest...</i>`,
+    { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+
+  const [cptRes, r34Res, pinRes] = await Promise.allSettled([
+    cosplayteleScraper.scrapeListing(1, 'home', query),
+    r34Scraper.scrapeListing(1, query),
+    pinterestScraper.scrapeSearch(query),
+  ]);
+
+  const cpt = cptRes.status === 'fulfilled' ? cptRes.value.slice(0, 3) : [];
+  const r34 = r34Res.status === 'fulfilled' ? r34Res.value.slice(0, 3) : [];
+  const pins = pinRes.status === 'fulfilled' ? pinRes.value.pins.slice(0, 3) : [];
+
+  const totalFound = cpt.length + r34.length + pins.length;
+  if (totalFound === 0) {
+    return bot.editMessageText(
+      `😔 <b>Tidak ada hasil</b> untuk "${escHtml(query)}" di semua sumber.`,
+      {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] },
+      }
+    );
+  }
+
+  // Simpan ke cache. Callback pakai key "agg_<src>_<idx>" → resolve ke item yang benar.
+  aggregateCache.set(chatId, { query, cpt, r34, pins });
+  // Side-effect: populate juga browseCache/r34BrowseCache/pinBrowseCache supaya callback existing
+  // (cpt_<idx>, r34_<idx>, pin_dl_<idx>) juga jalan kalau user klik dari menu aggregate.
+  if (cpt.length) browseCache.set(chatId, { posts: cpt, page: 1, category: 'home', query });
+  if (r34.length) r34BrowseCache.set(chatId, { posts: r34, page: 1, query });
+  if (pins.length) pinBrowseCache.set(chatId, { pins, query, currentBookmark: null, nextBookmark: null, prevBookmarks: [] });
+
+  // Render listing
+  let text = `🌐 <b>Hasil untuk "${escHtml(query)}"</b>\n\n`;
+  const buttons = [];
+
+  if (cpt.length) {
+    text += `📚 <b>Cosplaytele</b>\n`;
+    cpt.forEach((p, i) => text += `  ${i + 1}. ${escHtml(p.title.slice(0, 60))}\n`);
+    text += '\n';
+    const row = [];
+    cpt.forEach((p, i) => row.push({ text: `📚${i + 1}`, callback_data: `cpt_${i}` }));
+    buttons.push(row);
+  }
+  if (r34.length) {
+    text += `🎬 <b>Rule34</b>\n`;
+    r34.forEach((p, i) => text += `  ${i + 1}. ${escHtml(p.title.slice(0, 60))}\n`);
+    text += '\n';
+    const row = [];
+    r34.forEach((p, i) => row.push({ text: `🎬${i + 1}`, callback_data: `r34_${i}` }));
+    buttons.push(row);
+  }
+  if (pins.length) {
+    text += `📌 <b>Pinterest</b>\n`;
+    pins.forEach((p, i) => {
+      const icon = p.type === 'video' ? '🎬' : '🖼️';
+      text += `  ${i + 1}. ${icon} ${escHtml(p.title.slice(0, 60))}\n`;
+    });
+    text += '\n';
+    const row = [];
+    pins.forEach((p, i) => row.push({ text: `📌${i + 1}`, callback_data: `pin_dl_${i}` }));
+    buttons.push(row);
+  }
+
+  // Shortcut: browse lanjutan ke satu sumber
+  const jumpRow = [];
+  if (cpt.length) jumpRow.push({ text: '📚 Browse ▶', callback_data: `ssrc_cosplay` });
+  if (r34.length) jumpRow.push({ text: '🎬 Browse ▶', callback_data: `ssrc_r34` });
+  if (pins.length) jumpRow.push({ text: '📌 Browse ▶', callback_data: `ssrc_pinterest` });
+  if (jumpRow.length) buttons.push(jumpRow);
+  buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+
+  // Simpan query utk referensi "Browse ▶"
+  userStates.set(chatId, { step: 'SMART_SEARCH_PICK', query });
+
+  await bot.editMessageText(text, {
+    chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
 // ─── COSPLAYTELE BROWSE HANDLERS ─────────────────────────────────────────────
 async function doCosplayteleBrowse(bot, chatId, category = 'home', page = 1, query = null) {
   log.info(`[User ${chatId}] Request Cosplaytele (Cat: ${category}, Page: ${page}, Query: ${query || 'none'})`);
@@ -1752,6 +1878,22 @@ function startBot() {
       }, bot);
       return;
     }
+
+    // ── Smart Search: detect intent dari pesan bebas ──
+    // Hanya kalau tidak ada state aktif (password/awaiting search) dan pesan bukan URL.
+    // Skip text yang terlalu pendek (< 5 char) untuk hindari false positive pada "ya"/"ok".
+    if (text.length >= 5 && text.length <= 200 && !text.startsWith('http')) {
+      try {
+        const intent = await intentDetector.detectIntent(text);
+        if (intent.intent === 'search' && intent.query) {
+          log.info(`[SmartSearch] via=${intent.via} query="${intent.query}" pref=${intent.preferredSource}`);
+          bot.deleteMessage(chatId, msg.message_id).catch(() => { });
+          return doSmartSearchMenu(bot, chatId, intent.query, intent.preferredSource);
+        }
+      } catch (e) {
+        log.warn(`[SmartSearch] detect error: ${e.message}`);
+      }
+    }
   });
 
   // Callbacks
@@ -1905,6 +2047,21 @@ function startBot() {
         log.error('R34 DL Error: ' + e.message);
         bot.editMessageText(`❌ Error: ${e.message}`, { chat_id: chatId, message_id: dlMsg.message_id }).catch(() => { });
       }
+      return;
+    }
+
+    // ── Smart Search source picker (ssrc_cosplay | ssrc_r34 | ssrc_pinterest | ssrc_all) ──
+    if (action.startsWith('ssrc_')) {
+      const src = action.replace('ssrc_', '');
+      const state = userStates.get(chatId);
+      const q = state?.query;
+      if (!q) return bot.sendMessage(chatId, '⚠️ Query smart-search kadaluarsa. Kirim ulang pesan pencarian.');
+      userStates.delete(chatId);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      if (src === 'cosplay') return doCosplayteleBrowse(bot, chatId, 'home', 1, q);
+      if (src === 'r34') return doR34Browse(bot, chatId, 1, q);
+      if (src === 'pinterest') return doPinSearch(bot, chatId, q);
+      if (src === 'all') return doAggregateSearch(bot, chatId, q);
       return;
     }
 
