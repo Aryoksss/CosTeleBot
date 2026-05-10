@@ -92,6 +92,7 @@ const erothotsScraper = require('./scrapers/erothots');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
+const { renderProgressBar, createProgressThrottler } = require('./utils/progressUi');
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -239,31 +240,22 @@ async function sanitizeMediasForTelegram(medias, statusCallback) {
 
   log.info(`[Compress] ${toCompress.length}/${medias.length} foto perlu dikompres`);
 
-  const makeBar = (pct) => {
-    const width = 20;
-    const filled = Math.round((pct / 100) * width);
-    return '█'.repeat(filled) + '░'.repeat(width - filled);
-  };
-
   const startedAt = Date.now();
-  let lastTgUpdate = 0;
-  const updateStatus = async (done, total, forceNow = false) => {
-    const now = Date.now();
-    if (!forceNow && now - lastTgUpdate < 1500) return;
-    lastTgUpdate = now;
-    const pct = total > 0 ? (done / total) * 100 : 0;
-    const elapsed = (now - startedAt) / 1000;
-    const avgPerItem = done > 0 ? elapsed / done : 0;
-    const eta = avgPerItem > 0 ? (total - done) * avgPerItem : 0;
-    const etaStr = eta > 60 ? `${Math.floor(eta / 60)}m ${Math.round(eta % 60)}s` : `${Math.round(eta)}s`;
-    const txt =
-      `🗜️ <b>Mengkompres foto 4K...</b>\n` +
-      `<code>${makeBar(pct)} ${pct.toFixed(0)}%</code>\n` +
-      `<code>${done}/${total} foto · ETA ${etaStr}</code>`;
-    try { await statusCallback(txt); } catch (_) { }
+  const throttle = createProgressThrottler(1500);
+  const updateStatus = (done, total, forceNow = false) => {
+    throttle(() => {
+      const txt = renderProgressBar({
+        icon: '🗜️',
+        title: 'Kompres foto 4K',
+        done, total, unit: 'items',
+        showSpeed: false,
+        startedAt,
+      });
+      try { statusCallback(txt).catch(() => { }); } catch (_) { }
+    }, forceNow);
   };
 
-  await updateStatus(0, toCompress.length, true);
+  updateStatus(0, toCompress.length, true);
 
   // Pass 2: compress
   for (let k = 0; k < toCompress.length; k++) {
@@ -316,7 +308,7 @@ async function sanitizeMediasForTelegram(medias, statusCallback) {
       log.warn(`[Compress] skip ${path.basename(mPath)}: ${err.message}`);
     }
 
-    await updateStatus(k + 1, toCompress.length, k === toCompress.length - 1);
+    updateStatus(k + 1, toCompress.length, k === toCompress.length - 1);
   }
 
   const elapsedTotal = ((Date.now() - startedAt) / 1000).toFixed(1);
@@ -778,53 +770,33 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       log.info(`[Gofile] Download via axios streaming + Bearer token: ${path.basename(zipPath)}`);
       const dlStartedAt = Date.now();
       let lastLogMB = 0;
-      let lastTgUpdate = 0;
-
-      // Bar visual 20 segment berbasis Unicode block
-      const makeBar = (pct) => {
-        const width = 20;
-        const filled = Math.round((pct / 100) * width);
-        return '█'.repeat(filled) + '░'.repeat(width - filled);
-      };
-      const fmtMB = (b) => (b / 1048576).toFixed(1);
-      const fmtETA = (sec) => {
-        if (!isFinite(sec) || sec < 0) return '~';
-        if (sec < 60) return `${Math.round(sec)}s`;
-        const m = Math.floor(sec / 60);
-        const s = Math.round(sec % 60);
-        return `${m}m ${s}s`;
-      };
+      const throttle = createProgressThrottler(2500);
 
       await gofileApi.downloadGofileFile(downloadLink, zipPath, (dlBytes, totBytes) => {
-        const elapsed = (Date.now() - dlStartedAt) / 1000;
         const mb = dlBytes / 1048576;
-        const speedMBps = elapsed > 0 ? mb / elapsed : 0;
-        const pct = totBytes ? (dlBytes / totBytes) * 100 : null;
-        const etaSec = (totBytes && speedMBps > 0.01) ? ((totBytes - dlBytes) / 1048576) / speedMBps : null;
+        const isFinal = totBytes && dlBytes === totBytes;
 
-        // Log ke console tiap ~25MB
-        if (mb - lastLogMB >= 25 || (totBytes && dlBytes === totBytes)) {
-          log.info(`[Gofile] ${fmtMB(dlBytes)} / ${totBytes ? fmtMB(totBytes) : '?'} MB${pct !== null ? ` (${pct.toFixed(1)}%)` : ''} @ ${speedMBps.toFixed(1)} MB/s`);
+        // Console log heartbeat (setiap 25MB atau final tick)
+        if (mb - lastLogMB >= 25 || isFinal) {
+          const elapsed = (Date.now() - dlStartedAt) / 1000;
+          const spdMBs = elapsed > 0 ? (mb / elapsed).toFixed(1) : '0.0';
+          const pct = totBytes ? ((dlBytes / totBytes) * 100).toFixed(1) + '%' : '?';
+          log.info(`[Gofile] ${mb.toFixed(1)} / ${totBytes ? (totBytes / 1048576).toFixed(1) : '?'} MB (${pct}) @ ${spdMBs} MB/s`);
           lastLogMB = mb;
         }
 
-        // Throttle edit Telegram message ke ~2.5 detik agar tidak kena rate-limit edit
-        const now = Date.now();
-        if (now - lastTgUpdate < 2500 && !(totBytes && dlBytes === totBytes)) return;
-        lastTgUpdate = now;
-
-        let pText;
-        if (pct !== null) {
-          pText = `⬇️ <b>${fileName}</b>\n` +
-            `<code>${makeBar(pct)} ${pct.toFixed(1)}%</code>\n` +
-            `<code>${fmtMB(dlBytes)} / ${fmtMB(totBytes)} MB · ${speedMBps.toFixed(1)} MB/s · ETA ${fmtETA(etaSec)}</code>`;
-        } else {
-          pText = `⬇️ <b>${fileName}</b>\n` +
-            `<code>${fmtMB(dlBytes)} MB @ ${speedMBps.toFixed(1)} MB/s</code>`;
-        }
-
-        if (jobId) queueManager.updateJob(jobId, pText);
-        status(pText).catch(() => { });
+        throttle(() => {
+          const pText = renderProgressBar({
+            icon: '⬇️',
+            title: fileName,
+            done: dlBytes,
+            total: totBytes,
+            unit: 'bytes',
+            startedAt: dlStartedAt,
+          });
+          if (jobId) queueManager.updateJob(jobId, pText);
+          status(pText).catch(() => { });
+        }, isFinal);
       }, accountToken);
       // Tracking trafik ke botStats (biasanya ditangani downloadStream)
       if (fs.existsSync(zipPath)) {
@@ -2124,30 +2096,22 @@ async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
     const dest = path.join(jobDir, `${item.id}_${source.label}.mp4`);
 
     const statusMsg = await bot.sendMessage(chatId, `🎥 <b>${escHtml(detail.title)}</b>\n<i>⏳ Memulai download ${source.label}...</i>`, { parse_mode: 'HTML' });
-    const makeBar = (pct) => {
-      const width = 20;
-      const filled = Math.round((pct / 100) * width);
-      return '█'.repeat(filled) + '░'.repeat(width - filled);
-    };
-
     const startedAt = Date.now();
-    let lastTgUpdate = 0;
+    const throttle = createProgressThrottler(2500);
+
     try {
-      await downloadStream(source.url, dest, async (pct, dl, tot) => {
-        const now = Date.now();
-        if (now - lastTgUpdate < 2500) return;
-        lastTgUpdate = now;
-        const mb = dl / 1048576;
-        const totMB = tot ? (tot / 1048576).toFixed(1) : '?';
-        const elapsed = (now - startedAt) / 1000;
-        const speed = elapsed > 0 ? (mb / elapsed).toFixed(1) : '0.0';
-        const eta = tot && mb > 0 ? ((tot - dl) / 1048576) / parseFloat(speed) : 0;
-        const etaStr = eta > 60 ? `${Math.floor(eta / 60)}m ${Math.round(eta % 60)}s` : `${Math.round(eta)}s`;
-        const pText = `🎥 <b>${escHtml(detail.title.slice(0, 80))}</b>\n` +
-          `<code>${makeBar(pct)} ${pct}%</code>\n` +
-          `<code>${mb.toFixed(1)} / ${totMB} MB · ${speed} MB/s · ETA ${etaStr}</code>`;
-        if (jobId) queueManager.updateJob(jobId, pText);
-        bot.editMessageText(pText, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+      await downloadStream(source.url, dest, (pct, dl, tot) => {
+        throttle(() => {
+          const pText = renderProgressBar({
+            icon: '🎥',
+            title: detail.title,
+            done: dl, total: tot,
+            unit: 'bytes',
+            startedAt,
+          });
+          if (jobId) queueManager.updateJob(jobId, pText);
+          bot.editMessageText(pText, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+        }, tot && dl === tot);
       }, null, { expectMedia: true, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120' });
 
       const fsize = fs.statSync(dest).size;
@@ -2321,30 +2285,22 @@ async function doEroDownload(bot, chatId, item) {
     const dest = path.join(jobDir, `${item.id}.mp4`);
 
     const statusMsg = await bot.sendMessage(chatId, `🔥 <b>${escHtml(detail.title)}</b>\n<i>⏳ Memulai download...</i>`, { parse_mode: 'HTML' });
-    const makeBar = (pct) => {
-      const width = 20;
-      const filled = Math.round((pct / 100) * width);
-      return '█'.repeat(filled) + '░'.repeat(width - filled);
-    };
-
     const startedAt = Date.now();
-    let lastTgUpdate = 0;
+    const throttle = createProgressThrottler(2500);
+
     try {
-      await downloadStream(detail.videoUrl, dest, async (pct, dl, tot) => {
-        const now = Date.now();
-        if (now - lastTgUpdate < 2500) return;
-        lastTgUpdate = now;
-        const mb = dl / 1048576;
-        const totMB = tot ? (tot / 1048576).toFixed(1) : '?';
-        const elapsed = (now - startedAt) / 1000;
-        const speed = elapsed > 0 ? (mb / elapsed).toFixed(1) : '0.0';
-        const eta = tot && mb > 0 ? ((tot - dl) / 1048576) / parseFloat(speed) : 0;
-        const etaStr = eta > 60 ? `${Math.floor(eta / 60)}m ${Math.round(eta % 60)}s` : `${Math.round(eta)}s`;
-        const pText = `🔥 <b>${escHtml(detail.title.slice(0, 80))}</b>\n` +
-          `<code>${makeBar(pct)} ${pct}%</code>\n` +
-          `<code>${mb.toFixed(1)} / ${totMB} MB · ${speed} MB/s · ETA ${etaStr}</code>`;
-        if (jobId) queueManager.updateJob(jobId, pText);
-        bot.editMessageText(pText, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+      await downloadStream(detail.videoUrl, dest, (pct, dl, tot) => {
+        throttle(() => {
+          const pText = renderProgressBar({
+            icon: '🔥',
+            title: detail.title,
+            done: dl, total: tot,
+            unit: 'bytes',
+            startedAt,
+          });
+          if (jobId) queueManager.updateJob(jobId, pText);
+          bot.editMessageText(pText, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+        }, tot && dl === tot);
       }, null, { expectMedia: true });
 
       const fsize = fs.statSync(dest).size;
