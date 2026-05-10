@@ -1550,29 +1550,90 @@ async function doPinSendItem(bot, chatId, pin) {
   }
 }
 
+// ─── JAVTIFUL HELPERS ────────────────────────────────────────────────────────
+
+/**
+ * Normalisasi input user: `mide232` / `mide 232` → `MIDE-232`.
+ * Kalau bukan kode JAV, kembalikan apa adanya (trimmed).
+ */
+function normalizeJavQuery(q) {
+  const trimmed = String(q || '').trim();
+  if (!trimmed) return trimmed;
+  // Pattern: 2-6 huruf + (optional dash/space) + 2-5 digit
+  const m = trimmed.match(/^([a-zA-Z]{2,6})[\s-]?(\d{2,5})$/);
+  if (m) return `${m[1].toUpperCase()}-${m[2]}`;
+  return trimmed;
+}
+
+function formatViews(n) {
+  if (!n || n < 0) return '?';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return (n / 1000).toFixed(1) + 'K';
+  return (n / 1_000_000).toFixed(1) + 'M';
+}
+
+function formatRelativeDate(iso) {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return '';
+  const diffMs = Date.now() - then;
+  const day = 24 * 60 * 60 * 1000;
+  if (diffMs < day) return 'hari ini';
+  if (diffMs < 7 * day) return `${Math.floor(diffMs / day)} hari lalu`;
+  if (diffMs < 30 * day) return `${Math.floor(diffMs / (7 * day))} minggu lalu`;
+  if (diffMs < 365 * day) return `${Math.floor(diffMs / (30 * day))} bulan lalu`;
+  return `${Math.floor(diffMs / (365 * day))} tahun lalu`;
+}
+
 // ─── JAVTIFUL HANDLERS ───────────────────────────────────────────────────────
-async function doJavBrowse(bot, chatId, query, page = 1) {
-  log.info(`[User ${chatId}] Request Javtiful search "${query}" page=${page}`);
-  const loadMsg = await bot.sendMessage(chatId, `🎥 <b>Memuat Javtiful...</b>\n<i>Query: ${escHtml(query)}</i>`, { parse_mode: 'HTML' });
+/**
+ * Unified browse handler: support mode 'search' | 'actress' | 'category'.
+ * Kalau mode='search', query = search term.
+ * Kalau mode='actress'|'category', query = slug (contoh 'matsumoto-nanami' / 'big-tits').
+ * contextLabel dipakai untuk heading (nama aktris/kategori humanized).
+ */
+async function doJavBrowse(bot, chatId, query, page = 1, mode = 'search', contextLabel = null) {
+  const normalized = mode === 'search' ? normalizeJavQuery(query) : query;
+  log.info(`[User ${chatId}] Javtiful ${mode} "${normalized}" page=${page}`);
+
+  const headerEmoji = mode === 'actress' ? '👤' : mode === 'category' ? '🏷️' : '🎥';
+  const headerLabel = mode === 'actress' ? 'Aktris' : mode === 'category' ? 'Kategori' : 'Javtiful';
+  const displayQuery = contextLabel || normalized;
+
+  const loadMsg = await bot.sendMessage(chatId, `${headerEmoji} <b>Memuat ${headerLabel}...</b>\n<i>${escHtml(displayQuery)}</i>`, { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
 
   try {
-    const { items, pagination } = await javtifulScraper.scrapeSearch(query, page);
+    let result;
+    if (mode === 'actress') result = await javtifulScraper.scrapeActress(normalized, page);
+    else if (mode === 'category') result = await javtifulScraper.scrapeCategory(normalized, page);
+    else result = await javtifulScraper.scrapeSearch(normalized, page);
+
+    const { items, pagination } = result;
     if (!items.length) {
-      return bot.editMessageText(`⚠️ Tidak ada video ditemukan untuk <b>${escHtml(query)}</b>.`, {
+      // Suggest format koreksi kalau mode search & input kayak kode JAV mentah
+      let hint = '';
+      if (mode === 'search' && normalized !== query) {
+        hint = `\n<i>💡 Tip: normalisasi ke <code>${escHtml(normalized)}</code> — coba juga kata kunci lain.</i>`;
+      }
+      return bot.editMessageText(`⚠️ Tidak ada video ditemukan untuk <b>${escHtml(displayQuery)}</b>.${hint}`, {
         chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
         reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] }
       });
     }
 
-    // Tampilkan 8 item per page
     const shown = items.slice(0, 8);
-    javBrowseCache.set(chatId, { items: shown, query, page, hasNext: pagination.hasNext });
+    javBrowseCache.set(chatId, {
+      items: shown, query: normalized, page, hasNext: pagination.hasNext, mode, contextLabel,
+    });
 
-    let text = `🎥 <b>Javtiful:</b> <i>${escHtml(query)}</i> · Halaman ${page}\n\n`;
+    let text = `${headerEmoji} <b>${headerLabel}:</b> <i>${escHtml(displayQuery)}</i> · Halaman ${page}\n\n`;
     shown.forEach((v, i) => {
-      const dur = v.durationText ? ` · ⏱️ ${v.durationText}` : '';
-      text += `${i + 1}. ${escHtml(v.title.slice(0, 75))}${dur}\n`;
+      const parts = [];
+      if (v.javCode) parts.push(`<code>${v.javCode}</code>`);
+      if (v.durationText) parts.push(`⏱️ ${v.durationText}`);
+      const meta = parts.length ? ' · ' + parts.join(' · ') : '';
+      text += `${i + 1}. ${escHtml(v.title.slice(0, 70))}${meta}\n`;
     });
 
     const buttons = [];
@@ -1603,39 +1664,90 @@ async function doJavDetail(bot, chatId, item) {
 
   try {
     const detail = await javtifulScraper.scrapeDetail(item.link);
-    if (!detail || !detail.sources.length) {
+    if (!detail) {
+      return bot.editMessageText(`⚠️ Gagal memuat halaman detail.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Kembali', callback_data: 'jav_back_browse' }]] }
+      });
+    }
+    if (!detail.sources.length) {
       return bot.editMessageText(`⚠️ Tidak ada source video yang dapat diekstrak.`, {
         chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
         reply_markup: { inline_keyboard: [[{ text: '🔙 Kembali', callback_data: 'jav_back_browse' }]] }
       });
     }
 
-    // Probe size dari source tertinggi (karena biasanya cuma 1 resolusi tersedia)
+    // Probe size parallel (hemat ~1 detik total latency)
     const primarySize = await javtifulScraper.probeSourceSize(detail.sources[0].url);
     const sizeMB = primarySize ? (primarySize / 1048576).toFixed(0) : null;
     const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1048576);
 
     const idx = javBrowseCache.get(chatId)?.items?.indexOf(item) ?? 0;
+
+    // Build caption informatif
     let text = `🎥 <b>${escHtml(detail.title)}</b>\n\n`;
-    if (item.durationText) text += `⏱️ Durasi: ${item.durationText}\n`;
-    if (sizeMB) text += `📦 Ukuran: ${sizeMB} MB\n`;
-    text += `🔗 <a href="${item.link}">Halaman Javtiful</a>\n\n`;
+    if (detail.javCode) text += `🆔 <code>${detail.javCode.full}</code>\n`;
+    const metaLine = [];
+    if (detail.durationText) metaLine.push(`⏱️ ${detail.durationText}`);
+    if (sizeMB) metaLine.push(`📦 ${sizeMB} MB`);
+    if (detail.viewCount != null) metaLine.push(`👁️ ${formatViews(detail.viewCount)}`);
+    if (detail.uploadDate) {
+      const rel = formatRelativeDate(detail.uploadDate);
+      if (rel) metaLine.push(`📅 ${rel}`);
+    }
+    if (metaLine.length) text += metaLine.join(' · ') + '\n';
+
+    if (detail.actresses.length > 0) {
+      text += `� ${detail.actresses.map(a => escHtml(a.name)).join(', ')}\n`;
+    }
+    if (detail.categories.length > 0) {
+      text += `🏷️ ${detail.categories.slice(0, 4).map(c => escHtml(c.name)).join(' · ')}\n`;
+    }
+    text += `\n🔗 <a href="${item.link}">Halaman Javtiful</a>`;
 
     const buttons = [];
+
+    // Download button
     if (sizeMB && primarySize > CONFIG.VIDEO_MAX_BYTES) {
-      text += `⚠️ <b>Melebihi limit upload ${limitMB} MB.</b> Tidak bisa di-stream ke Telegram.\n`;
-      text += `Silakan download manual via link halaman di atas.`;
+      text += `\n\n⚠️ <b>Melebihi limit upload ${limitMB} MB.</b> Tidak bisa di-stream ke Telegram.\nDownload manual via link halaman di atas.`;
     } else {
-      text += `📥 <b>Pilih Resolusi:</b>\n`;
-      detail.sources.forEach((s, i) => {
-        text += `• ${s.label}${sizeMB && i === 0 ? ` (${sizeMB} MB)` : ''}\n`;
-        buttons.push([{ text: `⬇️ ${s.label}`, callback_data: `javdl_${idx}_${i}` }]);
-      });
+      const primaryBtn = { text: `⬇️ Download ${detail.sources[0].label}${sizeMB ? ` (${sizeMB} MB)` : ''}`, callback_data: `javdl_${idx}_0` };
+      buttons.push([primaryBtn]);
+      // Kalau ada multi-resolution (beberapa post JAV kadang 1080+720+480), tampilkan sebagai opsi
+      if (detail.sources.length > 1) {
+        const altRow = [];
+        detail.sources.slice(1).forEach((s, i) => {
+          altRow.push({ text: `⬇️ ${s.label}`, callback_data: `javdl_${idx}_${i + 1}` });
+        });
+        if (altRow.length > 0) buttons.push(altRow);
+      }
     }
+
+    // Explore: actress button (max 2 untuk hemat space)
+    if (detail.actresses.length > 0) {
+      const actRow = detail.actresses.slice(0, 2).map(a =>
+        ({ text: `👤 ${a.name.slice(0, 20)}`, callback_data: `javact_${a.slug}` })
+      );
+      buttons.push(actRow);
+    }
+
+    // Explore: category button (max 3)
+    if (detail.categories.length > 0) {
+      const catRow = detail.categories.slice(0, 3).map(c =>
+        ({ text: `🏷️ ${c.name.slice(0, 18)}`, callback_data: `javcat_${c.slug}` })
+      );
+      buttons.push(catRow);
+    }
+
+    // Explore: related videos
+    if (detail.related.length > 0) {
+      buttons.push([{ text: `🔗 Video Mirip (${detail.related.length})`, callback_data: `javrel_${idx}` }]);
+    }
+
     buttons.push([{ text: '🔙 Kembali ke Daftar', callback_data: 'jav_back_browse' }]);
     buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
 
-    // Kirim preview dengan thumbnail kalau ada
+    // Kirim preview dengan thumbnail
     if (detail.thumb) {
       await bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
       try {
@@ -1643,7 +1755,6 @@ async function doJavDetail(bot, chatId, item) {
           caption: text, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons },
         });
       } catch (e) {
-        // Fallback text-only kalau sendPhoto gagal (thumb URL protected / 403)
         await bot.sendMessage(chatId, text, {
           parse_mode: 'HTML', disable_web_page_preview: false,
           reply_markup: { inline_keyboard: buttons },
@@ -1656,7 +1767,7 @@ async function doJavDetail(bot, chatId, item) {
       });
     }
 
-    // Cache detail supaya callback download langsung pakai URL dari sini (hindari resolve ulang)
+    // Cache detail (termasuk related) supaya callback javrel_/javdl_ pakai tanpa re-fetch
     const cache = javBrowseCache.get(chatId) || { items: [], query: '', page: 1 };
     cache.detailCache = cache.detailCache || {};
     cache.detailCache[item.id] = detail;
@@ -1665,6 +1776,50 @@ async function doJavDetail(bot, chatId, item) {
     log.error(`[Javtiful] detail error: ${e.message}`);
     bot.editMessageText(`❌ Gagal: ${e.message}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
   }
+}
+
+/**
+ * Tampilkan daftar "Video Mirip" (related) dari detail yang sudah di-cache.
+ */
+async function doJavShowRelated(bot, chatId, item) {
+  const cache = javBrowseCache.get(chatId);
+  const detail = cache?.detailCache?.[item.id];
+  if (!detail || !detail.related.length) {
+    return bot.sendMessage(chatId, '⚠️ Related videos tidak tersedia. Buka detail ulang.');
+  }
+
+  // Shown max 8 related untuk kompatibilitas UI
+  const shown = detail.related.slice(0, 8);
+  // Simpan ke cache sebagai "pseudo listing" supaya callback jav_<idx> jalan
+  javBrowseCache.set(chatId, {
+    items: shown,
+    query: `related:${item.id}`,
+    page: 1,
+    hasNext: false,
+    mode: 'related',
+    contextLabel: `Mirip: ${item.title.slice(0, 40)}`,
+    detailCache: cache.detailCache,
+    fromRelated: { originalItem: item },
+  });
+
+  let text = `🔗 <b>Video Mirip:</b>\n<i>Dari ${escHtml(item.title.slice(0, 60))}</i>\n\n`;
+  shown.forEach((v, i) => {
+    const dur = v.durationText ? ` · ⏱️ ${v.durationText}` : '';
+    text += `${i + 1}. ${escHtml(v.title.slice(0, 70))}${dur}\n`;
+  });
+
+  const buttons = [];
+  for (let i = 0; i < shown.length; i += 2) {
+    const row = [{ text: `${i + 1}. 🎥 Detail`, callback_data: `jav_${i}` }];
+    if (i + 1 < shown.length) row.push({ text: `${i + 2}. 🎥 Detail`, callback_data: `jav_${i + 1}` });
+    buttons.push(row);
+  }
+  buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+
+  await bot.sendMessage(chatId, text, {
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: buttons },
+  });
 }
 
 async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
@@ -2280,13 +2435,16 @@ function startBot() {
     const query = match[1] && match[1].trim();
     if (query) {
       log.info(`[User ${msg.chat.id}] Execute /jav search: ${query}`);
-      doJavBrowse(bot, msg.chat.id, query, 1);
+      doJavBrowse(bot, msg.chat.id, query, 1, 'search');
     } else {
       log.info(`[User ${msg.chat.id}] Execute /jav (prompt)`);
       userStates.set(msg.chat.id, { step: 'AWAITING_JAV_SEARCH' });
       const sentMsg = await bot.sendMessage(msg.chat.id,
-        `🎥 <b>Javtiful Search</b>\n\nKetik kode JAV, kategori, atau kata kunci.\n` +
-        `Contoh: <code>cosplay</code>, <code>MIDE-</code>, <code>fate</code>.`,
+        `🎥 <b>Javtiful Search</b>\n\nKetik salah satu:\n` +
+        `• Kode JAV: <code>MIDE-232</code>, <code>ssni001</code>, <code>avsa 432</code>\n` +
+        `• Nama aktris: <code>matsumoto nanami</code>\n` +
+        `• Tag: <code>cosplay</code>, <code>amateur</code>, <code>maid</code>\n\n` +
+        `<i>💡 Bot otomatis normalisasi kode JAV dari format apapun.</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
@@ -2767,14 +2925,14 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       if (cache?.fromAggregate) return doAggregateSearch(bot, chatId, cache.query);
       if (!cache) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /jav.');
-      return doJavBrowse(bot, chatId, cache.query, cache.page);
+      return doJavBrowse(bot, chatId, cache.query, cache.page, cache.mode || 'search', cache.contextLabel);
     }
     if (action.startsWith('javpage_')) {
       const pg = parseInt(action.replace('javpage_', ''), 10);
       const cache = javBrowseCache.get(chatId);
       if (!cache) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /jav.');
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return doJavBrowse(bot, chatId, cache.query, pg);
+      return doJavBrowse(bot, chatId, cache.query, pg, cache.mode || 'search', cache.contextLabel);
     }
     if (action.startsWith('javdl_')) {
       // Format: javdl_<itemIdx>_<sourceIdx>
@@ -2786,7 +2944,43 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doJavDownload(bot, chatId, cache.items[itemIdx], sourceIdx);
     }
-    // Match jav_<idx> HARUS setelah semua javdl_/javpage_/jav_back/jav_search agar tidak kecolongan.
+    // Browse by actress: javact_<slug>
+    if (action.startsWith('javact_')) {
+      const slug = action.replace('javact_', '');
+      // Resolve human name dari detailCache kalau ada
+      const cache = javBrowseCache.get(chatId);
+      let label = slug.replace(/-/g, ' ');
+      if (cache?.detailCache) {
+        for (const det of Object.values(cache.detailCache)) {
+          const found = det.actresses?.find(a => a.slug === slug);
+          if (found) { label = found.name; break; }
+        }
+      }
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doJavBrowse(bot, chatId, slug, 1, 'actress', label);
+    }
+    // Browse by category: javcat_<slug>
+    if (action.startsWith('javcat_')) {
+      const slug = action.replace('javcat_', '');
+      const cache = javBrowseCache.get(chatId);
+      let label = slug.replace(/-/g, ' ');
+      if (cache?.detailCache) {
+        for (const det of Object.values(cache.detailCache)) {
+          const found = det.categories?.find(c => c.slug === slug);
+          if (found) { label = found.name; break; }
+        }
+      }
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doJavBrowse(bot, chatId, slug, 1, 'category', label);
+    }
+    // Show related videos: javrel_<itemIdx>
+    if (action.startsWith('javrel_')) {
+      const idx = parseInt(action.replace('javrel_', ''), 10);
+      const cache = javBrowseCache.get(chatId);
+      if (!cache || !cache.items[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /jav.');
+      return doJavShowRelated(bot, chatId, cache.items[idx]);
+    }
+    // Match jav_<idx> HARUS setelah semua javdl_/javpage_/jav_back/jav_search/javact_/javcat_/javrel_ agar tidak kecolongan.
     if (action.startsWith('jav_') && /^jav_\d+$/.test(action)) {
       const idx = parseInt(action.replace('jav_', ''), 10);
       const cache = javBrowseCache.get(chatId);
