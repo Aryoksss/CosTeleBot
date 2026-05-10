@@ -87,6 +87,7 @@ const sorafolderApi = require('./scrapers/sorafolder');
 const kemonoScraper = require('./scrapers/kemono');
 const r34Scraper = require('./scrapers/rule34video');
 const pinterestScraper = require('./scrapers/pinterest');
+const javtifulScraper = require('./scrapers/javtiful');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
@@ -329,6 +330,7 @@ const menuTracker = new Map(); // chatId -> lastMessageId (Untuk auto-clean menu
 const kemonoTracker = new Map(); // chatId -> array of message_ids (Untuk auto-clean media gacha)
 const r34BrowseCache = new Map(); // chatId -> { posts: [], page, query }
 const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, prevBookmarks: [] }
+const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const aggregateCache = new Map(); // chatId -> { query, sources: { cosplay: [], r34: [], pinterest: [] } }
 
 // Last-seen timestamp untuk TTL cleanup agar Map di atas tidak tumbuh monotonic seumur uptime VPS.
@@ -338,7 +340,7 @@ function touchState(chatId) {
 }
 // Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
 // Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
-for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, aggregateCache]) {
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, aggregateCache]) {
   const origSet = m.set.bind(m);
   m.set = (key, value) => {
     touchState(key);
@@ -355,6 +357,7 @@ function sweepStaleStates() {
     kemonoTracker.delete(chatId);
     r34BrowseCache.delete(chatId);
     pinBrowseCache.delete(chatId);
+    javBrowseCache.delete(chatId);
     aggregateCache.delete(chatId);
     stateTouchedAt.delete(chatId);
   }
@@ -1544,6 +1547,217 @@ async function doPinSendItem(bot, chatId, pin) {
   }
 }
 
+// ─── JAVTIFUL HANDLERS ───────────────────────────────────────────────────────
+async function doJavBrowse(bot, chatId, query, page = 1) {
+  log.info(`[User ${chatId}] Request Javtiful search "${query}" page=${page}`);
+  const loadMsg = await bot.sendMessage(chatId, `🎥 <b>Memuat Javtiful...</b>\n<i>Query: ${escHtml(query)}</i>`, { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+
+  try {
+    const { items, pagination } = await javtifulScraper.scrapeSearch(query, page);
+    if (!items.length) {
+      return bot.editMessageText(`⚠️ Tidak ada video ditemukan untuk <b>${escHtml(query)}</b>.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] }
+      });
+    }
+
+    // Tampilkan 8 item per page
+    const shown = items.slice(0, 8);
+    javBrowseCache.set(chatId, { items: shown, query, page, hasNext: pagination.hasNext });
+
+    let text = `🎥 <b>Javtiful:</b> <i>${escHtml(query)}</i> · Halaman ${page}\n\n`;
+    shown.forEach((v, i) => {
+      const dur = v.durationText ? ` · ⏱️ ${v.durationText}` : '';
+      text += `${i + 1}. ${escHtml(v.title.slice(0, 75))}${dur}\n`;
+    });
+
+    const buttons = [];
+    for (let i = 0; i < shown.length; i += 2) {
+      const row = [{ text: `${i + 1}. 🎥 Detail`, callback_data: `jav_${i}` }];
+      if (i + 1 < shown.length) row.push({ text: `${i + 2}. 🎥 Detail`, callback_data: `jav_${i + 1}` });
+      buttons.push(row);
+    }
+
+    const navRow = [];
+    if (page > 1) navRow.push({ text: '◀ Prev', callback_data: `javpage_${page - 1}` });
+    if (pagination.hasNext) navRow.push({ text: 'Next ▶', callback_data: `javpage_${page + 1}` });
+    if (navRow.length) buttons.push(navRow);
+    buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+
+    await bot.editMessageText(text, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: buttons },
+    });
+  } catch (err) {
+    log.error(`[Javtiful] browse error: ${err.message}`);
+    bot.editMessageText(`❌ Gagal: ${err.message}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+  }
+}
+
+async function doJavDetail(bot, chatId, item) {
+  const loadMsg = await bot.sendMessage(chatId, `🎥 <b>Memuat detail...</b>`, { parse_mode: 'HTML' });
+
+  try {
+    const detail = await javtifulScraper.scrapeDetail(item.link);
+    if (!detail || !detail.sources.length) {
+      return bot.editMessageText(`⚠️ Tidak ada source video yang dapat diekstrak.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Kembali', callback_data: 'jav_back_browse' }]] }
+      });
+    }
+
+    // Probe size dari source tertinggi (karena biasanya cuma 1 resolusi tersedia)
+    const primarySize = await javtifulScraper.probeSourceSize(detail.sources[0].url);
+    const sizeMB = primarySize ? (primarySize / 1048576).toFixed(0) : null;
+    const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1048576);
+
+    const idx = javBrowseCache.get(chatId)?.items?.indexOf(item) ?? 0;
+    let text = `🎥 <b>${escHtml(detail.title)}</b>\n\n`;
+    if (item.durationText) text += `⏱️ Durasi: ${item.durationText}\n`;
+    if (sizeMB) text += `📦 Ukuran: ${sizeMB} MB\n`;
+    text += `🔗 <a href="${item.link}">Halaman Javtiful</a>\n\n`;
+
+    const buttons = [];
+    if (sizeMB && primarySize > CONFIG.VIDEO_MAX_BYTES) {
+      text += `⚠️ <b>Melebihi limit upload ${limitMB} MB.</b> Tidak bisa di-stream ke Telegram.\n`;
+      text += `Silakan download manual via link halaman di atas.`;
+    } else {
+      text += `📥 <b>Pilih Resolusi:</b>\n`;
+      detail.sources.forEach((s, i) => {
+        text += `• ${s.label}${sizeMB && i === 0 ? ` (${sizeMB} MB)` : ''}\n`;
+        buttons.push([{ text: `⬇️ ${s.label}`, callback_data: `javdl_${idx}_${i}` }]);
+      });
+    }
+    buttons.push([{ text: '🔙 Kembali ke Daftar', callback_data: 'jav_back_browse' }]);
+    buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+
+    // Kirim preview dengan thumbnail kalau ada
+    if (detail.thumb) {
+      await bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
+      try {
+        await bot.sendPhoto(chatId, detail.thumb, {
+          caption: text, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons },
+        });
+      } catch (e) {
+        // Fallback text-only kalau sendPhoto gagal (thumb URL protected / 403)
+        await bot.sendMessage(chatId, text, {
+          parse_mode: 'HTML', disable_web_page_preview: false,
+          reply_markup: { inline_keyboard: buttons },
+        });
+      }
+    } else {
+      await bot.editMessageText(text, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: buttons },
+      });
+    }
+
+    // Cache detail supaya callback download langsung pakai URL dari sini (hindari resolve ulang)
+    const cache = javBrowseCache.get(chatId) || { items: [], query: '', page: 1 };
+    cache.detailCache = cache.detailCache || {};
+    cache.detailCache[item.id] = detail;
+    javBrowseCache.set(chatId, cache);
+  } catch (e) {
+    log.error(`[Javtiful] detail error: ${e.message}`);
+    bot.editMessageText(`❌ Gagal: ${e.message}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+  }
+}
+
+async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
+  // Ambil detail dari cache kalau ada, re-scrape kalau expired
+  const cache = javBrowseCache.get(chatId);
+  let detail = cache?.detailCache?.[item.id];
+  if (!detail) {
+    detail = await javtifulScraper.scrapeDetail(item.link);
+    if (!detail) {
+      return bot.sendMessage(chatId, '❌ Gagal resolve video detail.');
+    }
+  }
+
+  const source = detail.sources[sourceIdx] || detail.sources[0];
+  if (!source) {
+    return bot.sendMessage(chatId, '❌ Source video tidak tersedia.');
+  }
+
+  queueManager.addJob(chatId, `Javtiful: ${detail.title.slice(0, 40)}`, async (jobId) => {
+    const jobDir = path.join(CONFIG.TEMP_DIR, 'jav_' + jobId);
+    await fsp.mkdir(jobDir, { recursive: true });
+    const dest = path.join(jobDir, `${item.id}_${source.label}.mp4`);
+
+    const statusMsg = await bot.sendMessage(chatId, `🎥 <b>${escHtml(detail.title)}</b>\n<i>⏳ Memulai download ${source.label}...</i>`, { parse_mode: 'HTML' });
+    const makeBar = (pct) => {
+      const width = 20;
+      const filled = Math.round((pct / 100) * width);
+      return '█'.repeat(filled) + '░'.repeat(width - filled);
+    };
+
+    const startedAt = Date.now();
+    let lastTgUpdate = 0;
+    try {
+      await downloadStream(source.url, dest, async (pct, dl, tot) => {
+        const now = Date.now();
+        if (now - lastTgUpdate < 2500) return;
+        lastTgUpdate = now;
+        const mb = dl / 1048576;
+        const totMB = tot ? (tot / 1048576).toFixed(1) : '?';
+        const elapsed = (now - startedAt) / 1000;
+        const speed = elapsed > 0 ? (mb / elapsed).toFixed(1) : '0.0';
+        const eta = tot && mb > 0 ? ((tot - dl) / 1048576) / parseFloat(speed) : 0;
+        const etaStr = eta > 60 ? `${Math.floor(eta / 60)}m ${Math.round(eta % 60)}s` : `${Math.round(eta)}s`;
+        const pText = `🎥 <b>${escHtml(detail.title.slice(0, 80))}</b>\n` +
+          `<code>${makeBar(pct)} ${pct}%</code>\n` +
+          `<code>${mb.toFixed(1)} / ${totMB} MB · ${speed} MB/s · ETA ${etaStr}</code>`;
+        if (jobId) queueManager.updateJob(jobId, pText);
+        bot.editMessageText(pText, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+      }, null, { expectMedia: true, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120' });
+
+      const fsize = fs.statSync(dest).size;
+      const sizeMB = (fsize / 1048576).toFixed(1);
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      botStats.downloadedBytes += fsize;
+      statsDb.addDownloadSize(chatId, fsize);
+      log.ok(`[Javtiful] Download selesai: ${sizeMB} MB dalam ${elapsed}s`);
+
+      if (fsize > CONFIG.VIDEO_MAX_BYTES) {
+        await rimraf(jobDir);
+        const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1048576);
+        return bot.editMessageText(
+          `⚠️ File <b>${sizeMB} MB</b> melebihi limit ${limitMB} MB Telegram.\n<a href="${item.link}">Buka halaman Javtiful</a>`,
+          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }
+        );
+      }
+
+      await bot.editMessageText(`📤 <b>${escHtml(detail.title.slice(0, 80))}</b>\n<i>⏳ Mengupload ${sizeMB} MB ke Telegram...</i>`, {
+        chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+      }).catch(() => { });
+
+      try {
+        await bot.sendVideo(chatId, fs.createReadStream(dest), {
+          caption: `🎥 <b>${escHtml(detail.title)}</b> (${source.label}, ${sizeMB} MB)\n<a href="${item.link}">Source</a>`,
+          parse_mode: 'HTML',
+          supports_streaming: true,
+        });
+        bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
+      } catch (e) {
+        log.warn(`[Javtiful] sendVideo gagal (${e.message}), fallback sendDocument`);
+        await bot.sendDocument(chatId, fs.createReadStream(dest), {
+          caption: `🎥 <b>${escHtml(detail.title)}</b> (${source.label}, ${sizeMB} MB)`,
+          parse_mode: 'HTML',
+        });
+        bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
+      }
+      await rimraf(jobDir);
+    } catch (err) {
+      log.error(`[Javtiful] download error: ${err.message}`);
+      bot.editMessageText(`❌ Download gagal: <code>${escHtml(err.message.slice(0, 200))}</code>`, {
+        chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+      }).catch(() => { });
+      await rimraf(jobDir);
+    }
+  }, bot);
+}
+
 // ─── SMART / AGGREGATE SEARCH ────────────────────────────────────────────────
 /**
  * Tampilkan menu "pilih sumber" untuk query yang di-detect dari pesan bebas user.
@@ -1556,6 +1770,7 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
   if (preferredSource === 'cosplay') return doCosplayteleBrowse(bot, chatId, 'home', 1, query);
   if (preferredSource === 'r34') return doR34Browse(bot, chatId, 1, query);
   if (preferredSource === 'pinterest') return doPinSearch(bot, chatId, query);
+  if (preferredSource === 'jav') return doJavBrowse(bot, chatId, query, 1);
 
   // 'all' atau tidak ada preference → tanya user dulu
   const text = `🤖 <b>Smart Search</b>\n\nKetemu query: <b>${escHtml(query)}</b>\n\nPilih sumber pencarian:`;
@@ -1564,7 +1779,10 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
       { text: '📚 Cosplaytele', callback_data: `ssrc_cosplay` },
       { text: '🎬 Rule34', callback_data: `ssrc_r34` },
     ],
-    [{ text: '📌 Pinterest', callback_data: `ssrc_pinterest` }],
+    [
+      { text: '📌 Pinterest', callback_data: `ssrc_pinterest` },
+      { text: '🎥 Javtiful', callback_data: `ssrc_jav` },
+    ],
     [{ text: '🌐 Cari di Semua Sumber', callback_data: `ssrc_all` }],
     [{ text: '❌ Batal', callback_data: 'menu_awal' }],
   ];
@@ -1585,21 +1803,23 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
 async function doAggregateSearch(bot, chatId, query) {
   log.info(`[Aggregate] user ${chatId} query="${query}"`);
   const loadMsg = await bot.sendMessage(chatId,
-    `🌐 <b>Mencari "${escHtml(query)}" di semua sumber...</b>\n<i>Paralel query ke Cosplaytele + Rule34 + Pinterest...</i>`,
+    `🌐 <b>Mencari "${escHtml(query)}" di semua sumber...</b>\n<i>Paralel query ke Cosplaytele + Rule34 + Pinterest + Javtiful...</i>`,
     { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
 
-  const [cptRes, r34Res, pinRes] = await Promise.allSettled([
+  const [cptRes, r34Res, pinRes, javRes] = await Promise.allSettled([
     cosplayteleScraper.scrapeListing(1, 'home', query),
     r34Scraper.scrapeListing(1, query),
     pinterestScraper.scrapeSearch(query),
+    javtifulScraper.scrapeSearch(query, 1),
   ]);
 
   const cpt = cptRes.status === 'fulfilled' ? cptRes.value.slice(0, 3) : [];
   const r34 = r34Res.status === 'fulfilled' ? r34Res.value.slice(0, 3) : [];
   const pins = pinRes.status === 'fulfilled' ? pinRes.value.pins.slice(0, 3) : [];
+  const jav = javRes.status === 'fulfilled' ? javRes.value.items.slice(0, 3) : [];
 
-  const totalFound = cpt.length + r34.length + pins.length;
+  const totalFound = cpt.length + r34.length + pins.length + jav.length;
   if (totalFound === 0) {
     return bot.editMessageText(
       `😔 <b>Tidak ada hasil</b> untuk "${escHtml(query)}" di semua sumber.`,
@@ -1610,15 +1830,13 @@ async function doAggregateSearch(bot, chatId, query) {
     );
   }
 
-  // Simpan ke cache. Callback pakai key "agg_<src>_<idx>" → resolve ke item yang benar.
-  aggregateCache.set(chatId, { query, cpt, r34, pins });
-  // Side-effect: populate juga browseCache/r34BrowseCache/pinBrowseCache supaya callback existing
-  // (cpt_<idx>, r34_<idx>, pin_dl_<idx>) juga jalan kalau user klik dari menu aggregate.
-  // Flag fromAggregate=true agar "back_browse" di detail tahu harus balik ke menu aggregate,
-  // bukan ke full listing sumber.
+  aggregateCache.set(chatId, { query, cpt, r34, pins, jav });
+  // Side-effect populate cache existing supaya callback handler existing tetap jalan.
+  // fromAggregate flag supaya Back di detail balik ke aggregate menu.
   if (cpt.length) browseCache.set(chatId, { posts: cpt, page: 1, category: 'home', query, fromAggregate: true });
   if (r34.length) r34BrowseCache.set(chatId, { posts: r34, page: 1, query, fromAggregate: true });
   if (pins.length) pinBrowseCache.set(chatId, { pins, query, currentBookmark: null, nextBookmark: null, prevBookmarks: [], fromAggregate: true });
+  if (jav.length) javBrowseCache.set(chatId, { items: jav, query, page: 1, hasNext: false, fromAggregate: true });
 
   // Render listing
   let text = `🌐 <b>Hasil untuk "${escHtml(query)}"</b>\n\n`;
@@ -1651,12 +1869,24 @@ async function doAggregateSearch(bot, chatId, query) {
     pins.forEach((p, i) => row.push({ text: `📌${i + 1}`, callback_data: `pin_dl_${i}` }));
     buttons.push(row);
   }
+  if (jav.length) {
+    text += `🎥 <b>Javtiful</b>\n`;
+    jav.forEach((v, i) => {
+      const dur = v.durationText ? ` · ${v.durationText}` : '';
+      text += `  ${i + 1}. ${escHtml(v.title.slice(0, 55))}${dur}\n`;
+    });
+    text += '\n';
+    const row = [];
+    jav.forEach((v, i) => row.push({ text: `🎥${i + 1}`, callback_data: `jav_${i}` }));
+    buttons.push(row);
+  }
 
   // Shortcut: browse lanjutan ke satu sumber
   const jumpRow = [];
   if (cpt.length) jumpRow.push({ text: '📚 Browse ▶', callback_data: `ssrc_cosplay` });
   if (r34.length) jumpRow.push({ text: '🎬 Browse ▶', callback_data: `ssrc_r34` });
   if (pins.length) jumpRow.push({ text: '📌 Browse ▶', callback_data: `ssrc_pinterest` });
+  if (jav.length) jumpRow.push({ text: '🎥 Browse ▶', callback_data: `ssrc_jav` });
   if (jumpRow.length) buttons.push(jumpRow);
   buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
 
@@ -1728,7 +1958,7 @@ async function sendMainMenu(bot, chatId) {
     [{ text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' }],
     [{ text: '📊 Profile', callback_data: 'menu_profile' }],
     [{ text: '🎬 R34 Video Browse', callback_data: 'menu_r34_browse' }, { text: '🎬 R34 Gacha', callback_data: 'menu_r34_gacha' }],
-    [{ text: '📌 Pinterest Search', callback_data: 'pin_search_prompt' }],
+    [{ text: '📌 Pinterest Search', callback_data: 'pin_search_prompt' }, { text: '🎥 Javtiful', callback_data: 'jav_search_prompt' }],
     [{ text: '🧹 Clear Chat', callback_data: 'menu_clear' }, { text: '📥 Manual Terabox DL', callback_data: 'menu_terabox' }]
   ];
 
@@ -1754,6 +1984,7 @@ function startBot() {
     { command: '/maple', description: '🍁 Gacha Patreon' },
     { command: '/r34', description: '🎬 Rule34 Video (Browse & Gacha)' },
     { command: '/pin', description: '📌 Pinterest Search (image/video)' },
+    { command: '/jav', description: '🎥 Javtiful Search' },
     { command: '/search', description: 'Cari Karakter / Album Cosplay' },
     { command: '/tasks', description: '🚦 Pantau Dasbor Antrean' },
     { command: '/stats', description: '🔰 Lihat Profil' },
@@ -1825,6 +2056,27 @@ function startBot() {
       const sentMsg = await bot.sendMessage(msg.chat.id,
         `📌 <b>Pinterest Search</b>\n\nKetik query pencarian (karakter, tag, atau kata kunci).\n` +
         `Hasil berupa gambar atau video direct.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
+        }
+      );
+      autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
+    }
+  });
+
+  bot.onText(/^\/jav(?:\s+(.+))?$/, async (msg, match) => {
+    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
+    const query = match[1] && match[1].trim();
+    if (query) {
+      log.info(`[User ${msg.chat.id}] Execute /jav search: ${query}`);
+      doJavBrowse(bot, msg.chat.id, query, 1);
+    } else {
+      log.info(`[User ${msg.chat.id}] Execute /jav (prompt)`);
+      userStates.set(msg.chat.id, { step: 'AWAITING_JAV_SEARCH' });
+      const sentMsg = await bot.sendMessage(msg.chat.id,
+        `🎥 <b>Javtiful Search</b>\n\nKetik kode JAV, kategori, atau kata kunci.\n` +
+        `Contoh: <code>cosplay</code>, <code>MIDE-</code>, <code>fate</code>.`,
         {
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
@@ -1993,6 +2245,14 @@ function startBot() {
       userStates.delete(chatId);
       log.info(`[User ${chatId}] Pencarian Pinterest: ${text}`);
       doPinSearch(bot, chatId, text);
+      return;
+    }
+
+    // If awaiting Javtiful search query
+    if (state && state.step === 'AWAITING_JAV_SEARCH') {
+      userStates.delete(chatId);
+      log.info(`[User ${chatId}] Pencarian Javtiful: ${text}`);
+      doJavBrowse(bot, chatId, text, 1);
       return;
     }
 
@@ -2193,7 +2453,7 @@ function startBot() {
       return;
     }
 
-    // ── Smart Search source picker (ssrc_cosplay | ssrc_r34 | ssrc_pinterest | ssrc_all) ──
+    // ── Smart Search source picker (ssrc_cosplay | ssrc_r34 | ssrc_pinterest | ssrc_jav | ssrc_all) ──
     if (action.startsWith('ssrc_')) {
       const src = action.replace('ssrc_', '');
       const state = userStates.get(chatId);
@@ -2204,6 +2464,7 @@ function startBot() {
       if (src === 'cosplay') return doCosplayteleBrowse(bot, chatId, 'home', 1, q);
       if (src === 'r34') return doR34Browse(bot, chatId, 1, q);
       if (src === 'pinterest') return doPinSearch(bot, chatId, q);
+      if (src === 'jav') return doJavBrowse(bot, chatId, q, 1);
       if (src === 'all') return doAggregateSearch(bot, chatId, q);
       return;
     }
@@ -2245,6 +2506,53 @@ function startBot() {
       const cache = pinBrowseCache.get(chatId);
       if (!cache || !cache.pins[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /pin.');
       return doPinSendItem(bot, chatId, cache.pins[idx]);
+    }
+
+    // ── Javtiful Callbacks ──
+    if (action === 'jav_search_prompt') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      userStates.set(chatId, { step: 'AWAITING_JAV_SEARCH' });
+      const sentMsg = await bot.sendMessage(chatId,
+        `🎥 <b>Javtiful Search</b>\n\nKetik kode JAV, kategori, atau kata kunci:`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
+        }
+      );
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action === 'jav_back_browse') {
+      const cache = javBrowseCache.get(chatId);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      if (cache?.fromAggregate) return doAggregateSearch(bot, chatId, cache.query);
+      if (!cache) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /jav.');
+      return doJavBrowse(bot, chatId, cache.query, cache.page);
+    }
+    if (action.startsWith('javpage_')) {
+      const pg = parseInt(action.replace('javpage_', ''), 10);
+      const cache = javBrowseCache.get(chatId);
+      if (!cache) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /jav.');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doJavBrowse(bot, chatId, cache.query, pg);
+    }
+    if (action.startsWith('javdl_')) {
+      // Format: javdl_<itemIdx>_<sourceIdx>
+      const parts = action.replace('javdl_', '').split('_');
+      const itemIdx = parseInt(parts[0], 10);
+      const sourceIdx = parseInt(parts[1], 10);
+      const cache = javBrowseCache.get(chatId);
+      if (!cache || !cache.items[itemIdx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /jav.');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doJavDownload(bot, chatId, cache.items[itemIdx], sourceIdx);
+    }
+    // Match jav_<idx> HARUS setelah semua javdl_/javpage_/jav_back/jav_search agar tidak kecolongan.
+    if (action.startsWith('jav_') && /^jav_\d+$/.test(action)) {
+      const idx = parseInt(action.replace('jav_', ''), 10);
+      const cache = javBrowseCache.get(chatId);
+      if (!cache || !cache.items[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /jav.');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doJavDetail(bot, chatId, cache.items[idx]);
     }
 
     if (action === 'menu_vps') {
