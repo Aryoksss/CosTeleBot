@@ -190,55 +190,105 @@ function chunkMediaByLimits(medias) {
 
 // ─── SHARP AUTO-COMPRESSOR ───────────────────────────────────────────────────
 async function sanitizeMediasForTelegram(medias, statusCallback) {
-  // Telegram batas maksimal: 10 MB per foto, resolusi gabungan (width+height) tidak melewati 10000px
-  let needStatus = false;
+  // Telegram batas maksimal: 10 MB per foto, resolusi gabungan (width+height) tidak melewati 10000px.
+  //
+  // 2-pass strategy agar progress bar akurat:
+  //   Pass 1: scan — cari file yang butuh kompres (no heavy I/O, cuma fs.stat + sharp.metadata)
+  //   Pass 2: compress — real kompres, dengan progress bar %
+  //
+  // Kalau tidak ada file yang butuh kompres, skip seluruh step tanpa kirim status (no-op).
 
+  const compressibleExts = ['.jpg', '.jpeg', '.png', '.webp'];
+  const toCompress = []; // { index, path, meta, size }
+
+  // Pass 1: scan
   for (let i = 0; i < medias.length; i++) {
     const mPath = medias[i];
-    const ext = path.extname(mPath).toLowerCase();
-
-    if (['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
-      try {
-        const fStats = fs.statSync(mPath);
-        const meta = await sharp(mPath).metadata();
-        const sumDim = meta.width + meta.height;
-        const ratio = Math.max(meta.width, meta.height) / Math.min(meta.width, meta.height);
-
-        // Jika file tembus >9MB atau resolusi kepanjangan, KOMPRES!
-        if (fStats.size > 9 * 1024 * 1024 || sumDim > 9000 || ratio > 19) {
-          if (!needStatus) {
-            await statusCallback(`🗜️ <b>Sistem Cerdas Bekerja</b>: Terdapat beberapa foto 4K Raksasa! Mengkompres ukurannya sesaat...`);
-            needStatus = true;
-          }
-
-          const outPath = mPath + '_compressed.jpg';
-          let s = sharp(mPath);
-
-          // Resize jika rasio konyol
-          if (meta.width > 4200) s = s.resize({ width: 4200 });
-          else if (sumDim > 9000 && meta.height > 4200) s = s.resize({ height: 4200 });
-
-          if (ratio > 19) {
-            const safeWidth = meta.width > meta.height ? Math.min(meta.width, Math.floor(meta.height * 18)) : undefined;
-            const safeHeight = meta.height > meta.width ? Math.min(meta.height, Math.floor(meta.width * 18)) : undefined;
-            s = s.resize({ width: safeWidth, height: safeHeight, fit: 'cover', position: 'top' });
-          }
-
-          // Kompres ke persentase aman ~80%
-          await s.jpeg({ quality: 80 }).toFile(outPath);
-
-          // Ganti tracker array media ke file versi kurus
-          medias[i] = outPath;
-
-          // Jeda 200 milidetik agar CPU sempat "bernapas" dan Garbace Collector berjalan
-          await new Promise(res => setTimeout(res, 200));
-          global.gc && global.gc();
-        }
-      } catch (err) {
-        console.log(`Gagal mem-bypass resolusi untuk ${mPath}: ` + err.message);
+    if (!compressibleExts.includes(path.extname(mPath).toLowerCase())) continue;
+    try {
+      const fStats = fs.statSync(mPath);
+      const meta = await sharp(mPath).metadata();
+      const sumDim = (meta.width || 0) + (meta.height || 0);
+      const ratio = meta.width && meta.height
+        ? Math.max(meta.width, meta.height) / Math.min(meta.width, meta.height)
+        : 1;
+      if (fStats.size > 9 * 1024 * 1024 || sumDim > 9000 || ratio > 19) {
+        toCompress.push({ index: i, path: mPath, meta, size: fStats.size });
       }
+    } catch (_) {
+      // Skip file yang tidak bisa di-baca metadatanya (bukan image valid)
     }
   }
+
+  if (toCompress.length === 0) return; // tidak ada yang perlu dikompres
+
+  log.info(`[Compress] ${toCompress.length}/${medias.length} foto perlu dikompres`);
+
+  // Helper bar visual 20 segment (sama pattern dengan download progress bar)
+  const makeBar = (pct) => {
+    const width = 20;
+    const filled = Math.round((pct / 100) * width);
+    return '█'.repeat(filled) + '░'.repeat(width - filled);
+  };
+
+  const startedAt = Date.now();
+  let lastTgUpdate = 0;
+  const updateStatus = async (done, total, forceNow = false) => {
+    const now = Date.now();
+    if (!forceNow && now - lastTgUpdate < 1500) return; // throttle ~1.5s
+    lastTgUpdate = now;
+    const pct = total > 0 ? (done / total) * 100 : 0;
+    const elapsed = (now - startedAt) / 1000;
+    const avgPerItem = done > 0 ? elapsed / done : 0;
+    const eta = avgPerItem > 0 ? (total - done) * avgPerItem : 0;
+    const etaStr = eta > 60 ? `${Math.floor(eta / 60)}m ${Math.round(eta % 60)}s` : `${Math.round(eta)}s`;
+    const txt =
+      `🗜️ <b>Mengkompres foto 4K...</b>\n` +
+      `<code>${makeBar(pct)} ${pct.toFixed(0)}%</code>\n` +
+      `<code>${done}/${total} foto · ETA ${etaStr}</code>`;
+    try { await statusCallback(txt); } catch (_) { }
+  };
+
+  // Tick awal (force 0% supaya user tau sedang mulai)
+  await updateStatus(0, toCompress.length, true);
+
+  // Pass 2: compress
+  for (let k = 0; k < toCompress.length; k++) {
+    const item = toCompress[k];
+    const { index, path: mPath, meta } = item;
+    const sumDim = (meta.width || 0) + (meta.height || 0);
+    const ratio = meta.width && meta.height
+      ? Math.max(meta.width, meta.height) / Math.min(meta.width, meta.height)
+      : 1;
+
+    try {
+      const outPath = mPath + '_compressed.jpg';
+      let s = sharp(mPath);
+
+      if (meta.width > 4200) s = s.resize({ width: 4200 });
+      else if (sumDim > 9000 && meta.height > 4200) s = s.resize({ height: 4200 });
+
+      if (ratio > 19) {
+        const safeWidth = meta.width > meta.height ? Math.min(meta.width, Math.floor(meta.height * 18)) : undefined;
+        const safeHeight = meta.height > meta.width ? Math.min(meta.height, Math.floor(meta.width * 18)) : undefined;
+        s = s.resize({ width: safeWidth, height: safeHeight, fit: 'cover', position: 'top' });
+      }
+
+      await s.jpeg({ quality: 80 }).toFile(outPath);
+      medias[index] = outPath;
+
+      await new Promise(res => setTimeout(res, 200));
+      global.gc && global.gc();
+    } catch (err) {
+      log.warn(`[Compress] skip ${path.basename(mPath)}: ${err.message}`);
+    }
+
+    // Update progress (throttled + paksa update di item terakhir)
+    await updateStatus(k + 1, toCompress.length, k === toCompress.length - 1);
+  }
+
+  const elapsedTotal = ((Date.now() - startedAt) / 1000).toFixed(1);
+  log.ok(`[Compress] Selesai: ${toCompress.length} foto dalam ${elapsedTotal}s`);
 }
 
 // ─── STATE MANAGEMENT ────────────────────────────────────────────────────────
