@@ -93,6 +93,7 @@ const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
 const { renderProgressBar, createProgressThrottler } = require('./utils/progressUi');
+const healthcheck = require('./utils/healthcheck');
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -2672,6 +2673,7 @@ function startBot() {
     { command: '/search', description: 'Cari Karakter / Album Cosplay' },
     { command: '/tasks', description: '🚦 Pantau Dasbor Antrean' },
     { command: '/stats', description: '🔰 Lihat Profil' },
+    { command: '/health', description: '🏥 Cek kesehatan bot + semua sumber' },
     { command: '/clear', description: '🧹 Bersihkan Seluruh Chat' }
   ]).catch(() => log.warn('Gagal set command menu.'));
 
@@ -2938,6 +2940,39 @@ function startBot() {
     autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
   });
 
+  // /health and /ping — same behavior, alias
+  bot.onText(/^\/(health|ping)(?:\s|$)/, async (msg) => {
+    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
+    log.info(`[User ${msg.chat.id}] Execute /health`);
+
+    const loadMsg = await bot.sendMessage(msg.chat.id,
+      `🏥 <b>Health Check</b>\n<i>Ping semua sumber...</i>`,
+      { parse_mode: 'HTML' }
+    );
+
+    try {
+      const results = await healthcheck.checkAllSources();
+      const sysInfo = healthcheck.getSystemInfo(botStats.startTime);
+      const report = healthcheck.formatHealthReport(results, sysInfo);
+      await bot.editMessageText(report, {
+        chat_id: msg.chat.id, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🔄 Recheck', callback_data: 'health_recheck' },
+            { text: '🔙 Menu', callback_data: 'menu_awal' },
+          ]]
+        }
+      });
+      autoCleanOldMenu(bot, msg.chat.id, loadMsg.message_id);
+    } catch (e) {
+      log.error(`[Health] ${e.message}`);
+      await bot.editMessageText(`❌ Healthcheck gagal: ${e.message}`, {
+        chat_id: msg.chat.id, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      }).catch(() => { });
+    }
+  });
+
   // Handling user messages for Terabox manual and Passwords
   bot.on('message', async (msg) => {
     if (!msg.text || msg.text.startsWith('/')) return;
@@ -3185,6 +3220,33 @@ function startBot() {
     if (action === 'menu_awal') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return sendMainMenu(bot, chatId);
+    }
+    // Health recheck (same flow as /health)
+    if (action === 'health_recheck') {
+      const loadMsg = query.message;
+      try {
+        await bot.editMessageText(`🏥 <b>Health Check</b>\n<i>Recheck in progress...</i>`, {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        });
+        const results = await healthcheck.checkAllSources();
+        const sysInfo = healthcheck.getSystemInfo(botStats.startTime);
+        const report = healthcheck.formatHealthReport(results, sysInfo);
+        await bot.editMessageText(report, {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '🔄 Recheck', callback_data: 'health_recheck' },
+              { text: '🔙 Menu', callback_data: 'menu_awal' },
+            ]]
+          }
+        });
+      } catch (e) {
+        bot.editMessageText(`❌ Healthcheck gagal: ${e.message}`, {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        }).catch(() => { });
+      }
+      return;
     }
     // Rule34 submenu (hub: search / browse terbaru / gacha)
     if (action === 'menu_r34') {
