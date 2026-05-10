@@ -1477,9 +1477,11 @@ async function doAggregateSearch(bot, chatId, query) {
   aggregateCache.set(chatId, { query, cpt, r34, pins });
   // Side-effect: populate juga browseCache/r34BrowseCache/pinBrowseCache supaya callback existing
   // (cpt_<idx>, r34_<idx>, pin_dl_<idx>) juga jalan kalau user klik dari menu aggregate.
-  if (cpt.length) browseCache.set(chatId, { posts: cpt, page: 1, category: 'home', query });
-  if (r34.length) r34BrowseCache.set(chatId, { posts: r34, page: 1, query });
-  if (pins.length) pinBrowseCache.set(chatId, { pins, query, currentBookmark: null, nextBookmark: null, prevBookmarks: [] });
+  // Flag fromAggregate=true agar "back_browse" di detail tahu harus balik ke menu aggregate,
+  // bukan ke full listing sumber.
+  if (cpt.length) browseCache.set(chatId, { posts: cpt, page: 1, category: 'home', query, fromAggregate: true });
+  if (r34.length) r34BrowseCache.set(chatId, { posts: r34, page: 1, query, fromAggregate: true });
+  if (pins.length) pinBrowseCache.set(chatId, { pins, query, currentBookmark: null, nextBookmark: null, prevBookmarks: [], fromAggregate: true });
 
   // Render listing
   let text = `🌐 <b>Hasil untuk "${escHtml(query)}"</b>\n\n`;
@@ -1988,6 +1990,10 @@ function startBot() {
     if (action === 'r34_back_browse') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       const cache = r34BrowseCache.get(chatId);
+      // Kalau dari aggregate search, balik ke menu aggregate
+      if (cache?.fromAggregate) {
+        return doAggregateSearch(bot, chatId, cache.query);
+      }
       return doR34Browse(bot, chatId, cache?.page || 1, cache?.query || null);
     }
     if (action.startsWith('r34page_')) {
@@ -2236,6 +2242,11 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { }); // Hapus foto preview
 
       if (cache) {
+        // Kalau cache berasal dari aggregate search, balik ke menu aggregate
+        // (bukan full Cosplaytele listing yang tidak pernah user lihat).
+        if (cache.fromAggregate) {
+          return doAggregateSearch(bot, chatId, cache.query);
+        }
         if (cache.isGacha) {
           const sentMsg = await bot.sendMessage(chatId, `👋 <b>CosTele Bot</b>\n\nPilih mode operasi:`, {
             parse_mode: 'HTML',
