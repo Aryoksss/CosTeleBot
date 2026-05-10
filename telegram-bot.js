@@ -2,27 +2,71 @@
 require('dotenv').config(); // Load environment variables dari file .env
 
 // --- QUEUE MANAGER ---
+// Round-robin queue fairness: pisah antrean per-user, pick job dari user yang paling
+// lama tidak kebagian giliran. Mencegah 1 user dengan 3 job besar monopoli bot.
+//
+// Data structure:
+//   this.userQueues: Map<chatId, Job[]>       — FIFO per user
+//   this.userLastServed: Map<chatId, number>  — timestamp terakhir user kebagian slot
+//   this.activeJobs: Map<jobId, activeEntry>  — yang lagi running
+//
+// Algorithm checkQueue:
+//   1. Pick user dengan antrean non-empty + userLastServed paling lama (atau never)
+//   2. Shift job pertama dari user itu, jalankan
+//
+// Fairness property: 2 user sama-sama masukkan 3 job → execution order A,B,A,B,A,B
+// bukan A,A,A,B,B,B (FIFO lama).
 class DownloadQueue {
   constructor() {
-    this.queue = [];
-    this.activeJobs = new Map();
+    this.userQueues = new Map();      // chatId -> Job[]
+    this.userLastServed = new Map();  // chatId -> timestamp
+    this.activeJobs = new Map();      // id -> activeEntry
     this.jobCounter = 1;
-    this.maxConcurrency = 2; // Maksimal 2 proses download+ekstrak bersamaan di VPS
-    this.maxPerUser = 3;     // Maksimal 3 file ngantri di tas per pengguna (anti-spam)
+    this.maxConcurrency = 2;
+    this.maxPerUser = 3;
+  }
+
+  /**
+   * Total pending untuk 1 user (queue + active).
+   */
+  userLoad(chatId) {
+    const qLen = (this.userQueues.get(chatId) || []).length;
+    const activeLen = Array.from(this.activeJobs.values()).filter(j => j.chatId === chatId).length;
+    return qLen + activeLen;
+  }
+
+  /**
+   * Total pending global (queue + active, semua user).
+   */
+  totalPending() {
+    let total = this.activeJobs.size;
+    for (const q of this.userQueues.values()) total += q.length;
+    return total;
+  }
+
+  /**
+   * Queue length per user (untuk /tasks command).
+   */
+  snapshotQueues() {
+    const arr = [];
+    for (const [chatId, q] of this.userQueues.entries()) {
+      if (q.length > 0) arr.push({ chatId, pending: q.length });
+    }
+    return arr;
   }
 
   addJob(chatId, title, execFunc, bot) {
-    // Cek beban aktif per Pengguna
-    const userJobs = this.queue.filter(j => j.chatId === chatId).length +
-      Array.from(this.activeJobs.values()).filter(j => j.chatId === chatId).length;
-
-    if (userJobs >= this.maxPerUser) {
-      bot.sendMessage(chatId, `⛔ <b>Antrean Penuh!</b> Anda hanya diizinkan menitipkan maksimal ${this.maxPerUser} tugas unduhan (termasuk yang sedang berjalan). Harap tunggu hingga yang lama selesai.`, { parse_mode: 'HTML' }).catch(() => { });
+    if (this.userLoad(chatId) >= this.maxPerUser) {
+      bot.sendMessage(chatId,
+        `⛔ <b>Antrean Penuh!</b> Anda hanya diizinkan menitipkan maksimal ${this.maxPerUser} tugas unduhan (termasuk yang sedang berjalan). Harap tunggu hingga yang lama selesai.`,
+        { parse_mode: 'HTML' }
+      ).catch(() => { });
       return false;
     }
 
     const job = { id: this.jobCounter++, chatId, title, execFunc, addedAt: Date.now() };
-    this.queue.push(job);
+    if (!this.userQueues.has(chatId)) this.userQueues.set(chatId, []);
+    this.userQueues.get(chatId).push(job);
 
     this.checkQueue();
     return true;
@@ -36,23 +80,46 @@ class DownloadQueue {
 
   finishJob(id) {
     this.activeJobs.delete(id);
-    this.checkQueue(); // Tarik antrean selanjutnya jika batas max kosong
+    this.checkQueue();
+  }
+
+  /**
+   * Round-robin pick: user dengan queue non-empty + lastServed paling lama menang.
+   * User yang belum pernah dilayani (never in lastServed) dapat prioritas tertinggi.
+   */
+  _pickNextUser() {
+    let bestUser = null;
+    let bestTs = Infinity;
+    for (const [chatId, q] of this.userQueues.entries()) {
+      if (q.length === 0) continue;
+      const ts = this.userLastServed.get(chatId) ?? 0; // never = 0
+      if (ts < bestTs) {
+        bestTs = ts;
+        bestUser = chatId;
+      }
+    }
+    return bestUser;
   }
 
   async checkQueue() {
-    if (this.activeJobs.size >= this.maxConcurrency || this.queue.length === 0) return;
+    if (this.activeJobs.size >= this.maxConcurrency) return;
+    const nextUser = this._pickNextUser();
+    if (nextUser == null) return;
 
-    // Comot antrean terdepan
-    const nextJob = this.queue.shift();
+    const q = this.userQueues.get(nextUser);
+    const nextJob = q.shift();
+    if (q.length === 0) this.userQueues.delete(nextUser);
+    this.userLastServed.set(nextUser, Date.now());
+
     this.activeJobs.set(nextJob.id, {
       id: nextJob.id,
       chatId: nextJob.chatId,
       title: nextJob.title,
       progress: '⚙️ Menghubungkan...',
-      status: 'Berjalan'
+      status: 'Berjalan',
     });
 
-    log.info(`[Queue] Mengeksekusi Job #${nextJob.id} dari antrean (Taskers: ${this.activeJobs.size}/${this.maxConcurrency})`);
+    log.info(`[Queue] Job #${nextJob.id} user=${nextJob.chatId} "${nextJob.title.slice(0, 40)}" (active: ${this.activeJobs.size}/${this.maxConcurrency})`);
     try {
       await nextJob.execFunc(nextJob.id);
     } catch (e) {
@@ -2942,6 +3009,53 @@ function startBot() {
     autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
   });
 
+  // /tasks — lihat status antrean queue manager
+  bot.onText(/^\/tasks(?:\s|$)/, async (msg) => {
+    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
+    const activeArr = Array.from(queueManager.activeJobs.values());
+    const pending = queueManager.snapshotQueues();
+    const mySelfActive = activeArr.filter(j => j.chatId === msg.chat.id);
+    const mySelfQueued = pending.find(p => p.chatId === msg.chat.id);
+
+    let text = `🚦 <b>Dasbor Antrean</b>\n`;
+    text += `📊 Global: ${activeArr.length}/${queueManager.maxConcurrency} aktif · ${pending.reduce((s, p) => s + p.pending, 0)} antri\n\n`;
+
+    if (activeArr.length > 0) {
+      text += `<b>Sedang berjalan:</b>\n`;
+      activeArr.forEach(j => {
+        const mine = j.chatId === msg.chat.id ? '🫵 ' : '';
+        text += `${mine}#${j.id} · ${escHtml(j.title.slice(0, 50))}\n`;
+        if (j.chatId === msg.chat.id && j.progress) {
+          text += `   <i>${escHtml(j.progress.slice(0, 100))}</i>\n`;
+        }
+      });
+      text += '\n';
+    }
+
+    if (pending.length > 0) {
+      text += `<b>Antrean per user:</b>\n`;
+      pending.forEach(p => {
+        const mine = p.chatId === msg.chat.id ? '🫵 ' : '';
+        text += `${mine}User ${String(p.chatId).slice(-4)}: ${p.pending} job\n`;
+      });
+    }
+
+    if (activeArr.length === 0 && pending.length === 0) {
+      text += `<i>Tidak ada job aktif.</i>`;
+    }
+
+    const sentMsg = await bot.sendMessage(msg.chat.id, text, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '🔄 Refresh', callback_data: 'tasks_refresh' },
+          { text: '🔙 Menu', callback_data: 'menu_awal' },
+        ]]
+      }
+    });
+    autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
+  });
+
   // /health and /ping — same behavior, alias
   bot.onText(/^\/(health|ping)(?:\s|$)/, async (msg) => {
     bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
@@ -3304,6 +3418,40 @@ function startBot() {
     if (action === 'menu_awal') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return sendMainMenu(bot, chatId);
+    }
+    // Tasks refresh — re-render dashboard
+    if (action === 'tasks_refresh') {
+      const activeArr = Array.from(queueManager.activeJobs.values());
+      const pending = queueManager.snapshotQueues();
+      let text = `🚦 <b>Dasbor Antrean</b>\n`;
+      text += `📊 Global: ${activeArr.length}/${queueManager.maxConcurrency} aktif · ${pending.reduce((s, p) => s + p.pending, 0)} antri\n\n`;
+      if (activeArr.length > 0) {
+        text += `<b>Sedang berjalan:</b>\n`;
+        activeArr.forEach(j => {
+          const mine = j.chatId === chatId ? '🫵 ' : '';
+          text += `${mine}#${j.id} · ${escHtml(j.title.slice(0, 50))}\n`;
+          if (j.chatId === chatId && j.progress) text += `   <i>${escHtml(j.progress.slice(0, 100))}</i>\n`;
+        });
+        text += '\n';
+      }
+      if (pending.length > 0) {
+        text += `<b>Antrean per user:</b>\n`;
+        pending.forEach(p => {
+          const mine = p.chatId === chatId ? '🫵 ' : '';
+          text += `${mine}User ${String(p.chatId).slice(-4)}: ${p.pending} job\n`;
+        });
+      }
+      if (activeArr.length === 0 && pending.length === 0) text += `<i>Tidak ada job aktif.</i>`;
+      await bot.editMessageText(text, {
+        chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🔄 Refresh', callback_data: 'tasks_refresh' },
+            { text: '🔙 Menu', callback_data: 'menu_awal' },
+          ]]
+        }
+      }).catch(() => { });
+      return;
     }
     // Health recheck (same flow as /health)
     if (action === 'health_recheck') {
