@@ -41,6 +41,7 @@ const SOURCE_HINTS = {
   r34: /\b(r34|rule\s*34|rule34(?:video)?)\b/i,
   pinterest: /\b(pin(?:terest)?|pinboard)\b/i,
   jav: /\b(jav(?:tiful)?|japanese\s+adult|jav\s*video)\b/i,
+  ero: /\b(erothots?|ero\s*thots?|onlyfans?\s*leaks?)\b/i,
 };
 
 function detectSourceHint(text) {
@@ -91,11 +92,12 @@ The bot supports these scraping sources:
 - "r34": Rule34Video (adult video content)
 - "pinterest": Pinterest (image/video mix)
 - "jav": Javtiful (Japanese adult videos, JAV codes like MIDE-XXX, SSNI-XXX)
+- "ero": EroThots (OnlyFans leaks, adult webcam/amateur videos)
 - "all": search all sources at once
 
 Classify user message into intent. Return ONLY a JSON object, no prose, no markdown.
 Schema:
-{ "intent": "search" | "other", "query": "<extracted search query>" | null, "preferred_source": "cosplay" | "r34" | "pinterest" | "jav" | "all" | null }
+{ "intent": "search" | "other", "query": "<extracted search query>" | null, "preferred_source": "cosplay" | "r34" | "pinterest" | "jav" | "ero" | "all" | null }
 
 Rules:
 - If user wants to find/search something visual/media → intent="search"
@@ -105,6 +107,7 @@ Rules:
 - If user mentions "pinterest" or "pin" → preferred_source="pinterest"
 - If user mentions "cosplay" as source context → preferred_source="cosplay"
 - If user mentions "jav", "javtiful", or JAV code format (e.g., MIDE-232, SSNI-001) → preferred_source="jav"
+- If user mentions "erothots", "onlyfans leak", or adult amateur content → preferred_source="ero"
 - Non-search messages (greetings, questions unrelated to media, help requests) → intent="other"
 - Keep query in original language, don't translate`;
 
@@ -170,7 +173,7 @@ async function detectIntentLLM(text) {
     if (!parsed || typeof parsed !== 'object') throw new Error('invalid shape');
     const intent = parsed.intent === 'search' ? 'search' : 'other';
     const query = intent === 'search' && typeof parsed.query === 'string' ? parsed.query.trim().slice(0, 150) : null;
-    const validSources = ['cosplay', 'r34', 'pinterest', 'jav', 'all'];
+    const validSources = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'all'];
     const preferredSource = validSources.includes(parsed.preferred_source) ? parsed.preferred_source : null;
 
     const result = {
