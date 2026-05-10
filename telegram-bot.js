@@ -2652,20 +2652,45 @@ async function sendMenuWithThumb(bot, chatId, text, keyboard) {
 }
 
 async function sendMainMenu(bot, chatId) {
-  const text = `👋 <b>CosTele Bot</b>\n\nPilih mode operasi:`;
+  const text =
+    `👋 <b>CosTele Bot</b>\n` +
+    `<i>Multi-source media scraper</i>\n\n` +
+    `Pilih kategori:`;
+
+  // Layout 2-tier: menu utama ringkas (grouped), submenu per-source.
+  // Grouping:
+  //   Row 1: Cosplay (primary) — 2 button cepat
+  //   Row 2: Video adult — 3 button dalam 1 row (R34 / JAV / EroThots)
+  //   Row 3: Image / Patreon — Pinterest + Patreon Gacha
+  //   Row 4: Smart search + Profile
+  //   Row 5: Utility — Terabox DL + Clear
+  //   Row 6 (admin only): Dashboard
   const keyboard = [
-    [{ text: '🔍 Cari Karakter (Cosplay)', callback_data: 'menu_search_cosplay' }, { text: '🔍 Cari Karakter (R34)', callback_data: 'menu_search_r34' }],
-    [{ text: '📚 Browse Cosplay', callback_data: 'menu_browse' }, { text: '🎲 Gacha Cosplay', callback_data: 'menu_gacha' }],
-    [{ text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' }],
-    [{ text: '📊 Profile', callback_data: 'menu_profile' }],
-    [{ text: '🎬 R34 Video Browse', callback_data: 'menu_r34_browse' }, { text: '🎬 R34 Gacha', callback_data: 'menu_r34_gacha' }],
-    [{ text: '📌 Pinterest Search', callback_data: 'pin_search_prompt' }, { text: '🎥 Javtiful', callback_data: 'jav_menu' }],
-    [{ text: '🔥 EroThots', callback_data: 'ero_search_prompt' }],
-    [{ text: '🧹 Clear Chat', callback_data: 'menu_clear' }, { text: '📥 Manual Terabox DL', callback_data: 'menu_terabox' }]
+    [
+      { text: '📚 Browse Cosplay', callback_data: 'menu_browse' },
+      { text: '🎲 Cosplay Gacha', callback_data: 'menu_gacha' },
+    ],
+    [
+      { text: '🎬 Rule34', callback_data: 'menu_r34' },
+      { text: '🎥 Javtiful', callback_data: 'jav_menu' },
+      { text: '🔥 EroThots', callback_data: 'ero_search_prompt' },
+    ],
+    [
+      { text: '📌 Pinterest', callback_data: 'pin_search_prompt' },
+      { text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' },
+    ],
+    [
+      { text: '🔎 Smart Search', callback_data: 'menu_search' },
+      { text: '📊 Profile', callback_data: 'menu_profile' },
+    ],
+    [
+      { text: '📥 Terabox DL', callback_data: 'menu_terabox' },
+      { text: '🧹 Clear Chat', callback_data: 'menu_clear' },
+    ],
   ];
 
   if (isAdmin(chatId)) {
-    keyboard.splice(4, 0, [{ text: '💻 Dasbor Admin', callback_data: 'menu_vps' }]);
+    keyboard.push([{ text: '💻 Admin Dashboard', callback_data: 'menu_vps' }]);
   }
 
   const sentMsg = await sendMenuWithThumb(bot, chatId, text, keyboard);
@@ -2985,6 +3010,23 @@ function startBot() {
       return;
     }
 
+    // Smart Search: dispatch via intent detector
+    if (state && state.step === 'AWAITING_SMART_SEARCH') {
+      userStates.delete(chatId);
+      log.info(`[User ${chatId}] Smart search: ${text}`);
+      try {
+        const intent = await intentDetector.detectIntent(text);
+        if (intent.intent === 'search' && intent.query) {
+          return doSmartSearchMenu(bot, chatId, intent.query, intent.preferredSource);
+        }
+        // Fallback kalau tidak ke-detect: anggap query raw ke aggregate
+        return doSmartSearchMenu(bot, chatId, text, 'all');
+      } catch (e) {
+        log.warn(`[SmartSearch] detect error: ${e.message}`);
+        return doSmartSearchMenu(bot, chatId, text, 'all');
+      }
+    }
+
     // If awaiting R34 search query
     if (state && state.step === 'AWAITING_R34_SEARCH') {
       userStates.delete(chatId);
@@ -3187,6 +3229,60 @@ function startBot() {
     if (action === 'menu_awal') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return sendMainMenu(bot, chatId);
+    }
+    // Rule34 submenu (hub: search / browse terbaru / gacha)
+    if (action === 'menu_r34') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const sentMsg = await bot.sendMessage(chatId,
+        `🎬 <b>Rule34 Video</b>\n\nPilih mode:`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔍 Cari Video', callback_data: 'r34_search_prompt' }],
+              [{ text: '📋 Browse Terbaru', callback_data: 'menu_r34_browse' }],
+              [{ text: '🎲 Gacha Video Random', callback_data: 'menu_r34_gacha' }],
+              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+            ]
+          }
+        });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    // Smart Search hub (prompt user untuk ngetik natural query)
+    if (action === 'menu_search') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      userStates.set(chatId, { step: 'AWAITING_SMART_SEARCH' });
+      const sentMsg = await bot.sendMessage(chatId,
+        `🔎 <b>Smart Search</b>\n\n` +
+        `Ketik apa yang kamu cari dengan bahasa natural.\n` +
+        `Bot akan otomatis deteksi source terbaik.\n\n` +
+        `<b>Contoh:</b>\n` +
+        `• <code>cari ganyu</code> — cari di semua sumber\n` +
+        `• <code>cosplay jeanne darc</code> — langsung Cosplaytele\n` +
+        `• <code>MIDE-232</code> — langsung Javtiful\n` +
+        `• <code>pinterest genshin</code> — langsung Pinterest\n` +
+        `• <code>onlyfans leaks</code> — langsung EroThots\n\n` +
+        `<i>💡 Atau pilih source langsung di bawah:</i>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📚 Cosplaytele', callback_data: 'menu_search_cosplay' },
+                { text: '🎬 Rule34', callback_data: 'menu_search_r34' },
+              ],
+              [
+                { text: '📌 Pinterest', callback_data: 'pin_search_prompt' },
+                { text: '🎥 Javtiful', callback_data: 'jav_search_prompt' },
+              ],
+              [{ text: '🔥 EroThots', callback_data: 'ero_search_prompt' }],
+              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+            ]
+          }
+        });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
     }
     if (action === 'menu_kemono_reroll') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
