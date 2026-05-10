@@ -190,13 +190,23 @@ function chunkMediaByLimits(medias) {
 
 // ─── SHARP AUTO-COMPRESSOR ───────────────────────────────────────────────────
 async function sanitizeMediasForTelegram(medias, statusCallback) {
-  // Telegram batas maksimal: 10 MB per foto, resolusi gabungan (width+height) tidak melewati 10000px.
+  // Telegram hard-limits untuk sendPhoto:
+  //   - file size ≤ 10 MB
+  //   - width + height ≤ 10000 px (sum, bukan individual)
+  //   - aspect ratio ≤ 20:1
+  // Kalau salah satu dilanggar → 400 PHOTO_INVALID_DIMENSIONS → jatuh ke document.
   //
-  // 2-pass strategy agar progress bar akurat:
-  //   Pass 1: scan — cari file yang butuh kompres (no heavy I/O, cuma fs.stat + sharp.metadata)
-  //   Pass 2: compress — real kompres, dengan progress bar %
+  // Strategy kompres yang aman:
+  //   target max dimension 4096 dengan `fit:'inside'` — sharp otomatis scale down
+  //   sampai BOTH width dan height ≤ 4096 sambil preserve aspect ratio.
+  //   Hasil max sum = 8192 (aman di bawah 10000).
   //
-  // Kalau tidak ada file yang butuh kompres, skip seluruh step tanpa kirim status (no-op).
+  // 2-pass agar progress bar akurat.
+
+  const TG_MAX_SUM = 10000;
+  const TG_MAX_SIZE = 10 * 1024 * 1024;
+  const TG_MAX_RATIO = 20;
+  const TARGET_MAX_DIM = 4096; // target dimensi max setelah resize (conservative)
 
   const compressibleExts = ['.jpg', '.jpeg', '.png', '.webp'];
   const toCompress = []; // { index, path, meta, size }
@@ -208,11 +218,14 @@ async function sanitizeMediasForTelegram(medias, statusCallback) {
     try {
       const fStats = fs.statSync(mPath);
       const meta = await sharp(mPath).metadata();
-      const sumDim = (meta.width || 0) + (meta.height || 0);
-      const ratio = meta.width && meta.height
-        ? Math.max(meta.width, meta.height) / Math.min(meta.width, meta.height)
-        : 1;
-      if (fStats.size > 9 * 1024 * 1024 || sumDim > 9000 || ratio > 19) {
+      const w = meta.width || 0;
+      const h = meta.height || 0;
+      const sum = w + h;
+      const ratio = w && h ? Math.max(w, h) / Math.min(w, h) : 1;
+      const maxDim = Math.max(w, h);
+
+      // Trigger: file > 9MB, sum > 9000, max dim > 4500, atau ratio ekstrem
+      if (fStats.size > 9 * 1024 * 1024 || sum > 9000 || maxDim > 4500 || ratio > 19) {
         toCompress.push({ index: i, path: mPath, meta, size: fStats.size });
       }
     } catch (_) {
@@ -220,11 +233,10 @@ async function sanitizeMediasForTelegram(medias, statusCallback) {
     }
   }
 
-  if (toCompress.length === 0) return; // tidak ada yang perlu dikompres
+  if (toCompress.length === 0) return;
 
   log.info(`[Compress] ${toCompress.length}/${medias.length} foto perlu dikompres`);
 
-  // Helper bar visual 20 segment (sama pattern dengan download progress bar)
   const makeBar = (pct) => {
     const width = 20;
     const filled = Math.round((pct / 100) * width);
@@ -235,7 +247,7 @@ async function sanitizeMediasForTelegram(medias, statusCallback) {
   let lastTgUpdate = 0;
   const updateStatus = async (done, total, forceNow = false) => {
     const now = Date.now();
-    if (!forceNow && now - lastTgUpdate < 1500) return; // throttle ~1.5s
+    if (!forceNow && now - lastTgUpdate < 1500) return;
     lastTgUpdate = now;
     const pct = total > 0 ? (done / total) * 100 : 0;
     const elapsed = (now - startedAt) / 1000;
@@ -249,41 +261,59 @@ async function sanitizeMediasForTelegram(medias, statusCallback) {
     try { await statusCallback(txt); } catch (_) { }
   };
 
-  // Tick awal (force 0% supaya user tau sedang mulai)
   await updateStatus(0, toCompress.length, true);
 
   // Pass 2: compress
   for (let k = 0; k < toCompress.length; k++) {
-    const item = toCompress[k];
-    const { index, path: mPath, meta } = item;
-    const sumDim = (meta.width || 0) + (meta.height || 0);
-    const ratio = meta.width && meta.height
-      ? Math.max(meta.width, meta.height) / Math.min(meta.width, meta.height)
-      : 1;
+    const { index, path: mPath, meta } = toCompress[k];
+    const w = meta.width || 0;
+    const h = meta.height || 0;
+    const ratio = w && h ? Math.max(w, h) / Math.min(w, h) : 1;
 
     try {
       const outPath = mPath + '_compressed.jpg';
-      let s = sharp(mPath);
+      let s = sharp(mPath, { failOn: 'none' });
 
-      if (meta.width > 4200) s = s.resize({ width: 4200 });
-      else if (sumDim > 9000 && meta.height > 4200) s = s.resize({ height: 4200 });
-
-      if (ratio > 19) {
-        const safeWidth = meta.width > meta.height ? Math.min(meta.width, Math.floor(meta.height * 18)) : undefined;
-        const safeHeight = meta.height > meta.width ? Math.min(meta.height, Math.floor(meta.width * 18)) : undefined;
-        s = s.resize({ width: safeWidth, height: safeHeight, fit: 'cover', position: 'top' });
+      if (ratio > TG_MAX_RATIO - 1) {
+        // Aspect extreme (narrow strip, ratio ≥19). Telegram tolak bahkan kalau sum OK.
+        // Step 1: crop ke aspect 18:1 untuk masuk limit aspect Telegram.
+        // Step 2: cap max dimension ke TARGET_MAX_DIM supaya sum tetap ≤ TG_MAX_SUM.
+        const safeWidth = w > h ? Math.min(w, Math.floor(h * 18)) : w;
+        const safeHeight = h > w ? Math.min(h, Math.floor(w * 18)) : h;
+        s = s.resize({ width: safeWidth, height: safeHeight, fit: 'cover', position: 'top' })
+          .resize({ width: TARGET_MAX_DIM, height: TARGET_MAX_DIM, fit: 'inside', withoutEnlargement: true });
+      } else {
+        // Normal case: cap kedua dimensi sekaligus dengan fit:'inside'.
+        // Sharp otomatis pilih dimensi terbesar sebagai limiter + preserve aspect.
+        // Hasil dijamin: max(width, height) ≤ TARGET_MAX_DIM → sum ≤ 2*TARGET_MAX_DIM.
+        s = s.resize({
+          width: TARGET_MAX_DIM,
+          height: TARGET_MAX_DIM,
+          fit: 'inside',
+          withoutEnlargement: true,
+        });
       }
 
-      await s.jpeg({ quality: 80 }).toFile(outPath);
+      await s.jpeg({ quality: 82, mozjpeg: true }).toFile(outPath);
+
+      // Verifikasi hasil sesuai spec Telegram. Kalau ukuran file masih > 10MB,
+      // kompres ulang dengan quality lebih agresif (55).
+      let outSize = fs.statSync(outPath).size;
+      if (outSize > TG_MAX_SIZE) {
+        await sharp(outPath, { failOn: 'none' }).jpeg({ quality: 55, mozjpeg: true }).toFile(outPath + '.tmp');
+        fs.renameSync(outPath + '.tmp', outPath);
+        outSize = fs.statSync(outPath).size;
+        log.warn(`[Compress] ${path.basename(mPath)} terlalu besar setelah kompres, re-encode quality 55 → ${(outSize / 1048576).toFixed(1)} MB`);
+      }
+
       medias[index] = outPath;
 
-      await new Promise(res => setTimeout(res, 200));
+      await new Promise(res => setTimeout(res, 50));
       global.gc && global.gc();
     } catch (err) {
       log.warn(`[Compress] skip ${path.basename(mPath)}: ${err.message}`);
     }
 
-    // Update progress (throttled + paksa update di item terakhir)
     await updateStatus(k + 1, toCompress.length, k === toCompress.length - 1);
   }
 
