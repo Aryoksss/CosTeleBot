@@ -524,7 +524,17 @@ async function sendOne(bot, chatId, filePath, explicitCaption = null) {
   const name = path.basename(filePath);
   const finalCaption = explicitCaption !== null ? explicitCaption : name;
 
-  if (size > CONFIG.VIDEO_MAX_BYTES) return; // Skip jika melebihi platform limit
+  if (size > CONFIG.VIDEO_MAX_BYTES) {
+    const sizeMB = (size / 1048576).toFixed(1);
+    const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1048576);
+    log.warn(`[sendOne] SKIP ${name} (${sizeMB} MB > limit ${limitMB} MB)`);
+    try {
+      await bot.sendMessage(chatId,
+        `⚠️ <b>${escHtml(name)}</b> ${sizeMB} MB melebihi limit upload ${limitMB} MB, file dilewati.`,
+        { parse_mode: 'HTML' });
+    } catch (_) { }
+    return;
+  }
 
   if (isVideo(filePath) && size < CONFIG.VIDEO_MAX_BYTES) {
     try {
@@ -794,14 +804,22 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     // Auto-compressor Sharp Engine (Pre-flight checks) sebelum masuk antiller
     await sanitizeMediasForTelegram(medias, status);
 
-    await status(`📤 <b>Mengirim ${total} file Media...</b>`);
+    const totalSizeMB = [...medias, ...docs].reduce((s, f) => s + (fs.existsSync(f) ? fs.statSync(f).size : 0), 0) / 1048576;
+    log.info(`[Send] Mulai kirim: ${medias.length} media + ${docs.length} doc = ${total} file, total ${totalSizeMB.toFixed(1)} MB`);
+    await status(`📤 <b>Mengirim ${total} file (${totalSizeMB.toFixed(0)} MB)...</b>`);
 
+    const sendStartedAt = Date.now();
     let sent = 0;
     const mediaChunks = chunkMediaByLimits(medias);
     let isFirstBatch = true; // Untuk memastikan caption hanya ditambahkan 1x
 
     // 1. Mengirim gambar/video secara massal (Media Group)
-    for (const chunk of mediaChunks) {
+    for (let chunkIdx = 0; chunkIdx < mediaChunks.length; chunkIdx++) {
+      const chunk = mediaChunks[chunkIdx];
+      const chunkSize = chunk.reduce((s, f) => s + fs.statSync(f).size, 0);
+      const chunkMB = (chunkSize / 1048576).toFixed(1);
+      log.info(`[Send] Album ${chunkIdx + 1}/${mediaChunks.length}: ${chunk.length} item, ${chunkMB} MB`);
+
       const mediaGroup = chunk.map((mediaPath, idx) => {
         const obj = {
           type: isVideo(mediaPath) ? 'video' : 'photo',
@@ -813,32 +831,48 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
         return obj;
       });
 
+      const t0 = Date.now();
       try {
         await bot.sendMediaGroup(chatId, mediaGroup);
         sent += chunk.length;
+        log.ok(`[Send] Album ${chunkIdx + 1}/${mediaChunks.length} terkirim (${((Date.now() - t0) / 1000).toFixed(1)}s) — progress ${sent}/${total}`);
       } catch (err) {
-        log.warn(`[User ${chatId}] Gagal sendMediaGroup, fallback manual. Er: ${err.message}`);
-        // Jika MediaGroup gagal (mungkin ukuran file aneh), kirim satu-satu fallback
+        log.warn(`[Send] sendMediaGroup ${chunkIdx + 1}/${mediaChunks.length} gagal (${err.message}), fallback per-item...`);
         for (let idx = 0; idx < chunk.length; idx++) {
           const caption = (isFirstBatch && idx === 0) ? fileName : '';
-          await sendOne(bot, chatId, chunk[idx], caption);
-          sent++;
+          try {
+            await sendOne(bot, chatId, chunk[idx], caption);
+            sent++;
+            log.info(`[Send]   fallback: ${path.basename(chunk[idx])} OK (${sent}/${total})`);
+          } catch (itemErr) {
+            log.error(`[Send]   fallback ${path.basename(chunk[idx])} GAGAL: ${itemErr.message}`);
+          }
         }
       }
       isFirstBatch = false;
-      await status(`📤 <b>Mengirim Album... ${sent}/${medias.length}</b>`).catch(() => { });
+      await status(`📤 <b>Mengirim... ${sent}/${total}</b>`).catch(() => { });
       await sleep(CONFIG.SEND_DELAY * 2); // delay sedikit agar tidak limit di Telegram
     }
 
     // 2. Mengirim file / dokumen (Jika ada)
+    if (docs.length > 0) log.info(`[Send] Mengirim ${docs.length} dokumen...`);
     for (const d of docs) {
-      // Untuk document, sengaja kita tidak timpa captionnya agar user tau ini doc apa
-      await sendOne(bot, chatId, d);
-      sent++;
+      const dSize = (fs.statSync(d).size / 1048576).toFixed(1);
+      const t0 = Date.now();
+      try {
+        await sendOne(bot, chatId, d);
+        sent++;
+        log.ok(`[Send] Doc: ${path.basename(d)} (${dSize} MB, ${((Date.now() - t0) / 1000).toFixed(1)}s) — progress ${sent}/${total}`);
+      } catch (e) {
+        log.error(`[Send] Doc ${path.basename(d)} GAGAL: ${e.message}`);
+      }
       await sleep(CONFIG.SEND_DELAY);
     }
 
-    await status(`✅ <b>Selesai!</b> Terkirim ${sent} file.\n<i>(Pesan status ini akan musnah dalam 5 detik..)</i>`);
+    const elapsed = ((Date.now() - sendStartedAt) / 1000).toFixed(1);
+    const avgMBps = totalSizeMB > 0 ? (totalSizeMB / (elapsed || 1)).toFixed(1) : '0';
+    log.ok(`[Send] SELESAI: ${sent}/${total} file terkirim dalam ${elapsed}s (~${avgMBps} MB/s) untuk user ${chatId}`);
+    await status(`✅ <b>Selesai!</b> Terkirim ${sent}/${total} file (${totalSizeMB.toFixed(0)} MB) dalam ${elapsed}s.\n<i>(Pesan status ini akan musnah dalam 5 detik..)</i>`);
 
     // Fitur Auto-Clean: Hapus pesan status download setelah 5 detik agar riwayat chat bersih
     setTimeout(() => {
