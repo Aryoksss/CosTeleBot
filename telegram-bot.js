@@ -162,6 +162,7 @@ const intentDetector = require('./intentDetector');
 const { renderProgressBar, createProgressThrottler } = require('./utils/progressUi');
 const healthcheck = require('./utils/healthcheck');
 const backup = require('./utils/backup');
+const dashboard = require('./utils/dashboard');
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -2727,6 +2728,18 @@ function startBot() {
   if (CONFIG.LOCAL_API_URL) botOptions.baseApiUrl = CONFIG.LOCAL_API_URL;
   const bot = new TelegramBot(CONFIG.BOT_TOKEN, botOptions);
   log.ok('Bot Telegram aktif ✅');
+
+  // Start dashboard web kalau env DASHBOARD_USER+DASHBOARD_PASS di-set
+  dashboard.startDashboard({
+    botStats,
+    queueManager,
+    statsDbRead: () => {
+      // Read stats.json langsung untuk get all users
+      try {
+        return JSON.parse(fs.readFileSync(path.join(__dirname, 'stats.json'), 'utf8'));
+      } catch (_) { return {}; }
+    },
+  });
 
   // Set Telegram Menu Commands
   bot.setMyCommands([
