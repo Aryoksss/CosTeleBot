@@ -206,4 +206,33 @@ function getAllLinks(episode) {
   return links;
 }
 
-module.exports = { search, getSeriesDetail, getEpisodes, pickBestLink, getAllLinks };
+/**
+ * Get latest series (page 1 = newest).
+ * @returns Normalized array with source='oploverz'
+ */
+async function getLatest(page = 1) {
+  const { data } = await http.get(`${API_BASE()}/series?page=${page}`);
+  if (!data || !data.data) return [];
+  return data.data.map(s => ({
+    id: s.id,
+    title: s.title,
+    slug: s.slug,
+    poster: s.poster,
+    status: s.status,
+    genres: (s.genres || []).map(g => g.name),
+    totalEpisodes: s.totalEpisodes || 0,
+    duration: s.duration,
+    score: s.score,
+    source: 'oploverz',
+  }));
+}
+
+/**
+ * Get ongoing anime only.
+ */
+async function getOngoing(page = 1) {
+  const latest = await getLatest(page);
+  return latest.filter(s => s.status === 'Ongoing');
+}
+
+module.exports = { search, getSeriesDetail, getEpisodes, pickBestLink, getAllLinks, getLatest, getOngoing };

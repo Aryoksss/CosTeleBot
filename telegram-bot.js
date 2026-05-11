@@ -470,18 +470,42 @@ async function autoCleanOldMenu(bot, chatId, newMsgId) {
 
 // ─── TERABOX DOWNLOAD PIPELINE ───────────────────────────────────────────────
 async function getApiResult(teraboxUrl) {
-  const { data } = await axios.post(CONFIG.XAPIVERSE_URL, { url: teraboxUrl }, {
-    headers: { 'Content-Type': 'application/json', 'xAPIverse-Key': CONFIG.XAPIVERSE_KEY },
-    timeout: 30000,
-  });
-  if (!data.list || !data.list.length) return null;
-  const item = data.list[0];
-  return {
-    zipDlink: item.zip_dlink || null,
-    name: item.name || 'archive',
-    sizeMB: (item.size / 1024 / 1024).toFixed(1),
-    credits: data.free_credits_remaining || '?',
-  };
+  // Retry up to 3 times with exponential backoff
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const { data } = await axios.post(CONFIG.XAPIVERSE_URL, { url: teraboxUrl }, {
+        headers: { 'Content-Type': 'application/json', 'xAPIverse-Key': CONFIG.XAPIVERSE_KEY },
+        timeout: 30000,
+      });
+      if (!data.list || !data.list.length) {
+        throw new Error(data.message || 'Terabox API return empty list');
+      }
+      const item = data.list[0];
+      if (!item.zip_dlink) {
+        throw new Error('Terabox API no zip_dlink (file mungkin sudah dihapus atau private)');
+      }
+      return {
+        zipDlink: item.zip_dlink,
+        name: item.name || 'archive',
+        sizeMB: (item.size / 1024 / 1024).toFixed(1),
+        credits: data.free_credits_remaining || '?',
+      };
+    } catch (e) {
+      lastErr = e;
+      const status = e.response?.status;
+      const body = e.response?.data;
+      // Don't retry on 4xx client errors (invalid URL, quota exceeded, etc)
+      if (status && status >= 400 && status < 500) {
+        const msg = typeof body === 'object' ? (body.message || body.error || JSON.stringify(body)) : String(body || e.message);
+        throw new Error(`Terabox API error (${status}): ${msg.slice(0, 200)}`);
+      }
+      // Retry on 5xx or network errors
+      log.warn(`[Terabox] attempt ${attempt}/3 gagal: ${e.message}`);
+      if (attempt < 3) await sleep(2000 * attempt);
+    }
+  }
+  throw new Error(`Terabox API tidak responsif setelah 3 retry: ${lastErr?.message || 'unknown'}`);
 }
 
 async function _downloadStreamOnce(url, destPath, onProgress, cookie = null, opts = {}) {
@@ -841,8 +865,12 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       if (opts.cookie) cookie = opts.cookie;
     } else {
       await status('⚙️ <b>Mapping via xAPIverse...</b>');
-      const api = await getApiResult(url);
-      if (!api || !api.zipDlink) return status('❌ API Gagal / Kuota Habis.');
+      let api;
+      try {
+        api = await getApiResult(url);
+      } catch (err) {
+        return status(`❌ <b>Terabox gagal:</b> ${escHtml(err.message.slice(0, 300))}`);
+      }
       downloadLink = api.zipDlink;
       fileName = api.name;
     }
@@ -2500,6 +2528,149 @@ async function doAnimeSearch(bot, chatId, query) {
 }
 
 /**
+ * Display a list of anime results (shared renderer for gacha/latest/season/genre).
+ */
+async function _renderAnimeList(bot, chatId, loadMsgId, title, results, reshowCallback = null) {
+  if (!results || results.length === 0) {
+    return bot.editMessageText(`😕 ${title}\n\nTidak ada hasil.`, {
+      chat_id: chatId, message_id: loadMsgId, parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Anime', callback_data: 'anime_menu' }]] },
+    });
+  }
+
+  // Cache + set up same way as search
+  animeBrowseCache.set(chatId, { results: results.slice(0, 20) });
+
+  let text = `🎌 <b>${title}</b>\n\n`;
+  const keyboard = [];
+  results.slice(0, 10).forEach((r, i) => {
+    const srcTag = r.source === 'oploverz' ? '🔷' : r.source === 'kusonime' ? '📦' : '🌸';
+    const statusTag = r.status === 'Ongoing' ? '🟢' : '✅';
+    text += `${i + 1}. ${srcTag} ${statusTag} <b>${escHtml(r.title)}</b>\n`;
+    if (r.totalEpisodes) text += `   📺 ${r.totalEpisodes} eps`;
+    if (r.genres?.length) text += ` • ${r.genres.slice(0, 3).join(', ')}`;
+    text += `\n`;
+    keyboard.push([{ text: `${srcTag} ${r.title.slice(0, 42)}`, callback_data: `anm_sel_${i}` }]);
+  });
+
+  const navRow = [];
+  if (reshowCallback) navRow.push({ text: '🔄 Reroll', callback_data: reshowCallback });
+  navRow.push({ text: '🔙 Menu Anime', callback_data: 'anime_menu' });
+  keyboard.push(navRow);
+
+  await bot.editMessageText(text, {
+    chat_id: chatId, message_id: loadMsgId, parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: keyboard },
+  });
+}
+
+/**
+ * Anime Gacha: random pick dari ongoing/batch.
+ */
+async function doAnimeGacha(bot, chatId, mode = 'ongoing') {
+  log.info(`[Anime] Gacha mode=${mode} user=${chatId}`);
+  statsDb.addGacha(chatId);
+
+  const loadMsg = await bot.sendMessage(chatId,
+    `🎲 <b>Anime Gacha ${mode === 'ongoing' ? '🟢 Ongoing' : '📦 Batch'}...</b>\n<i>Mengacak...</i>`,
+    { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+
+  try {
+    let pool = [];
+    if (mode === 'ongoing') {
+      // Random page dari Oploverz (halaman 1-15 biasanya ongoing)
+      const randomPage = Math.floor(Math.random() * 3) + 1;
+      pool = await oploverzScraper.getOngoing(randomPage);
+    } else {
+      // Batch gacha dari Kusonime
+      pool = await kusonimeScraper.scrapeGacha();
+    }
+
+    if (pool.length === 0) {
+      return bot.editMessageText(`😕 Mesin gacha kosong, coba reroll.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[
+          { text: '🔄 Reroll', callback_data: `anmgacha_${mode}` },
+          { text: '🔙 Menu', callback_data: 'anime_menu' },
+        ]] },
+      });
+    }
+
+    // Shuffle + pick top 5
+    pool.sort(() => Math.random() - 0.5);
+    const picked = pool.slice(0, 5);
+
+    const label = mode === 'ongoing' ? 'Gacha Ongoing 🟢' : 'Gacha Batch 📦';
+    await _renderAnimeList(bot, chatId, loadMsg.message_id, label, picked, `anmgacha_${mode}`);
+  } catch (err) {
+    log.error(`[Anime-Gacha] ${err.message}`);
+    bot.editMessageText(`❌ Gacha gagal: ${escHtml(err.message.slice(0, 200))}`, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Latest releases: Oploverz page 1 (sorted newest).
+ */
+async function doAnimeLatest(bot, chatId) {
+  log.info(`[Anime] Latest releases user=${chatId}`);
+  const loadMsg = await bot.sendMessage(chatId, `🆕 <b>Memuat rilisan terbaru...</b>`, { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+
+  try {
+    const results = await oploverzScraper.getLatest(1);
+    await _renderAnimeList(bot, chatId, loadMsg.message_id, '🆕 Latest Releases (Oploverz)', results.slice(0, 10), 'anm_latest');
+  } catch (err) {
+    log.error(`[Anime-Latest] ${err.message}`);
+    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Browse by season (Kusonime).
+ */
+async function doAnimeSeason(bot, chatId, seasonSlug) {
+  log.info(`[Anime] Browse season=${seasonSlug} user=${chatId}`);
+  const loadMsg = await bot.sendMessage(chatId, `📅 <b>Memuat ${escHtml(seasonSlug)}...</b>`, { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+
+  try {
+    const results = await kusonimeScraper.scrapeBySeason(seasonSlug);
+    const seasonLabel = seasonSlug.replace('-', ' ').replace(/\b\w/g, c => c.toUpperCase());
+    await _renderAnimeList(bot, chatId, loadMsg.message_id, `📅 Season: ${seasonLabel}`, results.slice(0, 10), `anm_season_${seasonSlug}`);
+  } catch (err) {
+    log.error(`[Anime-Season] ${err.message}`);
+    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Browse by genre (Kusonime).
+ */
+async function doAnimeGenre(bot, chatId, genreSlug) {
+  log.info(`[Anime] Browse genre=${genreSlug} user=${chatId}`);
+  const loadMsg = await bot.sendMessage(chatId, `🏷️ <b>Memuat genre ${escHtml(genreSlug)}...</b>`, { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+
+  try {
+    const results = await kusonimeScraper.scrapeByGenre(genreSlug);
+    const genreLabel = genreSlug.charAt(0).toUpperCase() + genreSlug.slice(1);
+    await _renderAnimeList(bot, chatId, loadMsg.message_id, `🏷️ Genre: ${genreLabel}`, results.slice(0, 10), `anm_genre_${genreSlug}`);
+  } catch (err) {
+    log.error(`[Anime-Genre] ${err.message}`);
+    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+}
+
+/**
  * Show episode list for selected anime.
  */
 async function doAnimeEpisodes(bot, chatId, seriesIndex, page = 1) {
@@ -3279,7 +3450,7 @@ async function sendMainMenu(bot, chatId) {
       { text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' },
     ],
     [
-      { text: '🎌 Anime', callback_data: 'anime_search_prompt' },
+      { text: '🎌 Anime', callback_data: 'anime_menu' },
       { text: '🔎 Smart Search', callback_data: 'menu_search' },
       { text: '📊 Profile', callback_data: 'menu_profile' },
     ],
@@ -4461,6 +4632,30 @@ function startBot() {
     }
 
     // ─── ANIME CALLBACKS ───────────────────────────────────────────────────────
+    if (action === 'anime_menu') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const sentMsg = await bot.sendMessage(chatId,
+        `🎌 <b>Anime Hub</b>\n<i>3 sumber: Otakudesu + Oploverz + Kusonime</i>\n\nPilih mode:`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔍 Search Anime', callback_data: 'anime_search_prompt' }],
+              [
+                { text: '🎲 Gacha Ongoing', callback_data: 'anmgacha_ongoing' },
+                { text: '📦 Gacha Batch', callback_data: 'anmgacha_batch' },
+              ],
+              [{ text: '🆕 Latest Releases', callback_data: 'anm_latest' }],
+              [{ text: '📅 Browse by Season', callback_data: 'anm_season_menu' }],
+              [{ text: '🏷️ Browse by Genre', callback_data: 'anm_genre_menu' }],
+              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+            ]
+          }
+        }
+      );
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
     if (action === 'anime_search_prompt') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       userStates.set(chatId, { step: 'AWAITING_ANIME_SEARCH' });
@@ -4526,6 +4721,80 @@ function startBot() {
         await bot.sendMessage(chatId, '🎌 Ketik judul anime untuk mencari ulang:', { reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] } });
       }
       return;
+    }
+
+    // Anime Gacha modes
+    if (action.startsWith('anmgacha_')) {
+      const mode = action.replace('anmgacha_', '');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeGacha(bot, chatId, mode);
+    }
+
+    // Latest releases (Oploverz page 1 = newest)
+    if (action === 'anm_latest') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeLatest(bot, chatId);
+    }
+
+    // Season browse menu
+    if (action === 'anm_season_menu') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const seasons = [
+        { label: '🌸 Spring 2026', slug: 'spring-2026' },
+        { label: '☀️ Summer 2025', slug: 'summer-2025' },
+        { label: '🍁 Fall 2025', slug: 'fall-2025' },
+        { label: '❄️ Winter 2026', slug: 'winter-2026' },
+        { label: '🌸 Spring 2025', slug: 'spring-2025' },
+        { label: '❄️ Winter 2025', slug: 'winter-2025' },
+      ];
+      const keyboard = [];
+      for (let i = 0; i < seasons.length; i += 2) {
+        const row = [{ text: seasons[i].label, callback_data: `anm_season_${seasons[i].slug}` }];
+        if (seasons[i + 1]) row.push({ text: seasons[i + 1].label, callback_data: `anm_season_${seasons[i + 1].slug}` });
+        keyboard.push(row);
+      }
+      keyboard.push([{ text: '🔙 Kembali', callback_data: 'anime_menu' }]);
+      const sentMsg = await bot.sendMessage(chatId, `📅 <b>Browse by Season</b>\n<i>Sumber: Kusonime (batch)</i>\n\nPilih season:`, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: keyboard },
+      });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action.startsWith('anm_season_')) {
+      const slug = action.replace('anm_season_', '');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeSeason(bot, chatId, slug);
+    }
+
+    // Genre browse menu
+    if (action === 'anm_genre_menu') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const genres = [
+        'action', 'adventure', 'comedy', 'drama', 'fantasy', 'romance',
+        'sci-fi', 'slice-of-life', 'supernatural', 'thriller', 'horror', 'mystery',
+        'magic', 'mecha', 'sports', 'shounen', 'seinen', 'ecchi',
+      ];
+      const keyboard = [];
+      for (let i = 0; i < genres.length; i += 3) {
+        const row = [];
+        for (let j = i; j < Math.min(i + 3, genres.length); j++) {
+          row.push({ text: genres[j].charAt(0).toUpperCase() + genres[j].slice(1), callback_data: `anm_genre_${genres[j]}` });
+        }
+        keyboard.push(row);
+      }
+      keyboard.push([{ text: '🔙 Kembali', callback_data: 'anime_menu' }]);
+      const sentMsg = await bot.sendMessage(chatId, `🏷️ <b>Browse by Genre</b>\n<i>Sumber: Kusonime (batch)</i>\n\nPilih genre:`, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: keyboard },
+      });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action.startsWith('anm_genre_')) {
+      const slug = action.replace('anm_genre_', '');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeGenre(bot, chatId, slug);
     }
 
     if (action === 'menu_vps') {

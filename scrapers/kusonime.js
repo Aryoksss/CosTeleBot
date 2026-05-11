@@ -133,4 +133,122 @@ function classifyHost(url, hostLabel = '') {
   return 'other';
 }
 
-module.exports = { search, getDetail, classifyHost };
+/**
+ * Get a random list of anime from Kusonime (for gacha feature).
+ * @param {number} page - specific page or random if omitted
+ * @returns {Array<{title, slug, url, poster, genres, source}>}
+ */
+async function scrapeListing(page = 1) {
+  const url = page === 1 ? BASE() : `${BASE()}/page/${page}/`;
+  const { data } = await http.get(url);
+  const $ = cheerio.load(data);
+  const results = [];
+
+  // Home page listing: similar to search, h2 > a
+  $('h2 > a[href*="kusonime.com"]').each((_, el) => {
+    const $a = $(el);
+    const href = $a.attr('href') || '';
+    const title = $a.text().trim() || $a.attr('title') || '';
+    if (!href || !title || href.match(/\/(genres|seasons|tag|page|credits|faq|dmca|wp-)/)) return;
+    const slug = href.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+    if (slug.includes('/')) return;
+
+    const $item = $a.closest('li, article, div');
+    const poster = $item.find('img').first().attr('src') || '';
+    const genres = [];
+    $item.find('a[href*="/genres/"]').each((_, g) => genres.push($(g).text().trim()));
+
+    results.push({
+      title: title.replace(/\s+/g, ' ').trim(),
+      slug,
+      url: href,
+      poster,
+      genres: [...new Set(genres)],
+      source: 'kusonime',
+    });
+  });
+
+  const seen = new Set();
+  return results.filter(r => {
+    if (seen.has(r.slug)) return false;
+    seen.add(r.slug);
+    return true;
+  });
+}
+
+/**
+ * Random gacha: pick random page (1-497) from Kusonime listing.
+ */
+async function scrapeGacha() {
+  const randomPage = Math.floor(Math.random() * 50) + 1; // 1-50 for recent content
+  return scrapeListing(randomPage);
+}
+
+/**
+ * Browse by season: /seasons/<season-slug>/
+ * @param {string} seasonSlug - e.g. 'spring-2026', 'winter-2026'
+ */
+async function scrapeBySeason(seasonSlug, page = 1) {
+  const url = `${BASE()}/seasons/${seasonSlug}/${page > 1 ? `page/${page}/` : ''}`;
+  const { data } = await http.get(url);
+  const $ = cheerio.load(data);
+  const results = [];
+
+  $('h2 > a[href*="kusonime.com"]').each((_, el) => {
+    const $a = $(el);
+    const href = $a.attr('href') || '';
+    const title = $a.text().trim();
+    if (!href || !title || href.match(/\/(genres|seasons|tag|page)/)) return;
+    const slug = href.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+    if (slug.includes('/')) return;
+
+    const $item = $a.closest('li, article, div');
+    const poster = $item.find('img').first().attr('src') || '';
+    results.push({
+      title: title.replace(/\s+/g, ' ').trim(),
+      slug,
+      url: href,
+      poster,
+      genres: [],
+      source: 'kusonime',
+    });
+  });
+
+  const seen = new Set();
+  return results.filter(r => { if (seen.has(r.slug)) return false; seen.add(r.slug); return true; });
+}
+
+/**
+ * Browse by genre: /genres/<genre-slug>/
+ */
+async function scrapeByGenre(genreSlug, page = 1) {
+  const url = `${BASE()}/genres/${genreSlug}/${page > 1 ? `page/${page}/` : ''}`;
+  const { data } = await http.get(url);
+  const $ = cheerio.load(data);
+  const results = [];
+
+  $('h2 > a[href*="kusonime.com"]').each((_, el) => {
+    const $a = $(el);
+    const href = $a.attr('href') || '';
+    const title = $a.text().trim();
+    if (!href || !title || href.match(/\/(genres|seasons|tag|page)/)) return;
+    const slug = href.replace(/^https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+    if (slug.includes('/')) return;
+
+    const $item = $a.closest('li, article, div');
+    const poster = $item.find('img').first().attr('src') || '';
+    results.push({
+      title: title.replace(/\s+/g, ' ').trim(),
+      slug,
+      url: href,
+      poster,
+      genres: [],
+      source: 'kusonime',
+    });
+  });
+
+  const seen = new Set();
+  return results.filter(r => { if (seen.has(r.slug)) return false; seen.add(r.slug); return true; });
+}
+
+module.exports = { search, getDetail, classifyHost, scrapeListing, scrapeGacha, scrapeBySeason, scrapeByGenre };
