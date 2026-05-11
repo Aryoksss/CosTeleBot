@@ -171,6 +171,8 @@ const otakudesuScraper = require('./scrapers/otakudesu');
 const oploverzScraper = require('./scrapers/oploverz');
 const hostResolver = require('./scrapers/hostResolver');
 const megaResolver = require('./scrapers/megaResolver');
+const kusonimeScraper = require('./scrapers/kusonime');
+const gdriveResolver = require('./scrapers/gdriveResolver');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
@@ -2441,14 +2443,16 @@ async function doAnimeSearch(bot, chatId, query) {
   const loadMsg = await bot.sendMessage(chatId, '🔍 <b>Mencari anime...</b>', { parse_mode: 'HTML' });
 
   try {
-    const [otakuRes, oploRes] = await Promise.allSettled([
+    const [otakuRes, oploRes, kusoRes] = await Promise.allSettled([
       otakudesuScraper.search(query),
       oploverzScraper.search(query),
+      kusonimeScraper.search(query),
     ]);
 
     const results = [];
     if (otakuRes.status === 'fulfilled') results.push(...otakuRes.value);
     if (oploRes.status === 'fulfilled') results.push(...oploRes.value);
+    if (kusoRes.status === 'fulfilled') results.push(...kusoRes.value);
 
     if (results.length === 0) {
       return bot.editMessageText('😕 Tidak ditemukan anime dengan judul tersebut.', {
@@ -2472,14 +2476,16 @@ async function doAnimeSearch(bot, chatId, query) {
     let text = `🎌 <b>Hasil Pencarian Anime</b>\n<i>"${escHtml(query)}"</i>\n\n`;
     const keyboard = [];
     unique.slice(0, 10).forEach((r, i) => {
-      const srcTag = r.source === 'oploverz' ? '🅾' : '🅾‍';
+      const srcTag = r.source === 'oploverz' ? '🔷' :
+                     r.source === 'kusonime' ? '📦' : '🌸';
       const statusTag = r.status === 'Ongoing' ? '🟢' : '✅';
-      text += `${i + 1}. ${statusTag} <b>${escHtml(r.title)}</b>\n`;
+      text += `${i + 1}. ${srcTag} ${statusTag} <b>${escHtml(r.title)}</b>\n`;
       if (r.totalEpisodes) text += `   📺 ${r.totalEpisodes} eps`;
       if (r.genres?.length) text += ` • ${r.genres.slice(0, 3).join(', ')}`;
       text += `\n`;
-      keyboard.push([{ text: `${i + 1}. ${r.title.slice(0, 45)}`, callback_data: `anm_sel_${i}` }]);
+      keyboard.push([{ text: `${srcTag} ${r.title.slice(0, 42)}`, callback_data: `anm_sel_${i}` }]);
     });
+    text += `\n<i>🌸=Otakudesu  🔷=Oploverz  📦=Kusonime (batch)</i>`;
 
     await bot.editMessageText(text, {
       chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
@@ -2501,9 +2507,56 @@ async function doAnimeEpisodes(bot, chatId, seriesIndex, page = 1) {
   const series = cache?.results?.[seriesIndex];
   if (!series) return bot.sendMessage(chatId, '❌ Data anime tidak ditemukan, coba search ulang.');
 
-  const loadMsg = await bot.sendMessage(chatId, `📺 <b>Memuat episode ${escHtml(series.title)}...</b>`, { parse_mode: 'HTML' });
+  const loadMsg = await bot.sendMessage(chatId, `📺 <b>Memuat detail ${escHtml(series.title)}...</b>`, { parse_mode: 'HTML' });
 
   try {
+    // Kusonime: batch format, langsung tampilkan quality picker (tidak ada per-episode)
+    if (series.source === 'kusonime') {
+      const detail = await kusonimeScraper.getDetail(series.url);
+      if (!detail.qualityLinks || detail.qualityLinks.length === 0) {
+        return bot.editMessageText('😕 Tidak ada link download tersedia.', {
+          chat_id: chatId, message_id: loadMsg.message_id,
+        });
+      }
+
+      // Tambahkan epNumber pseudo "BATCH" supaya konsisten sama classicLinks di Oploverz
+      const linksWithMeta = detail.qualityLinks.map(q => ({ ...q, epNumber: 'BATCH' }));
+      animeBrowseCache.set(chatId, { ...cache, classicLinks: linksWithMeta, lastEpNum: 'BATCH', seriesIdx: seriesIndex });
+
+      let text = `📦 <b>${escHtml(series.title)}</b>\n<i>Kusonime Batch</i>\n\n`;
+      if (detail.description) text += `${escHtml(detail.description.slice(0, 300))}${detail.description.length > 300 ? '...' : ''}\n\n`;
+      text += `Pilih kualitas untuk auto-download:\n`;
+
+      const keyboard = [];
+      detail.qualityLinks.forEach((q, qIdx) => {
+        // Prioritas: Google Drive > Gofile > Terabox (yang bot udah support)
+        const gd = q.links.find(l => kusonimeScraper.classifyHost(l.url, l.host) === 'gdrive');
+        const gofile = q.links.find(l => kusonimeScraper.classifyHost(l.url, l.host) === 'gofile');
+        const tera = q.links.find(l => kusonimeScraper.classifyHost(l.url, l.host) === 'terabox');
+
+        if (gd) keyboard.push([{ text: `⬇️ ${q.quality} (Google Drive)`, callback_data: `anm_kuso_${qIdx}_gd` }]);
+        if (gofile) keyboard.push([{ text: `⬇️ ${q.quality} (Gofile)`, callback_data: `anm_kuso_${qIdx}_gf` }]);
+        if (tera) keyboard.push([{ text: `⬇️ ${q.quality} (Terabox)`, callback_data: `anm_kuso_${qIdx}_tb` }]);
+      });
+
+      // Manual links section
+      text += `\n<i>Semua mirror:</i>\n`;
+      for (const q of detail.qualityLinks) {
+        text += `<b>${escHtml(q.quality)}</b>: `;
+        text += q.links.map(l => `<a href="${escHtml(l.url)}">${escHtml(l.host)}</a>`).join(' · ');
+        text += `\n`;
+      }
+
+      keyboard.push([{ text: '🔙 Kembali ke hasil', callback_data: 'anm_back_search' }]);
+
+      await bot.editMessageText(text, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
     let episodes;
     if (series.source === 'oploverz') {
       episodes = await oploverzScraper.getEpisodes(series.slug);
@@ -2799,6 +2852,111 @@ async function doAnimeMegaDownload(bot, chatId, qualityIdx) {
   }, bot);
 }
 
+/**
+ * Download Kusonime batch via Google Drive / Gofile / Terabox.
+ * @param {number} qualityIdx - index in cache.classicLinks array
+ * @param {string} hostType - 'gd' | 'gf' | 'tb'
+ */
+async function doAnimeKusoDownload(bot, chatId, qualityIdx, hostType) {
+  const cache = animeBrowseCache.get(chatId);
+  const classicLinks = cache?.classicLinks;
+  const series = cache?.results?.[cache?.seriesIdx];
+  if (!classicLinks || !series) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
+
+  const qBlock = classicLinks[qualityIdx];
+  if (!qBlock) return bot.sendMessage(chatId, '❌ Quality tidak valid.');
+
+  // Pick the link matching the host type
+  let link = null;
+  if (hostType === 'gd') {
+    link = qBlock.links.find(l => kusonimeScraper.classifyHost(l.url, l.host) === 'gdrive');
+  } else if (hostType === 'gf') {
+    link = qBlock.links.find(l => kusonimeScraper.classifyHost(l.url, l.host) === 'gofile');
+  } else if (hostType === 'tb') {
+    link = qBlock.links.find(l => kusonimeScraper.classifyHost(l.url, l.host) === 'terabox');
+  }
+  if (!link) return bot.sendMessage(chatId, `❌ Link ${hostType} tidak ditemukan.`);
+
+  const title = `${series.title} [${qBlock.quality}]`;
+
+  // Gofile: reuse existing processDownload handler
+  if (hostType === 'gf') {
+    await bot.sendMessage(chatId, `✅ Gofile detected. Queue via Gofile downloader...\n<code>${escHtml(link.url)}</code>`, { parse_mode: 'HTML' });
+    queueManager.addJob(chatId, title, async (jobId) => {
+      await processDownload(bot, chatId, link.url, null, 'gofile', jobId);
+    }, bot);
+    return;
+  }
+
+  // Terabox: reuse existing terabox handler
+  if (hostType === 'tb') {
+    await bot.sendMessage(chatId, `✅ Terabox detected. Queue via Terabox downloader...\n<code>${escHtml(link.url)}</code>`, { parse_mode: 'HTML' });
+    queueManager.addJob(chatId, title, async (jobId) => {
+      await processDownload(bot, chatId, link.url, null, 'terabox', jobId);
+    }, bot);
+    return;
+  }
+
+  // Google Drive: use gdriveResolver direct
+  queueManager.addJob(chatId, title, async (jobId) => {
+    let statusMsg = null;
+    const status = async (txt) => {
+      try {
+        if (statusMsg) await bot.editMessageText(txt, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' });
+        else statusMsg = await bot.sendMessage(chatId, txt, { parse_mode: 'HTML' });
+      } catch (_) {}
+    };
+
+    try {
+      await status(`⏳ <b>Resolving Google Drive...</b>`);
+
+      const tmpDir = path.join(CONFIG.TEMP_DIR, `kuso_gd_${Date.now()}`);
+      await fsp.mkdir(tmpDir, { recursive: true });
+      const tmpPath = path.join(tmpDir, `download.tmp`);
+
+      const throttle = createProgressThrottler(async (bar) => {
+        status(`⬇️ <b>${escHtml(title)}</b>\n${bar}`);
+      }, 3000);
+
+      const result = await gdriveResolver.downloadGDrive(link.url, tmpPath, (pct, speed, eta) => {
+        throttle(renderProgressBar(pct, speed, eta));
+      });
+
+      // Rename to actual filename
+      const finalPath = path.join(tmpDir, result.name);
+      try { fs.renameSync(tmpPath, finalPath); } catch (_) {}
+
+      // If file is archive (rar/zip/7z), extract + process (reuse existing pipeline)
+      const ext = path.extname(result.name).toLowerCase();
+      if (['.rar', '.zip', '.7z'].includes(ext)) {
+        await status(`📦 <b>Extracting archive...</b>`);
+        const extractDir = path.join(tmpDir, 'ext');
+        await fsp.mkdir(extractDir, { recursive: true });
+        await extractArchive(finalPath, extractDir);
+        // Find video files and upload
+        const files = collectFiles(extractDir).filter(f => isVideo(f));
+        if (files.length === 0) {
+          throw new Error('Tidak ada file video setelah extract archive.');
+        }
+        await status(`📤 <b>Uploading ${files.length} video file(s)...</b>`);
+        for (const f of files) {
+          await sendOne(bot, chatId, f, `🎌 ${title}`);
+        }
+      } else {
+        // Direct video file
+        await status(`📤 <b>Uploading ke Telegram...</b>\n${escHtml(result.name)}`);
+        await sendOne(bot, chatId, finalPath, `🎌 ${title}`);
+      }
+
+      await status(`✅ <b>${escHtml(title)}</b> selesai!`);
+      await rimraf(tmpDir);
+    } catch (err) {
+      log.error(`[Anime-Kuso-GD] download error: ${err.message}`);
+      status(`❌ Download gagal: ${escHtml(err.message.slice(0, 300))}`).catch(() => {});
+    }
+  }, bot);
+}
+
 // ─── SMART / AGGREGATE SEARCH ────────────────────────────────────────────────
 /**
  * Tampilkan menu "pilih sumber" untuk query yang di-detect dari pesan bebas user.
@@ -2859,11 +3017,16 @@ async function doAggregateSearch(bot, chatId, query) {
     javtifulScraper.scrapeSearch(query, 1),
     erothotsScraper.scrapeSearch(query, 1),
     (async () => {
-      const [otaku, oplo] = await Promise.allSettled([
+      const [otaku, oplo, kuso] = await Promise.allSettled([
         otakudesuScraper.search(query),
         oploverzScraper.search(query),
+        kusonimeScraper.search(query),
       ]);
-      const all = [...(otaku.status === 'fulfilled' ? otaku.value : []), ...(oplo.status === 'fulfilled' ? oplo.value : [])];
+      const all = [
+        ...(otaku.status === 'fulfilled' ? otaku.value : []),
+        ...(oplo.status === 'fulfilled' ? oplo.value : []),
+        ...(kuso.status === 'fulfilled' ? kuso.value : []),
+      ];
       // Dedupe
       const seen = new Set();
       return all.filter(r => { const k = r.title.toLowerCase().replace(/[^a-z0-9]/g, ''); if (seen.has(k)) return false; seen.add(k); return true; });
@@ -4335,6 +4498,14 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doAnimeMegaDownload(bot, chatId, qIdx);
     }
+    if (action.startsWith('anm_kuso_')) {
+      // Format: anm_kuso_<qIdx>_<hostType>
+      const parts = action.replace('anm_kuso_', '').split('_');
+      const qIdx = parseInt(parts[0], 10);
+      const hostType = parts[1]; // 'gd' | 'gf' | 'tb'
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeKusoDownload(bot, chatId, qIdx, hostType);
+    }
     if (action === 'anm_back_search') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       // Re-show last search results
@@ -4343,10 +4514,12 @@ function startBot() {
         let text = `🎌 <b>Hasil Pencarian Anime</b>\n\n`;
         const keyboard = [];
         cache.results.slice(0, 10).forEach((r, i) => {
+          const srcTag = r.source === 'oploverz' ? '🔷' : r.source === 'kusonime' ? '📦' : '🌸';
           const statusTag = r.status === 'Ongoing' ? '🟢' : '✅';
-          text += `${i + 1}. ${statusTag} <b>${escHtml(r.title)}</b>\n`;
-          keyboard.push([{ text: `${i + 1}. ${r.title.slice(0, 45)}`, callback_data: `anm_sel_${i}` }]);
+          text += `${i + 1}. ${srcTag} ${statusTag} <b>${escHtml(r.title)}</b>\n`;
+          keyboard.push([{ text: `${srcTag} ${r.title.slice(0, 42)}`, callback_data: `anm_sel_${i}` }]);
         });
+        text += `\n<i>🌸=Otakudesu  🔷=Oploverz  📦=Kusonime</i>`;
         await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
       } else {
         userStates.set(chatId, { step: 'AWAITING_ANIME_SEARCH' });
