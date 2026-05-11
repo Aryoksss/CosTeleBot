@@ -24,8 +24,13 @@ const fs = require('fs');
 
 chromium.use(StealthPlugin());
 
-// IDLIX site base URL — configurable via .env
-const IDLIX_BASE = () => process.env.IDLIX_BASE_URL || 'https://159.65.50.100';
+// IDLIX site base URLs — search across multiple mirrors for wider catalog
+// CSV via env, or defaults. First hit wins.
+const IDLIX_BASES = () => {
+  const env = process.env.IDLIX_BASE_URL || '';
+  if (env) return env.split(',').map(s => s.trim()).filter(Boolean);
+  return ['https://159.65.50.100', 'https://pafisangirjujuan.org'];
+};
 
 // OpenSubtitles API (free tier fallback for subtitles)
 const OPENSUB_BASE = 'https://api.opensubtitles.com/api/v1';
@@ -43,48 +48,60 @@ const http = axios.create({
 // ─── SEARCH & BROWSE ──────────────────────────────────────────────────────────
 
 /**
- * Search film/series di IDLIX site.
+ * Search film/series di semua IDLIX mirrors, merge results (deduplicate by slug).
  * @param {string} query
  * @returns {Array<{title, url, slug, year, type, poster, quality, rating}>}
  */
 async function search(query) {
-  const base = IDLIX_BASE();
-  const { data } = await http.get(`${base}/`, { params: { s: query } });
-  const $ = cheerio.load(data);
-  const results = [];
+  const bases = IDLIX_BASES();
+  const allResults = [];
+  const seenSlugs = new Set();
 
-  // IDLIX theme (idmuvi/flavor): article.item with .content-thumbnail > a[itemprop="url"]
-  $('article.item, article.has-post-thumbnail').each((i, el) => {
-    const $el = $(el);
-    const link = $el.find('h2.entry-title a, .content-thumbnail > a').first();
-    const href = link.attr('href') || '';
-    const title = link.attr('title')?.replace(/^Permalink ke:\s*/i, '').trim() ||
-                  link.text().trim() ||
-                  $el.find('h2.entry-title').text().trim();
-    if (!href || !title) return;
+  // Query all mirrors in parallel
+  const promises = bases.map(async (base) => {
+    try {
+      const { data } = await http.get(`${base}/`, { params: { s: query } });
+      const $ = cheerio.load(data);
 
-    const slug = href.replace(/https?:\/\/[^/]+\//, '').replace(/\/$/, '');
-    const poster = $el.find('img.wp-post-image').attr('src') || null;
-    const rating = $el.find('.gmr-rating-item').text().replace(/[^\d.]/g, '') || '';
-    const duration = $el.find('.gmr-duration-item').text().trim() || '';
-    const type = $el.attr('itemtype')?.includes('TVSeries') ? 'tv' : 'movie';
-    const year = title.match(/\((\d{4})\)/)?.[1] || slug.match(/(\d{4})/)?.[1] || '';
+      $('article.item, article.has-post-thumbnail').each((i, el) => {
+        const $el = $(el);
+        const link = $el.find('h2.entry-title a, .content-thumbnail > a').first();
+        const href = link.attr('href') || '';
+        const title = link.attr('title')?.replace(/^Permalink (?:ke|to):\s*/i, '').trim() ||
+                      link.text().trim() ||
+                      $el.find('h2.entry-title').text().trim();
+        if (!href || !title) return;
 
-    results.push({
-      title: title.replace(/\s*\(\d{4}\)\s*$/, '').trim() || title,
-      url: href,
-      slug,
-      year,
-      type,
-      poster,
-      quality: '',
-      rating,
-      duration,
-      source: 'idlix',
-    });
+        const slug = href.replace(/https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+        if (seenSlugs.has(slug)) return; // deduplicate across mirrors
+        seenSlugs.add(slug);
+
+        const poster = $el.find('img.wp-post-image').attr('src') || null;
+        const rating = $el.find('.gmr-rating-item').text().replace(/[^\d.]/g, '') || '';
+        const duration = $el.find('.gmr-duration-item').text().trim() || '';
+        const type = $el.attr('itemtype')?.includes('TVSeries') ? 'tv' : 'movie';
+        const year = title.match(/\((\d{4})\)/)?.[1] || slug.match(/(\d{4})/)?.[1] || '';
+
+        allResults.push({
+          title: title.replace(/\s*\(\d{4}\)\s*$/, '').trim() || title,
+          url: href,
+          slug,
+          year,
+          type,
+          poster,
+          quality: '',
+          rating,
+          duration,
+          source: 'idlix',
+        });
+      });
+    } catch (err) {
+      // Mirror down — skip silently
+    }
   });
 
-  return results.slice(0, 15);
+  await Promise.all(promises);
+  return allResults.slice(0, 15);
 }
 
 /**
