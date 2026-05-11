@@ -876,10 +876,14 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       accountToken = opts.accountToken || accountToken;
     } else if (source === 'terabox_direct') {
       // Terabox direct URL dari tera-core resolver (data.terabox.app/file/...)
+      // CDN butuh User-Agent + Referer, tanpa itu return 403.
       await status('⚙️ <b>Menyambungkan tautan Terabox CDN...</b>');
       downloadLink = url;
       fileName = opts.fileName || decodeURIComponent(url.split('/').pop().split('?')[0]) || 'terabox_file';
       zipPath = `${tmpBase}_raw${path.extname(fileName) || '.rar'}`;
+      // Inject headers via opts yang akan di-forward ke downloadStream
+      opts.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+      opts.referer = 'https://www.terabox.com/';
     } else if (source === 'direct') {
       await status('⚙️ <b>Menyambungkan tautan aslinya...</b>');
       downloadLink = url;
@@ -973,6 +977,8 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     } else {
       // Gofile CDN kadang validasi Referer/UA. Kirim header yg match session browser resolver.
       const dlExtra = {};
+      if (opts.userAgent) dlExtra.userAgent = opts.userAgent;
+      if (opts.referer) dlExtra.referer = opts.referer;
       await downloadStream(downloadLink, zipPath, async (pct, dl, tot) => {
         const pText = `⬇️ <b>Mengunduh ${fileName}...</b>\n<code>${pct}%  ─  ${(dl / 1048576).toFixed(1)} MB / ${(tot ? (tot / 1048576).toFixed(1) : '?')} MB</code>`;
         if (jobId) queueManager.updateJob(jobId, pText);
