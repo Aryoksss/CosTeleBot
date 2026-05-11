@@ -12,6 +12,15 @@
  *   - Redirector links: https://link.desustream.com/?id=... (follows 302)
  */
 
+// Polyfill crypto.subtle untuk Node < 19 (megajs butuh Web Crypto API)
+if (!globalThis.crypto) {
+  const { webcrypto } = require('crypto');
+  globalThis.crypto = webcrypto;
+} else if (!globalThis.crypto.subtle) {
+  const { webcrypto } = require('crypto');
+  globalThis.crypto.subtle = webcrypto.subtle;
+}
+
 const axios = require('axios');
 
 // megajs package — lazy-required supaya bot tidak crash kalau package missing
