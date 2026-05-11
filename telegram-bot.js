@@ -2585,20 +2585,35 @@ async function doAnimeDownload(bot, chatId, epNumber) {
   if (!ep) return bot.sendMessage(chatId, `❌ Episode ${epNumber} tidak ditemukan.`);
 
   if (ep.source === 'otakudesu') {
-    // Otakudesu: extract Gofile link from episode page, then use existing Gofile downloader
+    // Otakudesu: try to extract download links (Gofile + multi-host fallback)
     const loadMsg = await bot.sendMessage(chatId, `⏳ <b>Mengambil link download Ep ${epNumber}...</b>`, { parse_mode: 'HTML' });
     try {
       const dl = await otakudesuScraper.getEpisodeDownload(ep.url);
       if (dl.gofileUrl) {
+        // Modern layout: single Gofile → use existing downloader
         await bot.editMessageText(`✅ Gofile ditemukan! Memulai download...\n<code>${escHtml(dl.gofileUrl)}</code>`, {
           chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
         });
-        // Queue download via existing Gofile handler
         queueManager.addJob(chatId, `${series.title} Ep ${epNumber}`, async (jobId) => {
           await processDownload(bot, chatId, dl.gofileUrl, null, 'gofile', jobId);
         }, bot);
+      } else if (dl.qualityLinks && dl.qualityLinks.length > 0) {
+        // Classic layout (.blog): multi-host per quality, tampilkan manual links
+        // Host-nya (desustream redirector → ZippyShare/LetsUp/Racaty/Mega) ribet di-resolve
+        // otomatis. Untuk sekarang kasih link ke user untuk download manual.
+        let text = `📥 <b>${escHtml(series.title)} - Episode ${epNumber}</b>\n<i>Klasik layout (.blog) — download manual</i>\n\n`;
+        for (const q of dl.qualityLinks) {
+          text += `<b>${escHtml(q.quality)}</b>: `;
+          text += q.links.map(l => `<a href="${escHtml(l.url)}">${escHtml(l.host)}</a>`).join(' · ');
+          text += `\n`;
+        }
+        text += `\n💡 <i>Kalau bot support host-nya, kamu bisa paste link-nya balik ke chat untuk auto-download.</i>`;
+        await bot.editMessageText(text, {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        });
       } else {
-        await bot.editMessageText(`😕 Tidak ada link Gofile untuk episode ini.\n\nLink lain yang tersedia:\n${dl.otherLinks.map(l => `• ${l.host}: ${l.url}`).join('\n') || 'Tidak ada'}`, {
+        await bot.editMessageText(`😕 Tidak ada link download ditemukan untuk episode ini.\n\nLink lain yang terdeteksi:\n${dl.otherLinks.map(l => `• ${l.host}: ${l.url}`).join('\n') || 'Tidak ada'}`, {
           chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
         });
       }

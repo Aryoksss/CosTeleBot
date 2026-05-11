@@ -170,9 +170,11 @@ async function getEpisodes(seriesUrl) {
 
 /**
  * Extract download link from episode page.
- * Otakudesu terbaru pakai single Gofile link.
+ * Supports 2 layouts:
+ *   - Modern (.fit): single Gofile link
+ *   - Classic (.blog): <div class="download"> with multi-host (ZippyShare/LetsUp/Racaty/Mega) per quality
  * @param {string} episodeUrl - full URL or path
- * @returns {{gofileUrl: string|null, otherLinks: Array}}
+ * @returns {{gofileUrl: string|null, qualityLinks: Array<{quality, links: [{host, url}]}>, otherLinks: Array}}
  */
 async function getEpisodeDownload(episodeUrl) {
   let data;
@@ -188,8 +190,9 @@ async function getEpisodeDownload(episodeUrl) {
 
   let gofileUrl = null;
   const otherLinks = [];
+  const qualityLinks = [];
 
-  // Find all links in page
+  // --- Modern (.fit) pattern: scan all links for Gofile ---
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') || '';
     if (href.includes('gofile.io/d/')) {
@@ -199,7 +202,21 @@ async function getEpisodeDownload(episodeUrl) {
     }
   });
 
-  return { gofileUrl, otherLinks };
+  // --- Classic (.blog) pattern: <div class="download"><ul><li><strong>QUALITY</strong><a>HOST</a>...</li></ul></div> ---
+  $('.download ul li').each((_, li) => {
+    const $li = $(li);
+    const quality = $li.find('strong').first().text().trim() || 'Unknown';
+    const links = [];
+    $li.find('a[href]').each((_, a) => {
+      const $a = $(a);
+      const href = $a.attr('href') || '';
+      const host = $a.text().trim();
+      if (href && host) links.push({ host, url: href });
+    });
+    if (links.length) qualityLinks.push({ quality, links });
+  });
+
+  return { gofileUrl, qualityLinks, otherLinks };
 }
 
 module.exports = { search, getEpisodes, getEpisodeDownload };
