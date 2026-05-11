@@ -23,6 +23,20 @@ if (!globalThis.crypto) {
 
 const axios = require('axios');
 
+// SOCKS5 proxy support (bypass Mega IP throttle di datacenter).
+// Reuse GOFILE_PROXY atau set MEGA_PROXY terpisah.
+function getProxyAgent() {
+  const proxyUrl = process.env.MEGA_PROXY || process.env.GOFILE_PROXY;
+  if (!proxyUrl) return null;
+  try {
+    const { SocksProxyAgent } = require('socks-proxy-agent');
+    return new SocksProxyAgent(proxyUrl);
+  } catch (_) {
+    console.warn('\x1b[33m[WARN]\x1b[0m  [Mega] socks-proxy-agent not available, no proxy');
+    return null;
+  }
+}
+
 // megajs package — lazy-required supaya bot tidak crash kalau package missing
 let megajs = null;
 function getMegajs() {
@@ -51,11 +65,19 @@ async function getLoggedStorage() {
   const { Storage } = getMegajs();
 
   _loginPromise = new Promise((resolve, reject) => {
-    const storage = new Storage({ email, password, userAgent: 'CosTeleBot/1.0' }, (err) => {
+    const opts = { email, password, userAgent: 'CosTeleBot/1.0' };
+    const storage = new Storage(opts, (err) => {
       if (err) {
         console.error(`\x1b[31m[ERROR]\x1b[0m [Mega] Login gagal: ${err.message}`);
         _loginPromise = null;
         return reject(err);
+      }
+      // Apply proxy agent to storage.api for all subsequent requests
+      const agent = getProxyAgent();
+      if (agent) {
+        storage.api.httpAgent = agent;
+        storage.api.httpsAgent = agent;
+        console.log(`\x1b[32m[OK]\x1b[0m    [Mega] Proxy aktif: ${process.env.MEGA_PROXY || process.env.GOFILE_PROXY}`);
       }
       console.log(`\x1b[32m[OK]\x1b[0m    [Mega] Login berhasil sebagai ${email}`);
       _loggedStorage = storage;
@@ -101,6 +123,7 @@ async function resolveRedirector(url) {
 
 /**
  * Create a File object using logged API (if credentials set) or anonymous.
+ * Proxy applied in both cases.
  */
 async function createFile(megaUrl) {
   const { File } = getMegajs();
@@ -108,8 +131,14 @@ async function createFile(megaUrl) {
   if (storage) {
     return File.fromURL(megaUrl, { api: storage.api });
   }
+  // Anonymous mode — still apply proxy if available
   const file = File.fromURL(megaUrl);
   file.api.userAgent = 'CosTeleBot/1.0';
+  const agent = getProxyAgent();
+  if (agent) {
+    file.api.httpAgent = agent;
+    file.api.httpsAgent = agent;
+  }
   return file;
 }
 
