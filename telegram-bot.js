@@ -167,6 +167,9 @@ const r34Scraper = require('./scrapers/rule34video');
 const pinterestScraper = require('./scrapers/pinterest');
 const javtifulScraper = require('./scrapers/javtiful');
 const erothotsScraper = require('./scrapers/erothots');
+const otakudesuScraper = require('./scrapers/otakudesu');
+const oploverzScraper = require('./scrapers/oploverz');
+const hostResolver = require('./scrapers/hostResolver');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
@@ -621,7 +624,7 @@ async function extractArchive(archivePath, destDir, password = null) {
   // 4. null (arsip tanpa password)
   const envPasswords = String(process.env.ARCHIVE_PASSWORDS || '')
     .split(',').map(s => s.trim()).filter(Boolean);
-  const defaults = ['cosplaytele.com', 'Cosplaytele.com', 'cosplaytele', 'Cosplaytele', '4KHD', '4khd'];
+  const defaults = ['cosplaytele.com', 'Cosplaytele.com', 'cosplaytele', 'Cosplaytele', '4KHD', '4khd', 'oploverz.me'];
   const candidates = [password, ...envPasswords, ...defaults, null]
     .filter((p, i, arr) => arr.indexOf(p) === i); // dedup
 
@@ -2426,6 +2429,276 @@ async function doEroDownload(bot, chatId, item) {
   }, bot);
 }
 
+// ─── ANIME (Otakudesu + Oploverz) ───────────────────────────────────────────
+
+/**
+ * Search anime from both sources, merge results, show inline keyboard.
+ */
+async function doAnimeSearch(bot, chatId, query) {
+  log.info(`[Anime] user ${chatId} search="${query}"`);
+  const loadMsg = await bot.sendMessage(chatId, '🔍 <b>Mencari anime...</b>', { parse_mode: 'HTML' });
+
+  try {
+    const [otakuRes, oploRes] = await Promise.allSettled([
+      otakudesuScraper.search(query),
+      oploverzScraper.search(query),
+    ]);
+
+    const results = [];
+    if (otakuRes.status === 'fulfilled') results.push(...otakuRes.value);
+    if (oploRes.status === 'fulfilled') results.push(...oploRes.value);
+
+    if (results.length === 0) {
+      return bot.editMessageText('😕 Tidak ditemukan anime dengan judul tersebut.', {
+        chat_id: chatId, message_id: loadMsg.message_id,
+      });
+    }
+
+    // Dedupe by slug (prefer oploverz karena punya API rapi)
+    const seen = new Set();
+    const unique = [];
+    for (const r of results) {
+      const key = r.slug.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(r);
+    }
+
+    // Cache results
+    const state = touchState(chatId);
+    state.animeResults = unique.slice(0, 20);
+
+    let text = `🎌 <b>Hasil Pencarian Anime</b>\n<i>"${escHtml(query)}"</i>\n\n`;
+    const keyboard = [];
+    unique.slice(0, 10).forEach((r, i) => {
+      const srcTag = r.source === 'oploverz' ? '🅾' : '🅾‍';
+      const statusTag = r.status === 'Ongoing' ? '🟢' : '✅';
+      text += `${i + 1}. ${statusTag} <b>${escHtml(r.title)}</b>\n`;
+      if (r.totalEpisodes) text += `   📺 ${r.totalEpisodes} eps`;
+      if (r.genres?.length) text += ` • ${r.genres.slice(0, 3).join(', ')}`;
+      text += `\n`;
+      keyboard.push([{ text: `${i + 1}. ${r.title.slice(0, 45)}`, callback_data: `anm_sel_${i}` }]);
+    });
+
+    await bot.editMessageText(text, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboard },
+    });
+  } catch (err) {
+    log.error(`[Anime] search error: ${err.message}`);
+    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Show episode list for selected anime.
+ */
+async function doAnimeEpisodes(bot, chatId, seriesIndex, page = 1) {
+  const state = touchState(chatId);
+  const series = state.animeResults?.[seriesIndex];
+  if (!series) return bot.sendMessage(chatId, '❌ Data anime tidak ditemukan, coba search ulang.');
+
+  const loadMsg = await bot.sendMessage(chatId, `📺 <b>Memuat episode ${escHtml(series.title)}...</b>`, { parse_mode: 'HTML' });
+
+  try {
+    let episodes;
+    if (series.source === 'oploverz') {
+      episodes = await oploverzScraper.getEpisodes(series.slug);
+      // Normalize to common format
+      episodes = episodes.map(ep => ({
+        number: parseInt(ep.episodeNumber),
+        title: `Episode ${ep.episodeNumber}`,
+        source: 'oploverz',
+        _raw: ep,
+      }));
+    } else {
+      // Otakudesu
+      episodes = await otakudesuScraper.getEpisodes(series.url);
+      episodes = episodes.map(ep => ({
+        number: ep.number,
+        title: ep.title || `Episode ${ep.number}`,
+        url: ep.url,
+        source: 'otakudesu',
+      }));
+    }
+
+    if (episodes.length === 0) {
+      return bot.editMessageText('😕 Belum ada episode tersedia.', {
+        chat_id: chatId, message_id: loadMsg.message_id,
+      });
+    }
+
+    // Cache episodes
+    state.animeEpisodes = episodes;
+    state.animeSeriesIdx = seriesIndex;
+
+    // Paginate: 20 eps per page
+    const perPage = 20;
+    const totalPages = Math.ceil(episodes.length / perPage);
+    const pageEps = episodes.slice((page - 1) * perPage, page * perPage);
+
+    let text = `📺 <b>${escHtml(series.title)}</b>\n`;
+    text += `Total: ${episodes.length} episode | Halaman ${page}/${totalPages}\n\n`;
+    text += `Pilih episode untuk download:`;
+
+    // Build keyboard: 4 columns
+    const keyboard = [];
+    let row = [];
+    for (const ep of pageEps) {
+      row.push({ text: `Ep ${ep.number}`, callback_data: `anm_ep_${ep.number}` });
+      if (row.length === 4) { keyboard.push(row); row = []; }
+    }
+    if (row.length) keyboard.push(row);
+
+    // Pagination buttons
+    const navRow = [];
+    if (page > 1) navRow.push({ text: '⬅️ Prev', callback_data: `anm_pg_${seriesIndex}_${page - 1}` });
+    if (page < totalPages) navRow.push({ text: '➡️ Next', callback_data: `anm_pg_${seriesIndex}_${page + 1}` });
+    if (navRow.length) keyboard.push(navRow);
+
+    // Back button
+    keyboard.push([{ text: '🔙 Kembali ke hasil', callback_data: 'anm_back_search' }]);
+
+    await bot.editMessageText(text, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboard },
+    });
+  } catch (err) {
+    log.error(`[Anime] episodes error: ${err.message}`);
+    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Show quality options for Oploverz episode, or start download for Otakudesu (Gofile).
+ */
+async function doAnimeDownload(bot, chatId, epNumber) {
+  const state = touchState(chatId);
+  const episodes = state.animeEpisodes;
+  const series = state.animeResults?.[state.animeSeriesIdx];
+  if (!episodes || !series) return bot.sendMessage(chatId, '❌ Data episode hilang, coba search ulang.');
+
+  const ep = episodes.find(e => e.number === epNumber);
+  if (!ep) return bot.sendMessage(chatId, `❌ Episode ${epNumber} tidak ditemukan.`);
+
+  if (ep.source === 'otakudesu') {
+    // Otakudesu: extract Gofile link from episode page, then use existing Gofile downloader
+    const loadMsg = await bot.sendMessage(chatId, `⏳ <b>Mengambil link download Ep ${epNumber}...</b>`, { parse_mode: 'HTML' });
+    try {
+      const dl = await otakudesuScraper.getEpisodeDownload(ep.url);
+      if (dl.gofileUrl) {
+        await bot.editMessageText(`✅ Gofile ditemukan! Memulai download...\n<code>${escHtml(dl.gofileUrl)}</code>`, {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        });
+        // Queue download via existing Gofile handler
+        queueManager.addJob(chatId, `${series.title} Ep ${epNumber}`, async (jobId) => {
+          await processDownload(bot, chatId, dl.gofileUrl, null, 'gofile', jobId);
+        }, bot);
+      } else {
+        await bot.editMessageText(`😕 Tidak ada link Gofile untuk episode ini.\n\nLink lain yang tersedia:\n${dl.otherLinks.map(l => `• ${l.host}: ${l.url}`).join('\n') || 'Tidak ada'}`, {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        });
+      }
+    } catch (err) {
+      bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      }).catch(() => {});
+    }
+  } else {
+    // Oploverz: show quality picker
+    const rawEp = ep._raw;
+    const links = oploverzScraper.getAllLinks(rawEp);
+    if (links.length === 0) return bot.sendMessage(chatId, '😕 Tidak ada link download tersedia.');
+
+    // Cache for callback
+    state.animeOploLinks = links;
+    state.animeOploEpNum = epNumber;
+
+    let text = `📥 <b>${escHtml(series.title)} - Episode ${epNumber}</b>\n\nPilih kualitas:\n`;
+    const keyboard = [];
+    links.forEach((l, i) => {
+      const label = `${l.format} ${l.quality} [${l.host}]`;
+      text += `${i + 1}. ${label}\n`;
+      keyboard.push([{ text: label, callback_data: `anm_dl_${i}` }]);
+    });
+    keyboard.push([{ text: '🔙 Kembali ke episode', callback_data: `anm_pg_${state.animeSeriesIdx}_1` }]);
+
+    await bot.sendMessage(chatId, text, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboard },
+    });
+  }
+}
+
+/**
+ * Execute Oploverz download via host resolver.
+ */
+async function doAnimeOploDownload(bot, chatId, linkIndex) {
+  const state = touchState(chatId);
+  const links = state.animeOploLinks;
+  const series = state.animeResults?.[state.animeSeriesIdx];
+  const epNum = state.animeOploEpNum;
+  if (!links || !series) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
+
+  const link = links[linkIndex];
+  if (!link) return bot.sendMessage(chatId, '❌ Link tidak valid.');
+
+  const title = `${series.title} Ep ${epNum} [${link.quality}]`;
+
+  if (link.host === 'BUZZ') {
+    // Resolve Buzzheavier → direct URL → stream download
+    queueManager.addJob(chatId, title, async (jobId) => {
+      let statusMsg = null;
+      const status = async (txt) => {
+        try {
+          if (statusMsg) await bot.editMessageText(txt, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' });
+          else statusMsg = await bot.sendMessage(chatId, txt, { parse_mode: 'HTML' });
+        } catch (_) {}
+      };
+
+      try {
+        await status(`⏳ <b>Resolving Buzzheavier...</b>`);
+        const resolved = await hostResolver.resolve('BUZZ', link.url);
+        if (!resolved.directUrl) {
+          return status(`❌ Gagal resolve Buzzheavier link. Coba kualitas/host lain.`);
+        }
+
+        await status(`⬇️ <b>Downloading ${escHtml(title)}...</b>`);
+        const tmpDir = path.join(CONFIG.TEMP_DIR, `anime_${Date.now()}`);
+        await fsp.mkdir(tmpDir, { recursive: true });
+        const ext = link.format.includes('mkv') ? '.mkv' : '.mp4';
+        const filePath = path.join(tmpDir, `${series.title.replace(/[^\w\s-]/g, '').slice(0, 50)} Ep${epNum} ${link.quality}${ext}`);
+
+        const throttle = createProgressThrottler(async (bar) => {
+          status(`⬇️ <b>${escHtml(title)}</b>\n${bar}`);
+        }, 3000);
+
+        await downloadStream(resolved.directUrl, filePath, (pct, speed, eta) => {
+          throttle(renderProgressBar(pct, speed, eta));
+        }, null, { referer: 'https://buzzheavier.com/' });
+
+        await status(`📤 <b>Uploading ke Telegram...</b>`);
+        await sendOne(bot, chatId, filePath, `🎌 ${title}`);
+        await status(`✅ <b>${escHtml(title)}</b> selesai!`);
+        await rimraf(tmpDir);
+      } catch (err) {
+        log.error(`[Anime-Oplo] download error: ${err.message}`);
+        status(`❌ Download gagal: ${escHtml(err.message.slice(0, 200))}`).catch(() => {});
+      }
+    }, bot);
+  } else {
+    // For other hosts, try if it's a Gofile-like URL or just show the link
+    await bot.sendMessage(chatId,
+      `🔗 Host <b>${escHtml(link.host)}</b> belum didukung untuk auto-download.\n\nLink manual:\n<code>${escHtml(link.url)}</code>\n\nPassword ZIP: <code>oploverz.me</code>`,
+      { parse_mode: 'HTML' }
+    );
+  }
+}
+
 // ─── SMART / AGGREGATE SEARCH ────────────────────────────────────────────────
 /**
  * Tampilkan menu "pilih sumber" untuk query yang di-detect dari pesan bebas user.
@@ -2440,6 +2713,7 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
   if (preferredSource === 'pinterest') return doPinSearch(bot, chatId, query);
   if (preferredSource === 'jav') return doJavBrowse(bot, chatId, query, 1);
   if (preferredSource === 'ero') return doEroBrowse(bot, chatId, query, 1);
+  if (preferredSource === 'anime') return doAnimeSearch(bot, chatId, query);
 
   // 'all' atau tidak ada preference → tanya user dulu
   const text = `🤖 <b>Smart Search</b>\n\nKetemu query: <b>${escHtml(query)}</b>\n\nPilih sumber pencarian:`;
@@ -2717,6 +2991,7 @@ async function sendMainMenu(bot, chatId) {
       { text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' },
     ],
     [
+      { text: '🎌 Anime', callback_data: 'anime_search_prompt' },
       { text: '🔎 Smart Search', callback_data: 'menu_search' },
       { text: '📊 Profile', callback_data: 'menu_profile' },
     ],
@@ -2762,6 +3037,7 @@ function startBot() {
     { command: '/pin', description: '📌 Pinterest Search (image/video)' },
     { command: '/jav', description: '🎥 Javtiful Search' },
     { command: '/ero', description: '🔥 EroThots Search' },
+    { command: '/anime', description: '🎌 Anime Search (Otakudesu + Oploverz)' },
     { command: '/search', description: 'Cari Karakter / Album Cosplay' },
     { command: '/tasks', description: '🚦 Pantau Dasbor Antrean' },
     { command: '/stats', description: '🔰 Lihat Profil' },
@@ -2906,6 +3182,29 @@ function startBot() {
       const sentMsg = await bot.sendMessage(msg.chat.id,
         `🔥 <b>EroThots Search</b>\n\nKetik nama creator, kategori, atau kata kunci.\n` +
         `Contoh: <code>cosplay</code>, <code>onlyfans</code>, <code>asian</code>.`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
+        }
+      );
+      autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
+    }
+  });
+
+  // ─── ANIME ─────────────────────────────────────────────────────────────────
+  bot.onText(/^\/anime(?:\s+(.+))?$/, async (msg, match) => {
+    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
+    const query = match[1] && match[1].trim();
+    if (query) {
+      log.info(`[User ${msg.chat.id}] Execute /anime search: ${query}`);
+      doAnimeSearch(bot, msg.chat.id, query);
+    } else {
+      log.info(`[User ${msg.chat.id}] Execute /anime (prompt)`);
+      userStates.set(msg.chat.id, { step: 'AWAITING_ANIME_SEARCH' });
+      const sentMsg = await bot.sendMessage(msg.chat.id,
+        `🎌 <b>Anime Search</b> (Otakudesu + Oploverz)\n\n` +
+        `Ketik judul anime yang ingin dicari.\n` +
+        `Contoh: <code>one piece</code>, <code>slime</code>, <code>dr stone</code>`,
         {
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
@@ -3269,6 +3568,14 @@ function startBot() {
       userStates.delete(chatId);
       log.info(`[User ${chatId}] Pencarian EroThots: ${text}`);
       doEroBrowse(bot, chatId, text, 1);
+      return;
+    }
+
+    // If awaiting Anime search query
+    if (state && state.step === 'AWAITING_ANIME_SEARCH') {
+      userStates.delete(chatId);
+      log.info(`[User ${chatId}] Pencarian Anime: ${text}`);
+      doAnimeSearch(bot, chatId, text);
       return;
     }
 
@@ -3862,6 +4169,59 @@ function startBot() {
       if (!cache || !cache.items[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /ero.');
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doEroDetail(bot, chatId, cache.items[idx]);
+    }
+
+    // ─── ANIME CALLBACKS ───────────────────────────────────────────────────────
+    if (action === 'anime_search_prompt') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      userStates.set(chatId, { step: 'AWAITING_ANIME_SEARCH' });
+      const sentMsg = await bot.sendMessage(chatId,
+        `🎌 <b>Anime Search</b> (Otakudesu + Oploverz)\n\nKetik judul anime yang ingin dicari.\nContoh: <code>one piece</code>, <code>slime</code>, <code>dr stone</code>`,
+        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] } }
+      );
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action.startsWith('anm_sel_')) {
+      const idx = parseInt(action.replace('anm_sel_', ''), 10);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeEpisodes(bot, chatId, idx, 1);
+    }
+    if (action.startsWith('anm_pg_')) {
+      const parts = action.replace('anm_pg_', '').split('_');
+      const seriesIdx = parseInt(parts[0], 10);
+      const page = parseInt(parts[1], 10);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeEpisodes(bot, chatId, seriesIdx, page);
+    }
+    if (action.startsWith('anm_ep_')) {
+      const epNum = parseInt(action.replace('anm_ep_', ''), 10);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeDownload(bot, chatId, epNum);
+    }
+    if (action.startsWith('anm_dl_')) {
+      const linkIdx = parseInt(action.replace('anm_dl_', ''), 10);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeOploDownload(bot, chatId, linkIdx);
+    }
+    if (action === 'anm_back_search') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      // Re-show last search results
+      const state = touchState(chatId);
+      if (state.animeResults?.length) {
+        let text = `🎌 <b>Hasil Pencarian Anime</b>\n\n`;
+        const keyboard = [];
+        state.animeResults.slice(0, 10).forEach((r, i) => {
+          const statusTag = r.status === 'Ongoing' ? '🟢' : '✅';
+          text += `${i + 1}. ${statusTag} <b>${escHtml(r.title)}</b>\n`;
+          keyboard.push([{ text: `${i + 1}. ${r.title.slice(0, 45)}`, callback_data: `anm_sel_${i}` }]);
+        });
+        await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
+      } else {
+        userStates.set(chatId, { step: 'AWAITING_ANIME_SEARCH' });
+        await bot.sendMessage(chatId, '🎌 Ketik judul anime untuk mencari ulang:', { reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] } });
+      }
+      return;
     }
 
     if (action === 'menu_vps') {
