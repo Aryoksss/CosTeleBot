@@ -25,14 +25,18 @@ const axios = require('axios');
 
 // SOCKS5 proxy support (bypass Mega IP throttle di datacenter).
 // Reuse GOFILE_PROXY atau set MEGA_PROXY terpisah.
+let _proxyAgent = null;
 function getProxyAgent() {
+  if (_proxyAgent !== null) return _proxyAgent || null; // cached (null = no proxy, false = not checked)
   const proxyUrl = process.env.MEGA_PROXY || process.env.GOFILE_PROXY;
-  if (!proxyUrl) return null;
+  if (!proxyUrl) { _proxyAgent = false; return null; }
   try {
     const { SocksProxyAgent } = require('socks-proxy-agent');
-    return new SocksProxyAgent(proxyUrl);
+    _proxyAgent = new SocksProxyAgent(proxyUrl);
+    return _proxyAgent;
   } catch (_) {
     console.warn('\x1b[33m[WARN]\x1b[0m  [Mega] socks-proxy-agent not available, no proxy');
+    _proxyAgent = false;
     return null;
   }
 }
@@ -63,17 +67,22 @@ async function getLoggedStorage() {
   if (!email || !password) return null; // no credentials → anonymous mode
 
   const { Storage } = getMegajs();
+  const agent = getProxyAgent();
 
   _loginPromise = new Promise((resolve, reject) => {
+    // Pass agent in constructor options so login itself goes through proxy
     const opts = { email, password, userAgent: 'CosTeleBot/1.0' };
+    if (agent) {
+      opts.httpAgent = agent;
+      opts.httpsAgent = agent;
+    }
     const storage = new Storage(opts, (err) => {
       if (err) {
         console.error(`\x1b[31m[ERROR]\x1b[0m [Mega] Login gagal: ${err.message}`);
         _loginPromise = null;
         return reject(err);
       }
-      // Apply proxy agent to storage.api for all subsequent requests
-      const agent = getProxyAgent();
+      // Ensure agent persists on api object for download calls
       if (agent) {
         storage.api.httpAgent = agent;
         storage.api.httpsAgent = agent;
@@ -126,15 +135,22 @@ async function resolveRedirector(url) {
  * Proxy applied in both cases.
  */
 async function createFile(megaUrl) {
-  const { File } = getMegajs();
+  const { File, API } = getMegajs();
+  const agent = getProxyAgent();
+
   const storage = await getLoggedStorage();
   if (storage) {
+    // Ensure agent is still set (in case it was cleared)
+    if (agent) {
+      storage.api.httpAgent = agent;
+      storage.api.httpsAgent = agent;
+    }
     return File.fromURL(megaUrl, { api: storage.api });
   }
-  // Anonymous mode — still apply proxy if available
+
+  // Anonymous mode — apply proxy if available
   const file = File.fromURL(megaUrl);
   file.api.userAgent = 'CosTeleBot/1.0';
-  const agent = getProxyAgent();
   if (agent) {
     file.api.httpAgent = agent;
     file.api.httpsAgent = agent;
@@ -169,6 +185,9 @@ async function downloadMega(megaUrl, destPath, onProgress) {
   const totalSize = file.size;
   let downloaded = 0;
   const startTime = Date.now();
+  const agent = getProxyAgent();
+  const proxyInfo = agent ? `via proxy ${process.env.MEGA_PROXY || process.env.GOFILE_PROXY}` : 'direct (no proxy)';
+  console.log(`\x1b[36m[INFO]\x1b[0m  [Mega] Download start: ${file.name} (${(totalSize/1024/1024).toFixed(1)} MB) ${proxyInfo}`);
 
   return new Promise((resolve, reject) => {
     const stream = file.download();
