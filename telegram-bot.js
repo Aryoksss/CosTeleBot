@@ -3430,6 +3430,7 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
   if (preferredSource === 'jav') return doJavBrowse(bot, chatId, query, 1);
   if (preferredSource === 'ero') return doEroBrowse(bot, chatId, query, 1);
   if (preferredSource === 'anime') return doAnimeSearch(bot, chatId, query);
+  if (preferredSource === 'film') return doIdlixSearch(bot, chatId, query);
 
   // 'all' atau tidak ada preference → tanya user dulu
   const text = `🤖 <b>Smart Search</b>\n\nKetemu query: <b>${escHtml(query)}</b>\n\nPilih sumber pencarian:`;
@@ -3444,6 +3445,7 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
     ],
     [{ text: '🔥 EroThots', callback_data: `ssrc_ero` }],
     [{ text: '🎌 Anime (Otakudesu+Oploverz)', callback_data: `ssrc_anime` }],
+    [{ text: '🎬 Film & Series (IDLIX)', callback_data: `ssrc_film` }],
     [{ text: '🌐 Cari di Semua Sumber', callback_data: `ssrc_all` }],
     [{ text: '❌ Batal', callback_data: 'menu_awal' }],
   ];
@@ -4752,6 +4754,7 @@ function startBot() {
       if (src === 'jav') return doJavBrowse(bot, chatId, q, 1);
       if (src === 'ero') return doEroBrowse(bot, chatId, q, 1);
       if (src === 'anime') return doAnimeSearch(bot, chatId, q);
+      if (src === 'film') return doIdlixSearch(bot, chatId, q);
       if (src === 'all') return doAggregateSearch(bot, chatId, q);
       return;
     }
@@ -5128,14 +5131,25 @@ function startBot() {
     if (action === 'idlix_menu') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       const sentMsg = await bot.sendMessage(chatId,
-        `🎬 <b>Film & Series</b>\n<i>Powered by TMDB + VidSrc + yt-dlp</i>\n\nPilih mode:`,
+        `🎬 <b>Film & Series Hub</b>\n<i>TMDB + VidSrc + yt-dlp</i>\n\nPilih mode:`,
         {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
               [{ text: '🔍 Search Film/Series', callback_data: 'idlix_search_prompt' }],
-              [{ text: '🔥 Trending Film', callback_data: 'idlix_trending_movie' }],
-              [{ text: '📺 Trending Series', callback_data: 'idlix_trending_tv' }],
+              [
+                { text: '🎲 Gacha Film', callback_data: 'idlix_gacha_movie' },
+                { text: '🎲 Gacha Series', callback_data: 'idlix_gacha_tv' },
+              ],
+              [
+                { text: '🔥 Trending Film', callback_data: 'idlix_trending_movie' },
+                { text: '📺 Trending Series', callback_data: 'idlix_trending_tv' },
+              ],
+              [
+                { text: '🆕 Film Terbaru', callback_data: 'idlix_latest_movie' },
+                { text: '🆕 Series Terbaru', callback_data: 'idlix_latest_tv' },
+              ],
+              [{ text: '🏷️ Browse Genre', callback_data: 'idlix_genre_menu' }],
               [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
             ]
           }
@@ -5177,6 +5191,130 @@ function startBot() {
           keyboard.push([{ text: `${icon} ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
         });
         keyboard.push([{ text: '🔙 Menu', callback_data: 'idlix_menu' }]);
+        await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
+      } catch (err) {
+        bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
+      }
+      return;
+    }
+    // Gacha: random pick dari popular/top_rated
+    if (action === 'idlix_gacha_movie' || action === 'idlix_gacha_tv') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const type = action === 'idlix_gacha_movie' ? 'movie' : 'tv';
+      const loadMsg = await bot.sendMessage(chatId, `🎲 <b>Gacha ${type === 'movie' ? 'Film' : 'Series'}...</b>`, { parse_mode: 'HTML' });
+      try {
+        const randomPage = Math.floor(Math.random() * 20) + 1;
+        const { data } = await require('axios').get(`https://api.themoviedb.org/3/${type}/popular`, {
+          params: { api_key: '8265bd1679663a7ea12ac168da84d2e8', language: 'id-ID', page: randomPage },
+          timeout: 15000,
+        });
+        const pool = (data.results || []);
+        pool.sort(() => Math.random() - 0.5);
+        const results = pool.slice(0, 5).map(r => ({
+          id: r.id, title: r.title || r.name, type, year: (r.release_date || r.first_air_date || '').slice(0, 4),
+          overview: (r.overview || '').slice(0, 150), poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
+          rating: r.vote_average?.toFixed(1), source: 'idlix',
+        }));
+        idlixBrowseCache.set(chatId, { results });
+        let text = `🎲 <b>Gacha ${type === 'movie' ? 'Film' : 'Series'}</b>\n\n`;
+        const keyboard = [];
+        results.forEach((r, i) => {
+          const icon = type === 'movie' ? '🎬' : '📺';
+          text += `${i + 1}. ${icon} <b>${escHtml(r.title)}</b> (${r.year}) ⭐${r.rating}\n`;
+          keyboard.push([{ text: `${icon} ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
+        });
+        keyboard.push([
+          { text: '🔄 Reroll', callback_data: action },
+          { text: '🔙 Menu', callback_data: 'idlix_menu' },
+        ]);
+        await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
+      } catch (err) {
+        bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
+      }
+      return;
+    }
+    // Latest (now playing / on air)
+    if (action === 'idlix_latest_movie' || action === 'idlix_latest_tv') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const type = action === 'idlix_latest_movie' ? 'movie' : 'tv';
+      const endpoint = type === 'movie' ? 'movie/now_playing' : 'tv/on_the_air';
+      const loadMsg = await bot.sendMessage(chatId, `🆕 <b>Memuat ${type === 'movie' ? 'film' : 'series'} terbaru...</b>`, { parse_mode: 'HTML' });
+      try {
+        const { data } = await require('axios').get(`https://api.themoviedb.org/3/${endpoint}`, {
+          params: { api_key: '8265bd1679663a7ea12ac168da84d2e8', language: 'id-ID' },
+          timeout: 15000,
+        });
+        const results = (data.results || []).slice(0, 10).map(r => ({
+          id: r.id, title: r.title || r.name, type, year: (r.release_date || r.first_air_date || '').slice(0, 4),
+          overview: (r.overview || '').slice(0, 150), poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
+          rating: r.vote_average?.toFixed(1), source: 'idlix',
+        }));
+        idlixBrowseCache.set(chatId, { results });
+        let text = `🆕 <b>${type === 'movie' ? 'Film' : 'Series'} Terbaru</b>\n\n`;
+        const keyboard = [];
+        results.forEach((r, i) => {
+          const icon = type === 'movie' ? '🎬' : '📺';
+          text += `${i + 1}. ${icon} <b>${escHtml(r.title)}</b> (${r.year}) ⭐${r.rating}\n`;
+          keyboard.push([{ text: `${icon} ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
+        });
+        keyboard.push([{ text: '🔙 Menu', callback_data: 'idlix_menu' }]);
+        await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
+      } catch (err) {
+        bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
+      }
+      return;
+    }
+    // Genre menu
+    if (action === 'idlix_genre_menu') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      // TMDB genre IDs for movies
+      const genres = [
+        { id: 28, name: 'Action' }, { id: 12, name: 'Adventure' }, { id: 16, name: 'Animation' },
+        { id: 35, name: 'Comedy' }, { id: 80, name: 'Crime' }, { id: 18, name: 'Drama' },
+        { id: 14, name: 'Fantasy' }, { id: 27, name: 'Horror' }, { id: 9648, name: 'Mystery' },
+        { id: 10749, name: 'Romance' }, { id: 878, name: 'Sci-Fi' }, { id: 53, name: 'Thriller' },
+        { id: 10752, name: 'War' }, { id: 37, name: 'Western' }, { id: 99, name: 'Documentary' },
+      ];
+      const keyboard = [];
+      for (let i = 0; i < genres.length; i += 3) {
+        const row = [];
+        for (let j = i; j < Math.min(i + 3, genres.length); j++) {
+          row.push({ text: genres[j].name, callback_data: `idlix_genre_${genres[j].id}` });
+        }
+        keyboard.push(row);
+      }
+      keyboard.push([{ text: '🔙 Kembali', callback_data: 'idlix_menu' }]);
+      const sentMsg = await bot.sendMessage(chatId, `🏷️ <b>Browse by Genre</b>\n<i>Film (TMDB)</i>\n\nPilih genre:`, {
+        parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard },
+      });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action.startsWith('idlix_genre_')) {
+      const genreId = action.replace('idlix_genre_', '');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const loadMsg = await bot.sendMessage(chatId, `🏷️ <b>Memuat genre...</b>`, { parse_mode: 'HTML' });
+      try {
+        const { data } = await require('axios').get(`https://api.themoviedb.org/3/discover/movie`, {
+          params: { api_key: '8265bd1679663a7ea12ac168da84d2e8', language: 'id-ID', with_genres: genreId, sort_by: 'popularity.desc' },
+          timeout: 15000,
+        });
+        const results = (data.results || []).slice(0, 10).map(r => ({
+          id: r.id, title: r.title || r.name, type: 'movie', year: (r.release_date || '').slice(0, 4),
+          overview: (r.overview || '').slice(0, 150), poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
+          rating: r.vote_average?.toFixed(1), source: 'idlix',
+        }));
+        idlixBrowseCache.set(chatId, { results });
+        let text = `🏷️ <b>Genre Browse</b>\n\n`;
+        const keyboard = [];
+        results.forEach((r, i) => {
+          text += `${i + 1}. 🎬 <b>${escHtml(r.title)}</b> (${r.year}) ⭐${r.rating}\n`;
+          keyboard.push([{ text: `🎬 ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
+        });
+        keyboard.push([
+          { text: '🔄 Reroll', callback_data: action },
+          { text: '🔙 Genre', callback_data: 'idlix_genre_menu' },
+        ]);
         await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
       } catch (err) {
         bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
