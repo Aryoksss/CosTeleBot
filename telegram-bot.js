@@ -170,6 +170,7 @@ const erothotsScraper = require('./scrapers/erothots');
 const otakudesuScraper = require('./scrapers/otakudesu');
 const oploverzScraper = require('./scrapers/oploverz');
 const hostResolver = require('./scrapers/hostResolver');
+const megaResolver = require('./scrapers/megaResolver');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
@@ -2598,19 +2599,40 @@ async function doAnimeDownload(bot, chatId, epNumber) {
           await processDownload(bot, chatId, dl.gofileUrl, null, 'gofile', jobId);
         }, bot);
       } else if (dl.qualityLinks && dl.qualityLinks.length > 0) {
-        // Classic layout (.blog): multi-host per quality, tampilkan manual links
-        // Host-nya (desustream redirector → ZippyShare/LetsUp/Racaty/Mega) ribet di-resolve
-        // otomatis. Untuk sekarang kasih link ke user untuk download manual.
-        let text = `📥 <b>${escHtml(series.title)} - Episode ${epNumber}</b>\n<i>Klasik layout (.blog) — download manual</i>\n\n`;
+        // Classic layout (.blog): multi-host per quality.
+        // ZippyShare mati, LetsUp/Racaty butuh CAPTCHA → fokus ke Mega (support megajs).
+        // Cache quality links untuk callback (dengan epNumber supaya resolver tau episode mana).
+        const qualityLinksWithEp = dl.qualityLinks.map(q => ({ ...q, epNumber }));
+        animeBrowseCache.set(chatId, { ...cache, classicLinks: qualityLinksWithEp, lastEpNum: epNumber });
+
+        let text = `📥 <b>${escHtml(series.title)} - Episode ${epNumber}</b>\n\n`;
+        text += `Pilih kualitas untuk auto-download via Mega:\n`;
+
+        const keyboard = [];
+        dl.qualityLinks.forEach((q, qIdx) => {
+          const megaLink = q.links.find(l => l.host.toLowerCase() === 'mega');
+          if (megaLink) {
+            keyboard.push([{
+              text: `⬇️ ${q.quality} (Mega)`,
+              callback_data: `anm_mega_${qIdx}`,
+            }]);
+          }
+        });
+
+        // Tambah link manual untuk host lain
+        text += `\n<i>Link manual (untuk host selain Mega):</i>\n`;
         for (const q of dl.qualityLinks) {
           text += `<b>${escHtml(q.quality)}</b>: `;
           text += q.links.map(l => `<a href="${escHtml(l.url)}">${escHtml(l.host)}</a>`).join(' · ');
           text += `\n`;
         }
-        text += `\n💡 <i>Kalau bot support host-nya, kamu bisa paste link-nya balik ke chat untuk auto-download.</i>`;
+
+        keyboard.push([{ text: '🔙 Kembali', callback_data: `anm_pg_${cache?.seriesIdx ?? 0}_1` }]);
+
         await bot.editMessageText(text, {
           chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
           disable_web_page_preview: true,
+          reply_markup: { inline_keyboard: keyboard },
         });
       } else {
         await bot.editMessageText(`😕 Tidak ada link download ditemukan untuk episode ini.\n\nLink lain yang terdeteksi:\n${dl.otherLinks.map(l => `• ${l.host}: ${l.url}`).join('\n') || 'Tidak ada'}`, {
@@ -2710,6 +2732,64 @@ async function doAnimeOploDownload(bot, chatId, linkIndex) {
       { parse_mode: 'HTML' }
     );
   }
+}
+
+/**
+ * Download Otakudesu classic-layout episode via Mega.
+ * @param {number} qualityIdx - index in cache.classicLinks array
+ */
+async function doAnimeMegaDownload(bot, chatId, qualityIdx) {
+  const cache = animeBrowseCache.get(chatId);
+  const classicLinks = cache?.classicLinks;
+  const series = cache?.results?.[cache?.seriesIdx];
+  if (!classicLinks || !series) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
+
+  const qBlock = classicLinks[qualityIdx];
+  if (!qBlock) return bot.sendMessage(chatId, '❌ Quality tidak valid.');
+
+  const megaLink = qBlock.links.find(l => l.host.toLowerCase() === 'mega');
+  if (!megaLink) return bot.sendMessage(chatId, '❌ Tidak ada link Mega untuk kualitas ini.');
+
+  const epNum = qBlock.epNumber || (cache?.lastEpNum ?? 0);
+  const title = `${series.title} Ep ${epNum} [${qBlock.quality}]`;
+
+  queueManager.addJob(chatId, title, async (jobId) => {
+    let statusMsg = null;
+    const status = async (txt) => {
+      try {
+        if (statusMsg) await bot.editMessageText(txt, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' });
+        else statusMsg = await bot.sendMessage(chatId, txt, { parse_mode: 'HTML' });
+      } catch (_) {}
+    };
+
+    try {
+      await status(`⏳ <b>Resolving Mega link...</b>`);
+      const info = await megaResolver.getInfo(megaLink.url);
+      const sizeMB = (info.size / 1024 / 1024).toFixed(1);
+
+      await status(`⬇️ <b>Downloading ${escHtml(title)}</b>\nFile: ${escHtml(info.name)}\nSize: ${sizeMB} MB\n\nMemulai...`);
+
+      const tmpDir = path.join(CONFIG.TEMP_DIR, `mega_${Date.now()}`);
+      await fsp.mkdir(tmpDir, { recursive: true });
+      const filePath = path.join(tmpDir, info.name);
+
+      const throttle = createProgressThrottler(async (bar) => {
+        status(`⬇️ <b>${escHtml(title)}</b>\n${bar}`);
+      }, 3000);
+
+      await megaResolver.downloadMega(megaLink.url, filePath, (pct, speed, eta) => {
+        throttle(renderProgressBar(pct, speed, eta));
+      });
+
+      await status(`📤 <b>Uploading ke Telegram...</b>\n${escHtml(info.name)}`);
+      await sendOne(bot, chatId, filePath, `🎌 ${title}`);
+      await status(`✅ <b>${escHtml(title)}</b> selesai!`);
+      await rimraf(tmpDir);
+    } catch (err) {
+      log.error(`[Anime-Mega] download error: ${err.message}`);
+      status(`❌ Download gagal: ${escHtml(err.message.slice(0, 200))}`).catch(() => {});
+    }
+  }, bot);
 }
 
 // ─── SMART / AGGREGATE SEARCH ────────────────────────────────────────────────
@@ -4216,6 +4296,11 @@ function startBot() {
       const linkIdx = parseInt(action.replace('anm_dl_', ''), 10);
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doAnimeOploDownload(bot, chatId, linkIdx);
+    }
+    if (action.startsWith('anm_mega_')) {
+      const qIdx = parseInt(action.replace('anm_mega_', ''), 10);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doAnimeMegaDownload(bot, chatId, qIdx);
     }
     if (action === 'anm_back_search') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
