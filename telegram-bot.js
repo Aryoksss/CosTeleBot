@@ -2827,6 +2827,7 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
       { text: '🎥 Javtiful', callback_data: `ssrc_jav` },
     ],
     [{ text: '🔥 EroThots', callback_data: `ssrc_ero` }],
+    [{ text: '🎌 Anime (Otakudesu+Oploverz)', callback_data: `ssrc_anime` }],
     [{ text: '🌐 Cari di Semua Sumber', callback_data: `ssrc_all` }],
     [{ text: '❌ Batal', callback_data: 'menu_awal' }],
   ];
@@ -2847,16 +2848,26 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
 async function doAggregateSearch(bot, chatId, query) {
   log.info(`[Aggregate] user ${chatId} query="${query}"`);
   const loadMsg = await bot.sendMessage(chatId,
-    `🌐 <b>Mencari "${escHtml(query)}" di semua sumber...</b>\n<i>Paralel query ke 5 sumber...</i>`,
+    `🌐 <b>Mencari "${escHtml(query)}" di semua sumber...</b>\n<i>Paralel query ke 6 sumber...</i>`,
     { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
 
-  const [cptRes, r34Res, pinRes, javRes, eroRes] = await Promise.allSettled([
+  const [cptRes, r34Res, pinRes, javRes, eroRes, animeRes] = await Promise.allSettled([
     cosplayteleScraper.scrapeListing(1, 'home', query),
     r34Scraper.scrapeListing(1, query),
     pinterestScraper.scrapeSearch(query),
     javtifulScraper.scrapeSearch(query, 1),
     erothotsScraper.scrapeSearch(query, 1),
+    (async () => {
+      const [otaku, oplo] = await Promise.allSettled([
+        otakudesuScraper.search(query),
+        oploverzScraper.search(query),
+      ]);
+      const all = [...(otaku.status === 'fulfilled' ? otaku.value : []), ...(oplo.status === 'fulfilled' ? oplo.value : [])];
+      // Dedupe
+      const seen = new Set();
+      return all.filter(r => { const k = r.title.toLowerCase().replace(/[^a-z0-9]/g, ''); if (seen.has(k)) return false; seen.add(k); return true; });
+    })(),
   ]);
 
   const cpt = cptRes.status === 'fulfilled' ? cptRes.value.slice(0, 3) : [];
@@ -2864,8 +2875,9 @@ async function doAggregateSearch(bot, chatId, query) {
   const pins = pinRes.status === 'fulfilled' ? pinRes.value.pins.slice(0, 3) : [];
   const jav = javRes.status === 'fulfilled' ? javRes.value.items.slice(0, 3) : [];
   const ero = eroRes.status === 'fulfilled' ? eroRes.value.items.slice(0, 3) : [];
+  const anime = animeRes.status === 'fulfilled' ? animeRes.value.slice(0, 3) : [];
 
-  const totalFound = cpt.length + r34.length + pins.length + jav.length + ero.length;
+  const totalFound = cpt.length + r34.length + pins.length + jav.length + ero.length + anime.length;
   if (totalFound === 0) {
     return bot.editMessageText(
       `😔 <b>Tidak ada hasil</b> untuk "${escHtml(query)}" di semua sumber.`,
@@ -2876,12 +2888,13 @@ async function doAggregateSearch(bot, chatId, query) {
     );
   }
 
-  aggregateCache.set(chatId, { query, cpt, r34, pins, jav, ero });
+  aggregateCache.set(chatId, { query, cpt, r34, pins, jav, ero, anime });
   if (cpt.length) browseCache.set(chatId, { posts: cpt, page: 1, category: 'home', query, fromAggregate: true });
   if (r34.length) r34BrowseCache.set(chatId, { posts: r34, page: 1, query, fromAggregate: true });
   if (pins.length) pinBrowseCache.set(chatId, { pins, query, currentBookmark: null, nextBookmark: null, prevBookmarks: [], fromAggregate: true });
   if (jav.length) javBrowseCache.set(chatId, { items: jav, query, page: 1, hasNext: false, fromAggregate: true });
   if (ero.length) eroBrowseCache.set(chatId, { items: ero, query, page: 1, hasNext: false, fromAggregate: true });
+  if (anime.length) animeBrowseCache.set(chatId, { results: anime });
 
   let text = `🌐 <b>Hasil untuk "${escHtml(query)}"</b>\n\n`;
   const buttons = [];
@@ -2935,6 +2948,17 @@ async function doAggregateSearch(bot, chatId, query) {
     ero.forEach((v, i) => row.push({ text: `🔥${i + 1}`, callback_data: `ero_${i}` }));
     buttons.push(row);
   }
+  if (anime.length) {
+    text += `🎌 <b>Anime</b>\n`;
+    anime.forEach((a, i) => {
+      const eps = a.totalEpisodes ? ` · ${a.totalEpisodes} eps` : '';
+      text += `  ${i + 1}. ${escHtml(a.title.slice(0, 55))}${eps}\n`;
+    });
+    text += '\n';
+    const row = [];
+    anime.forEach((a, i) => row.push({ text: `🎌${i + 1}`, callback_data: `anm_sel_${i}` }));
+    buttons.push(row);
+  }
 
   const jumpRow = [];
   if (cpt.length) jumpRow.push({ text: '📚 Browse ▶', callback_data: `ssrc_cosplay` });
@@ -2942,6 +2966,7 @@ async function doAggregateSearch(bot, chatId, query) {
   if (pins.length) jumpRow.push({ text: '📌 Browse ▶', callback_data: `ssrc_pinterest` });
   if (jav.length) jumpRow.push({ text: '🎥 Browse ▶', callback_data: `ssrc_jav` });
   if (ero.length) jumpRow.push({ text: '🔥 Browse ▶', callback_data: `ssrc_ero` });
+  if (anime.length) jumpRow.push({ text: '🎌 Anime ▶', callback_data: `ssrc_anime` });
   if (jumpRow.length) buttons.push(jumpRow);
   buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
 
@@ -4070,6 +4095,7 @@ function startBot() {
       if (src === 'pinterest') return doPinSearch(bot, chatId, q);
       if (src === 'jav') return doJavBrowse(bot, chatId, q, 1);
       if (src === 'ero') return doEroBrowse(bot, chatId, q, 1);
+      if (src === 'anime') return doAnimeSearch(bot, chatId, q);
       if (src === 'all') return doAggregateSearch(bot, chatId, q);
       return;
     }
