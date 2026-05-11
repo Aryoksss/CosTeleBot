@@ -118,13 +118,64 @@ function checkFfmpeg() {
 
 /**
  * Download video via yt-dlp.
+ * Tries multiple embed sources in order until one works.
  * @param {string} url - VidSrc embed URL
  * @param {string} outputPath - destination file path (without extension, yt-dlp adds it)
- * @param {string} quality - '720', '480', '360' (height)
+ * @param {string} quality - '1080', '720', '480', '360' (height)
  * @param {function(string)} onLog - callback for progress lines
  * @returns {Promise<string>} actual output file path
  */
 async function downloadWithYtDlp(url, outputPath, quality = '720', onLog = null) {
+  // VidSrc embed → vsembed.ru → actual player. yt-dlp can't handle VidSrc directly.
+  // Strategy: try multiple embed providers that yt-dlp CAN handle.
+  // Extract TMDB ID from URL to construct alternative embed URLs.
+  const tmdbMatch = url.match(/\/embed\/(movie|tv)\/(\d+)(?:\/(\d+)\/(\d+))?/);
+  if (!tmdbMatch) throw new Error('Cannot parse TMDB ID from VidSrc URL');
+
+  const [, type, tmdbId, season, episode] = tmdbMatch;
+
+  // List of embed providers to try (yt-dlp supports some of these)
+  const embedUrls = [
+    // VidSrc.xyz (sometimes works with yt-dlp)
+    type === 'movie'
+      ? `https://vidsrc.xyz/embed/movie?tmdb=${tmdbId}`
+      : `https://vidsrc.xyz/embed/tv?tmdb=${tmdbId}&season=${season}&episode=${episode}`,
+    // 2embed
+    type === 'movie'
+      ? `https://www.2embed.cc/embed/${tmdbId}`
+      : `https://www.2embed.cc/embedtv/${tmdbId}&s=${season}&e=${episode}`,
+    // Autoembed
+    type === 'movie'
+      ? `https://player.autoembed.cc/embed/movie/${tmdbId}`
+      : `https://player.autoembed.cc/embed/tv/${tmdbId}/${season}/${episode}`,
+    // multiembed
+    type === 'movie'
+      ? `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1`
+      : `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1&s=${season}&e=${episode}`,
+    // Original VidSrc (fallback)
+    url,
+  ];
+
+  let lastErr = null;
+  for (const embedUrl of embedUrls) {
+    try {
+      if (onLog) onLog(`[info] Trying: ${embedUrl.slice(0, 80)}...`);
+      const result = await _runYtDlp(embedUrl, outputPath, quality, onLog);
+      return result;
+    } catch (e) {
+      lastErr = e;
+      if (onLog) onLog(`[warn] Failed: ${e.message.slice(0, 100)}`);
+      // Continue to next provider
+    }
+  }
+
+  throw new Error(`Semua embed provider gagal. Last: ${lastErr?.message || 'unknown'}.\nCoba kualitas lebih rendah atau film/episode lain.`);
+}
+
+/**
+ * Internal: run yt-dlp with a single URL.
+ */
+function _runYtDlp(url, outputPath, quality, onLog) {
   return new Promise((resolve, reject) => {
     const args = [
       url,
@@ -136,37 +187,45 @@ async function downloadWithYtDlp(url, outputPath, quality = '720', onLog = null)
       '--progress',
       '--newline',
       '--user-agent', UA,
-      '--add-header', `Referer:${VIDSRC_BASE}`,
       '--concurrent-fragments', '4',
       '--retries', '3',
       '--fragment-retries', '3',
+      '--socket-timeout', '30',
     ];
 
     const proc = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let lastLine = '';
+    let hasStartedDownload = false;
+
     proc.stdout.on('data', (chunk) => {
       const lines = chunk.toString().split('\n').filter(l => l.trim());
       for (const line of lines) {
         lastLine = line;
+        if (line.includes('[download]')) hasStartedDownload = true;
         if (onLog) onLog(line);
       }
     });
 
     proc.stderr.on('data', (chunk) => {
       const line = chunk.toString().trim();
-      if (line && onLog) onLog(`[stderr] ${line}`);
+      if (line) {
+        lastLine = line;
+        if (onLog) onLog(`[stderr] ${line}`);
+      }
     });
 
     proc.on('close', (code) => {
       if (code !== 0) {
-        return reject(new Error(`yt-dlp exit code ${code}. Last output: ${lastLine.slice(0, 200)}`));
+        return reject(new Error(`yt-dlp exit ${code}: ${lastLine.slice(0, 200)}`));
       }
       // Find the actual output file
       const mp4Path = `${outputPath}.mp4`;
       const mkvPath = `${outputPath}.mkv`;
+      const webmPath = `${outputPath}.webm`;
       if (fs.existsSync(mp4Path)) return resolve(mp4Path);
       if (fs.existsSync(mkvPath)) return resolve(mkvPath);
+      if (fs.existsSync(webmPath)) return resolve(webmPath);
       // Fallback: find any file with the base name
       const dir = path.dirname(outputPath);
       const base = path.basename(outputPath);
@@ -176,8 +235,14 @@ async function downloadWithYtDlp(url, outputPath, quality = '720', onLog = null)
     });
 
     proc.on('error', (err) => {
-      reject(new Error(`yt-dlp spawn error: ${err.message}. Pastikan yt-dlp ter-install di VPS.`));
+      reject(new Error(`yt-dlp spawn error: ${err.message}`));
     });
+
+    // Timeout: 10 minutes max per attempt
+    setTimeout(() => {
+      try { proc.kill('SIGTERM'); } catch (_) {}
+      reject(new Error('yt-dlp timeout (10 menit)'));
+    }, 10 * 60 * 1000);
   });
 }
 

@@ -3408,8 +3408,8 @@ async function doIdlixDownload(bot, chatId, quality) {
       await rimraf(tmpDir);
     } catch (err) {
       log.error(`[IDLIX] download error: ${err.message}`);
-      let msg = err.message.slice(0, 300);
-      if (msg.includes('yt-dlp')) msg += '\n\nPastikan yt-dlp + ffmpeg ter-install di VPS.';
+      let msg = err.message.slice(0, 400);
+      if (msg.includes('spawn error')) msg += '\n\nPastikan yt-dlp + ffmpeg ter-install di VPS.';
       status(`❌ Download gagal:\n${escHtml(msg)}`).catch(() => {});
     }
   }, bot);
