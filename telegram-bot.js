@@ -173,6 +173,7 @@ const hostResolver = require('./scrapers/hostResolver');
 const megaResolver = require('./scrapers/megaResolver');
 const kusonimeScraper = require('./scrapers/kusonime');
 const gdriveResolver = require('./scrapers/gdriveResolver');
+const teraboxResolver = require('./scrapers/teraboxResolver');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
@@ -470,7 +471,26 @@ async function autoCleanOldMenu(bot, chatId, newMsgId) {
 
 // ─── TERABOX DOWNLOAD PIPELINE ───────────────────────────────────────────────
 async function getApiResult(teraboxUrl) {
-  // Retry up to 3 times with exponential backoff
+  // Try 1: tera-core (free, no auth, direct URL)
+  try {
+    const result = await teraboxResolver.resolve(teraboxUrl);
+    if (result.files && result.files.length > 0) {
+      const first = result.files[0];
+      log.info(`[Terabox] Resolved via tera-core: ${result.files.length} file(s)`);
+      return {
+        zipDlink: first.directLink,
+        name: first.filename,
+        sizeMB: (first.sizeBytes / 1024 / 1024).toFixed(1),
+        credits: '∞ (free)',
+        source: 'tera-core',
+        allFiles: result.files, // expose all for multi-file selection
+      };
+    }
+  } catch (e) {
+    log.warn(`[Terabox] tera-core gagal: ${e.message}, fallback ke xAPIverse...`);
+  }
+
+  // Try 2: xAPIverse (paid, zip-all)
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -479,33 +499,33 @@ async function getApiResult(teraboxUrl) {
         timeout: 30000,
       });
       if (!data.list || !data.list.length) {
-        throw new Error(data.message || 'Terabox API return empty list');
+        throw new Error(data.message || 'xAPIverse return empty list');
       }
       const item = data.list[0];
       if (!item.zip_dlink) {
-        throw new Error('Terabox API no zip_dlink (file mungkin sudah dihapus atau private)');
+        throw new Error('xAPIverse no zip_dlink (file mungkin sudah dihapus atau private)');
       }
+      log.info(`[Terabox] Resolved via xAPIverse (fallback)`);
       return {
         zipDlink: item.zip_dlink,
         name: item.name || 'archive',
         sizeMB: (item.size / 1024 / 1024).toFixed(1),
         credits: data.free_credits_remaining || '?',
+        source: 'xAPIverse',
       };
     } catch (e) {
       lastErr = e;
       const status = e.response?.status;
-      const body = e.response?.data;
-      // Don't retry on 4xx client errors (invalid URL, quota exceeded, etc)
       if (status && status >= 400 && status < 500) {
+        const body = e.response?.data;
         const msg = typeof body === 'object' ? (body.message || body.error || JSON.stringify(body)) : String(body || e.message);
-        throw new Error(`Terabox API error (${status}): ${msg.slice(0, 200)}`);
+        throw new Error(`xAPIverse error (${status}): ${msg.slice(0, 200)}`);
       }
-      // Retry on 5xx or network errors
-      log.warn(`[Terabox] attempt ${attempt}/3 gagal: ${e.message}`);
+      log.warn(`[Terabox-xAPI] attempt ${attempt}/3 gagal: ${e.message}`);
       if (attempt < 3) await sleep(2000 * attempt);
     }
   }
-  throw new Error(`Terabox API tidak responsif setelah 3 retry: ${lastErr?.message || 'unknown'}`);
+  throw new Error(`Semua Terabox API gagal. Last error: ${lastErr?.message || 'unknown'}`);
 }
 
 async function _downloadStreamOnce(url, destPath, onProgress, cookie = null, opts = {}) {
@@ -854,6 +874,12 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       zipPath = `${tmpBase}_raw${path.extname(fileName)}`;
       cookie = opts.cookie || '';
       accountToken = opts.accountToken || accountToken;
+    } else if (source === 'terabox_direct') {
+      // Terabox direct URL dari tera-core resolver (data.terabox.app/file/...)
+      await status('⚙️ <b>Menyambungkan tautan Terabox CDN...</b>');
+      downloadLink = url;
+      fileName = opts.fileName || decodeURIComponent(url.split('/').pop().split('?')[0]) || 'terabox_file';
+      zipPath = `${tmpBase}_raw${path.extname(fileName) || '.rar'}`;
     } else if (source === 'direct') {
       await status('⚙️ <b>Menyambungkan tautan aslinya...</b>');
       downloadLink = url;
@@ -864,15 +890,37 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       // cookie via opts.cookie, pakai; tanpa itu server balas HTML 12KB (login/error page).
       if (opts.cookie) cookie = opts.cookie;
     } else {
-      await status('⚙️ <b>Mapping via xAPIverse...</b>');
+      await status('⚙️ <b>Mapping via Terabox API...</b>');
       let api;
       try {
         api = await getApiResult(url);
       } catch (err) {
         return status(`❌ <b>Terabox gagal:</b> ${escHtml(err.message.slice(0, 300))}`);
       }
+
+      // Multi-file support (tera-core): kalau ada multiple files, user pilih
+      if (api.allFiles && api.allFiles.length > 1) {
+        let textOpts = `📁 <b>Terabox folder berisi ${api.allFiles.length} file.</b>\nPilih file yang ingin didownload:\n\n`;
+        const btns = [];
+        api.allFiles.forEach((f, i) => {
+          textOpts += `${i + 1}. ${escHtml(f.filename.slice(0, 50))} (${escHtml(f.size)})\n`;
+          btns.push([{ text: `⬇️ ${f.filename.slice(0, 45)} (${f.size})`, callback_data: `dls_tera_${i}` }]);
+        });
+        userStates.set(chatId, {
+          step: 'SELECT_TERABOX_FILE',
+          files: api.allFiles,
+          originalUrl: url,
+        });
+        await bot.editMessageText(textOpts, {
+          chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: btns }
+        });
+        return;
+      }
+
       downloadLink = api.zipDlink;
       fileName = api.name;
+      log.info(`[Terabox] Source: ${api.source}, File: ${fileName} (${api.sizeMB} MB)`);
     }
 
     await status(`⬇️ <b>Mengunduh ${fileName}...</b>\n📦`);
@@ -4127,6 +4175,24 @@ function startBot() {
           await processDownload(bot, chatId, gofileUrl, null, 'gofile', jobId);
         }, bot);
       }
+      return;
+    }
+
+    // Terabox multi-file picker (dari tera-core resolver)
+    if (action.startsWith('dls_tera_')) {
+      const idx = parseInt(action.replace('dls_tera_', ''), 10);
+      const state = userStates.get(chatId);
+      if (!state || state.step !== 'SELECT_TERABOX_FILE' || !state.files?.[idx]) {
+        return bot.sendMessage(chatId, 'Sesi kadaluarsa. Kirim ulang link Terabox.');
+      }
+      userStates.delete(chatId);
+      const file = state.files[idx];
+      log.info(`[Terabox] User pilih file ${idx}: ${file.filename}`);
+      queueManager.addJob(chatId, `Terabox: ${file.filename}`, async (jobId) => {
+        await processDownload(bot, chatId, file.directLink, null, 'terabox_direct', jobId, {
+          fileName: file.filename,
+        });
+      }, bot);
       return;
     }
 
