@@ -29,7 +29,9 @@ const log = {
 // Trigger word → extract group 1 = query
 const TRIGGERS = [
   /^(?:bot\s+)?(?:tolong\s+)?(?:cari(?:in|kan)?|nyari|carikan)\s+(.+)/i,
-  /^(?:pengen|mau|ingin)\s+(?:liat|lihat|cari|nyari|nemu)\s+(?:cosplay\s+|video\s+|pin\s+|pinterest\s+)?(.+)/i,
+  /^(?:pengen|mau|ingin)\s+(?:liat|lihat|cari|nyari|nemu|nonton|download|tonton)\s+(?:cosplay\s+|video\s+|pin\s+|pinterest\s+|anime\s+)?(.+)/i,
+  /^(?:mau|pengen|ingin)\s+(?:nonton|download|tonton)\s+(.+)/i,
+  /^(?:nonton|tonton|download)\s+(?:anime\s+)?(.+)/i,
   /^(?:search(?:\s+for)?|looking\s+for|find(?:\s+me)?|show\s+me)\s+(.+)/i,
   /^(?:i(?:\s+am|\'m)?)\s+looking\s+(?:for\s+)?(.+)/i,
   /^(?:can\s+you\s+(?:find|search)\s+(?:me\s+)?)(.+)/i,
@@ -56,8 +58,10 @@ function stripSourceHint(query) {
   for (const re of Object.values(SOURCE_HINTS)) {
     query = query.replace(re, '').trim();
   }
-  // Bersihkan filler words sisa
-  return query.replace(/\s+(dong|deh|dulu|bang|bro|gaes|guys|please|pls)\s*$/i, '').trim();
+  // Bersihkan filler words sisa (bahasa Indonesia + English)
+  query = query.replace(/\b(saya|aku|gue|gw|kamu|dong|deh|dulu|bang|bro|gaes|guys|please|pls|yang|ini|itu|mau|ingin|pengen|tolong|bot|nonton|tonton|download)\b/gi, '').trim();
+  // Collapse multiple spaces
+  return query.replace(/\s{2,}/g, ' ').trim();
 }
 
 function detectIntentRegex(text) {
