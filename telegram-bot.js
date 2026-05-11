@@ -3167,14 +3167,14 @@ async function doAnimeKusoDownload(bot, chatId, qualityIdx, hostType) {
 // ─── IDLIX / FILM & SERIES ───────────────────────────────────────────────────
 
 /**
- * Search film/series via TMDB, show results.
+ * Search film/series di IDLIX site, show results.
  */
 async function doIdlixSearch(bot, chatId, query) {
   log.info(`[IDLIX] user ${chatId} search="${query}"`);
   const loadMsg = await bot.sendMessage(chatId, `🎬 <b>Mencari "${escHtml(query)}"...</b>`, { parse_mode: 'HTML' });
 
   try {
-    const results = await idlixScraper.search(query, 'multi');
+    const results = await idlixScraper.search(query);
     if (!results.length) {
       return bot.editMessageText(`😕 Tidak ditemukan film/series untuk "${escHtml(query)}".`, {
         chat_id: chatId, message_id: loadMsg.message_id,
@@ -3184,14 +3184,13 @@ async function doIdlixSearch(bot, chatId, query) {
 
     idlixBrowseCache.set(chatId, { results });
 
-    let text = `🎬 <b>Hasil Pencarian</b>\n<i>"${escHtml(query)}"</i>\n\n`;
+    let text = `🎬 <b>Hasil Pencarian IDLIX</b>\n<i>"${escHtml(query)}"</i>\n\n`;
     const keyboard = [];
     results.forEach((r, i) => {
-      const typeIcon = r.type === 'movie' ? '🎬' : '📺';
+      const typeIcon = r.type === 'tv' ? '📺' : '🎬';
       const year = r.year ? ` (${r.year})` : '';
-      const rating = r.rating ? ` ⭐${r.rating}` : '';
-      text += `${i + 1}. ${typeIcon} <b>${escHtml(r.title)}</b>${year}${rating}\n`;
-      if (r.overview) text += `   <i>${escHtml(r.overview.slice(0, 80))}...</i>\n`;
+      const qual = r.quality ? ` [${r.quality}]` : '';
+      text += `${i + 1}. ${typeIcon} <b>${escHtml(r.title)}</b>${year}${qual}\n`;
       keyboard.push([{ text: `${typeIcon} ${r.title.slice(0, 45)}${year}`, callback_data: `idlix_sel_${i}` }]);
     });
 
@@ -3208,162 +3207,47 @@ async function doIdlixSearch(bot, chatId, query) {
 }
 
 /**
- * Show detail for selected film/series.
- * - Movie: langsung tampilkan quality picker
- * - TV Series: tampilkan season list
+ * Show detail for selected film — langsung download (IDLIX embed sudah 1080p).
  */
 async function doIdlixDetail(bot, chatId, resultIndex) {
   const cache = idlixBrowseCache.get(chatId);
   const item = cache?.results?.[resultIndex];
   if (!item) return bot.sendMessage(chatId, '❌ Data tidak ditemukan, coba search ulang.');
 
-  const loadMsg = await bot.sendMessage(chatId, `⏳ <b>Memuat detail ${escHtml(item.title)}...</b>`, { parse_mode: 'HTML' });
+  // Store selected film URL for download
+  idlixBrowseCache.set(chatId, { ...cache, selectedUrl: item.url, selectedTitle: item.title });
 
-  try {
-    if (item.type === 'movie') {
-      // Movie: langsung quality picker
-      idlixBrowseCache.set(chatId, { ...cache, selectedId: item.id, selectedType: 'movie', selectedTitle: item.title });
-
-      let text = `🎬 <b>${escHtml(item.title)}</b>`;
-      if (item.year) text += ` (${item.year})`;
-      if (item.rating) text += ` ⭐${item.rating}`;
-      text += `\n\n`;
-      if (item.overview) text += `${escHtml(item.overview)}\n\n`;
-      text += `Pilih kualitas download:`;
-
-      const keyboard = [
-        [{ text: '⬇️ 1080p', callback_data: 'idlix_dl_1080' }, { text: '⬇️ 720p', callback_data: 'idlix_dl_720' }],
-        [{ text: '⬇️ 480p', callback_data: 'idlix_dl_480' }, { text: '⬇️ 360p', callback_data: 'idlix_dl_360' }],
-        [{ text: '🔙 Kembali ke hasil', callback_data: 'idlix_back_search' }],
-      ];
-
-      await bot.editMessageText(text, {
-        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: keyboard },
-      });
-    } else {
-      // TV Series: fetch seasons
-      const detail = await idlixScraper.getSeriesDetail(item.id);
-      idlixBrowseCache.set(chatId, { ...cache, selectedId: item.id, selectedType: 'tv', selectedTitle: item.title, seriesDetail: detail });
-
-      let text = `📺 <b>${escHtml(detail.title)}</b>`;
-      if (item.year) text += ` (${item.year})`;
-      if (detail.rating) text += ` ⭐${detail.rating}`;
-      text += `\n\n`;
-      if (detail.overview) text += `${escHtml(detail.overview.slice(0, 200))}\n\n`;
-      text += `Pilih season:`;
-
-      const keyboard = [];
-      detail.seasons.forEach(s => {
-        keyboard.push([{ text: `Season ${s.number}: ${s.name} (${s.episodeCount} eps)`, callback_data: `idlix_season_${s.number}` }]);
-      });
-      keyboard.push([{ text: '🔙 Kembali ke hasil', callback_data: 'idlix_back_search' }]);
-
-      await bot.editMessageText(text, {
-        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: keyboard },
-      });
-    }
-  } catch (err) {
-    log.error(`[IDLIX] detail error: ${err.message}`);
-    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
-      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-    }).catch(() => {});
-  }
-}
-
-/**
- * Show episode list for a season.
- */
-async function doIdlixSeason(bot, chatId, seasonNum) {
-  const cache = idlixBrowseCache.get(chatId);
-  if (!cache?.selectedId) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
-
-  const loadMsg = await bot.sendMessage(chatId, `⏳ <b>Memuat Season ${seasonNum}...</b>`, { parse_mode: 'HTML' });
-
-  try {
-    const episodes = await idlixScraper.getEpisodes(cache.selectedId, seasonNum);
-    idlixBrowseCache.set(chatId, { ...cache, selectedSeason: seasonNum, episodes });
-
-    let text = `📺 <b>${escHtml(cache.selectedTitle)}</b> — Season ${seasonNum}\n\n`;
-    text += `Pilih episode untuk download:`;
-
-    const keyboard = [];
-    let row = [];
-    episodes.forEach((ep, i) => {
-      row.push({ text: `Ep ${ep.number}`, callback_data: `idlix_ep_${ep.number}` });
-      if (row.length === 5) { keyboard.push(row); row = []; }
-    });
-    if (row.length) keyboard.push(row);
-    keyboard.push([{ text: '🔙 Kembali ke seasons', callback_data: `idlix_sel_${cache.results?.findIndex(r => r.id === cache.selectedId) ?? 0}` }]);
-
-    await bot.editMessageText(text, {
-      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: keyboard },
-    });
-  } catch (err) {
-    log.error(`[IDLIX] season error: ${err.message}`);
-    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
-      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-    }).catch(() => {});
-  }
-}
-
-/**
- * Show quality picker for a TV episode.
- */
-async function doIdlixEpisodePicker(bot, chatId, epNum) {
-  const cache = idlixBrowseCache.get(chatId);
-  if (!cache?.selectedId) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
-
-  idlixBrowseCache.set(chatId, { ...cache, selectedEpisode: epNum });
-
-  const ep = cache.episodes?.find(e => e.number === epNum);
-  let text = `📺 <b>${escHtml(cache.selectedTitle)}</b>\nS${cache.selectedSeason}E${epNum}`;
-  if (ep?.name) text += ` — ${escHtml(ep.name)}`;
-  text += `\n\nPilih kualitas download:`;
+  let text = `🎬 <b>${escHtml(item.title)}</b>`;
+  if (item.year) text += ` (${item.year})`;
+  if (item.quality) text += ` [${escHtml(item.quality)}]`;
+  text += `\n\n⬇️ Klik tombol di bawah untuk download:`;
 
   const keyboard = [
-    [{ text: '⬇️ 1080p', callback_data: 'idlix_dl_1080' }, { text: '⬇️ 720p', callback_data: 'idlix_dl_720' }],
-    [{ text: '⬇️ 480p', callback_data: 'idlix_dl_480' }, { text: '⬇️ 360p', callback_data: 'idlix_dl_360' }],
-    [{ text: '🔙 Kembali ke episode', callback_data: `idlix_season_${cache.selectedSeason}` }],
+    [{ text: '⬇️ Download Film', callback_data: 'idlix_dl_start' }],
+    [{ text: '🔙 Kembali ke hasil', callback_data: 'idlix_back_search' }],
   ];
 
   await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
 }
 
 /**
- * Execute download via Playwright HLS interception + ffmpeg.
+ * Execute download: scrape embed → Playwright intercept → ffmpeg.
  */
-async function doIdlixDownload(bot, chatId, quality) {
+async function doIdlixDownload(bot, chatId) {
   const cache = idlixBrowseCache.get(chatId);
-  if (!cache?.selectedId) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
+  if (!cache?.selectedUrl) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
 
-  // Check ffmpeg (required for HLS download)
   if (!idlixScraper.checkFfmpeg()) {
     return bot.sendMessage(chatId,
-      `❌ <b>ffmpeg tidak ter-install di VPS.</b>\n\nInstall dulu:\n<code>apt install ffmpeg</code>`,
+      `❌ <b>ffmpeg tidak ter-install di VPS.</b>\n\nInstall:\n<code>apt install ffmpeg</code>`,
       { parse_mode: 'HTML' }
     );
   }
 
-  const isMovie = cache.selectedType === 'movie';
-  const season = cache.selectedSeason;
-  const episode = cache.selectedEpisode;
-  const title = cache.selectedTitle;
+  const title = cache.selectedTitle || 'Film';
+  const filmUrl = cache.selectedUrl;
 
-  const vidSrcUrl = idlixScraper.buildVidSrcUrl(
-    isMovie ? 'movie' : 'tv',
-    cache.selectedId,
-    season,
-    episode
-  );
-
-  const titleLabel = isMovie
-    ? `${title} [${quality}p]`
-    : `${title} S${season}E${episode} [${quality}p]`;
-
-  queueManager.addJob(chatId, titleLabel, async (jobId) => {
+  queueManager.addJob(chatId, title, async (jobId) => {
     let statusMsg = null;
     const status = async (txt) => {
       try {
@@ -3373,18 +3257,17 @@ async function doIdlixDownload(bot, chatId, quality) {
     };
 
     try {
-      await status(`⏳ <b>Resolving stream untuk ${escHtml(titleLabel)}...</b>\n<i>Playwright sedang intercept HLS dari embed player...</i>`);
+      await status(`⏳ <b>Memproses ${escHtml(title)}...</b>\n<i>Scraping embed player dari IDLIX...</i>`);
 
       const tmpDir = path.join(CONFIG.TEMP_DIR, `idlix_${Date.now()}`);
       await fsp.mkdir(tmpDir, { recursive: true });
-      const outputBase = path.join(tmpDir, titleLabel.replace(/[^\w\s\-\[\]]/g, '').slice(0, 80));
+      const safeTitle = title.replace(/[^\w\s\-]/g, '').slice(0, 80).trim();
+      const outputBase = path.join(tmpDir, safeTitle || 'film');
 
-      let lastProgress = '';
       const dlStartedAt = Date.now();
       const throttle = createProgressThrottler(3000);
 
-      const filePath = await idlixScraper.downloadWithPlaywright(vidSrcUrl, outputBase, quality, (line) => {
-        // Parse ffmpeg progress: [download] 42% | size=150M | speed=2.1x
+      const filePath = await idlixScraper.downloadFromIdlix(filmUrl, outputBase, (line) => {
         const m = line.match(/\[download\]\s+(\d+)%.*?size=([\w?]+).*?speed=([\w?.]+)/);
         if (m) {
           const pct = parseInt(m[1]);
@@ -3392,31 +3275,28 @@ async function doIdlixDownload(bot, chatId, quality) {
           const speed = m[3];
           throttle(() => {
             const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
-            status(`⬇️ <b>${escHtml(titleLabel)}</b>\n<code>${bar} ${pct}%</code>\n<code>Size: ${size} · Speed: ${speed}</code>`);
+            status(`⬇️ <b>${escHtml(title)}</b>\n<code>${bar} ${pct}%</code>\n<code>Size: ${size} · Speed: ${speed}</code>`);
           });
         } else if (line.includes('[info]')) {
           throttle(() => {
-            status(`🔍 <b>${escHtml(titleLabel)}</b>\n<i>${escHtml(line.replace('[info] ', '').slice(0, 100))}</i>`);
+            status(`🔍 <b>${escHtml(title)}</b>\n<i>${escHtml(line.replace('[info] ', '').slice(0, 100))}</i>`);
           });
         } else if (line.includes('[ffmpeg]')) {
-          throttle(() => {
-            status(`🔧 <b>Processing video...</b>`);
-          });
+          throttle(() => { status(`🔧 <b>Downloading stream...</b>`); });
         }
-        lastProgress = line;
       });
 
       const fileSizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(1);
-      await status(`📤 <b>Uploading ${escHtml(titleLabel)}</b>\n${fileSizeMB} MB ke Telegram...`);
+      await status(`📤 <b>Uploading ${escHtml(title)}</b>\n${fileSizeMB} MB ke Telegram...`);
 
-      await sendOne(bot, chatId, filePath, `🎬 ${titleLabel}`);
-      await status(`✅ <b>${escHtml(titleLabel)}</b> selesai!`);
+      await sendOne(bot, chatId, filePath, `🎬 ${title}`);
+      await status(`✅ <b>${escHtml(title)}</b> selesai! (${fileSizeMB} MB)`);
       await rimraf(tmpDir);
     } catch (err) {
       log.error(`[IDLIX] download error: ${err.message}`);
       let msg = err.message.slice(0, 400);
-      if (msg.includes('spawn error')) msg += '\n\nPastikan ffmpeg ter-install di VPS: apt install ffmpeg';
-      if (msg.includes('Tidak dapat menemukan')) msg += '\n\n💡 Tip: Coba film/episode lain, atau tunggu beberapa menit lalu coba lagi.';
+      if (msg.includes('spawn error')) msg += '\n\nPastikan ffmpeg ter-install: apt install ffmpeg';
+      if (msg.includes('Tidak ditemukan embed')) msg += '\n\n💡 Halaman mungkin belum punya video.';
       status(`❌ Download gagal:\n${escHtml(msg)}`).catch(() => {});
     }
   }, bot);
@@ -5138,7 +5018,7 @@ function startBot() {
     if (action === 'idlix_menu') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       const sentMsg = await bot.sendMessage(chatId,
-        `🎬 <b>Film & Series Hub</b>\n<i>TMDB + VidSrc + Playwright</i>\n\nPilih mode:`,
+        `🎬 <b>Film & Series Hub</b>\n<i>IDLIX + Playwright + ffmpeg</i>\n\nPilih mode:`,
         {
           parse_mode: 'HTML',
           reply_markup: {
@@ -5343,10 +5223,9 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doIdlixEpisodePicker(bot, chatId, epNum);
     }
-    if (action.startsWith('idlix_dl_')) {
-      const quality = action.replace('idlix_dl_', '');
+    if (action.startsWith('idlix_dl_') || action === 'idlix_dl_start') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return doIdlixDownload(bot, chatId, quality);
+      return doIdlixDownload(bot, chatId);
     }
     if (action === 'idlix_back_search') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });

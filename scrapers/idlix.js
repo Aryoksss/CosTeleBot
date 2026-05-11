@@ -1,19 +1,21 @@
 'use strict';
 /**
- * IDLIX / Film scraper — search film & series via TMDB, stream via VidSrc/IDLIX embed.
+ * IDLIX scraper — search & stream film/series dari IDLIX WordPress site.
  *
  * Flow:
- *   1. Search: TMDB API (gratis, no auth) → dapat TMDB ID + metadata
- *   2. Stream: Playwright intercept HLS .m3u8 + subtitle (.vtt/.srt) dari embed player
- *   3. Download: ffmpeg -i <m3u8_url> -i <subtitle> -c copy -c:s mov_text output.mp4
- *   4. Fallback subtitle: OpenSubtitles API (bahasa Indonesia)
+ *   1. Search: WordPress search (?s=query) → parse hasil dengan cheerio
+ *   2. Detail: Buka halaman film → extract iframe embed (vidhide.org/filemoon/dll)
+ *   3. Stream: Playwright navigate ke embed → intercept .m3u8
+ *   4. Download: ffmpeg -i <m3u8_url> -c copy output.mp4
+ *   5. Subtitle: intercept .vtt/.srt dari player + fallback OpenSubtitles
  *
  * Requires on VPS:
  *   apt install ffmpeg
- *   npx playwright install chromium  (atau: npx playwright install-deps && npx playwright install)
+ *   npx playwright install chromium
  */
 
 const axios = require('axios');
+const cheerio = require('cheerio');
 const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { spawnSync, spawn } = require('child_process');
@@ -22,95 +24,139 @@ const fs = require('fs');
 
 chromium.use(StealthPlugin());
 
-const TMDB_BASE = 'https://api.themoviedb.org/3';
-// TMDB API key — wajib di-set di .env
-const TMDB_KEY = () => process.env.TMDB_API_KEY;
-const VIDSRC_BASE = 'https://vidsrc.to/embed';
-
-// IDLIX WordPress site (no Cloudflare)
+// IDLIX site base URL — configurable via .env
 const IDLIX_BASE = () => process.env.IDLIX_BASE_URL || 'https://159.65.50.100';
 
-// OpenSubtitles API (free tier: 100 req/day tanpa API key, 1000/day dengan key)
+// OpenSubtitles API (free tier fallback for subtitles)
 const OPENSUB_BASE = 'https://api.opensubtitles.com/api/v1';
 const OPENSUB_KEY = () => process.env.OPENSUBTITLES_API_KEY || '';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
-const http = axios.create({ timeout: 15000, headers: { 'User-Agent': UA } });
+const http = axios.create({
+  timeout: 15000,
+  headers: { 'User-Agent': UA },
+  // IDLIX site kadang pakai self-signed cert
+  httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
+});
+
+// ─── SEARCH & BROWSE ──────────────────────────────────────────────────────────
 
 /**
- * Search film/series via TMDB.
+ * Search film/series di IDLIX site.
  * @param {string} query
- * @param {'movie'|'tv'|'multi'} type
- * @returns {Array<{id, title, type, year, overview, poster, rating, seasons}>}
+ * @returns {Array<{title, url, slug, year, type, poster, quality, rating}>}
  */
-async function search(query, type = 'multi') {
-  const { data } = await http.get(`${TMDB_BASE}/search/${type}`, {
-    params: { api_key: TMDB_KEY(), query, language: 'id-ID', include_adult: false },
+async function search(query) {
+  const base = IDLIX_BASE();
+  const { data } = await http.get(`${base}/`, { params: { s: query } });
+  const $ = cheerio.load(data);
+  const results = [];
+
+  // IDLIX theme (idmuvi/flavor): article.item with .content-thumbnail > a[itemprop="url"]
+  $('article.item, article.has-post-thumbnail').each((i, el) => {
+    const $el = $(el);
+    const link = $el.find('h2.entry-title a, .content-thumbnail > a').first();
+    const href = link.attr('href') || '';
+    const title = link.attr('title')?.replace(/^Permalink ke:\s*/i, '').trim() ||
+                  link.text().trim() ||
+                  $el.find('h2.entry-title').text().trim();
+    if (!href || !title) return;
+
+    const slug = href.replace(/https?:\/\/[^/]+\//, '').replace(/\/$/, '');
+    const poster = $el.find('img.wp-post-image').attr('src') || null;
+    const rating = $el.find('.gmr-rating-item').text().replace(/[^\d.]/g, '') || '';
+    const duration = $el.find('.gmr-duration-item').text().trim() || '';
+    const type = $el.attr('itemtype')?.includes('TVSeries') ? 'tv' : 'movie';
+    const year = title.match(/\((\d{4})\)/)?.[1] || slug.match(/(\d{4})/)?.[1] || '';
+
+    results.push({
+      title: title.replace(/\s*\(\d{4}\)\s*$/, '').trim() || title,
+      url: href,
+      slug,
+      year,
+      type,
+      poster,
+      quality: '',
+      rating,
+      duration,
+      source: 'idlix',
+    });
   });
 
-  return (data.results || []).slice(0, 10).map(r => ({
-    id: r.id,
-    title: r.title || r.name || 'Unknown',
-    type: r.media_type || type,
-    year: (r.release_date || r.first_air_date || '').slice(0, 4),
-    overview: (r.overview || '').slice(0, 200),
-    poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
-    rating: r.vote_average ? r.vote_average.toFixed(1) : null,
-    seasons: r.number_of_seasons || null,
-    source: 'idlix',
-  }));
+  return results.slice(0, 15);
 }
 
 /**
- * Get TV series details: seasons + episode count.
+ * Get detail halaman film: extract embed iframe URL + info.
+ * @param {string} url - full URL halaman film di IDLIX
+ * @returns {{title, embedUrl, year, duration, genre, synopsis, poster}}
  */
-async function getSeriesDetail(tmdbId) {
-  const { data } = await http.get(`${TMDB_BASE}/tv/${tmdbId}`, {
-    params: { api_key: TMDB_KEY(), language: 'id-ID' },
-  });
-  return {
-    id: data.id,
-    title: data.name,
-    overview: (data.overview || '').slice(0, 300),
-    poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
-    rating: data.vote_average?.toFixed(1),
-    seasons: (data.seasons || [])
-      .filter(s => s.season_number > 0) // skip specials (season 0)
-      .map(s => ({
-        number: s.season_number,
-        name: s.name,
-        episodeCount: s.episode_count,
-        year: (s.air_date || '').slice(0, 4),
-      })),
-  };
-}
+async function getDetail(url) {
+  const { data } = await http.get(url);
+  const $ = cheerio.load(data);
 
-/**
- * Get episode list for a season.
- */
-async function getEpisodes(tmdbId, season) {
-  const { data } = await http.get(`${TMDB_BASE}/tv/${tmdbId}/season/${season}`, {
-    params: { api_key: TMDB_KEY(), language: 'id-ID' },
-  });
-  return (data.episodes || []).map(ep => ({
-    number: ep.episode_number,
-    name: ep.name,
-    overview: (ep.overview || '').slice(0, 150),
-    airDate: ep.air_date,
-    runtime: ep.runtime,
-  }));
-}
+  const title = $('h1.entry-title, h1.wp-title, .sheader .data h1, h1').first().text().trim() || 'Unknown';
+  const synopsis = $('.synp, .entry-content p, .wp-content p, .desc, .storyline').first().text().trim().slice(0, 300);
+  const poster = $('meta[property="og:image"]').attr('content') || $('img.wp-post-image').attr('src') || null;
+  const year = $('meta[property="og:updated_time"], .extra .date, .sheader .date').text().match(/\d{4}/)?.[0] || '';
+  const duration = $('.runtime, .duration, .tmdb_runtime').text().trim() || '';
+  const genre = $('.sgeneros a, .genre a').map((i, el) => $(el).text().trim()).get().join(', ');
 
-/**
- * Build VidSrc embed URL.
- */
-function buildVidSrcUrl(type, tmdbId, season = null, episode = null) {
-  if (type === 'movie') {
-    return `${VIDSRC_BASE}/movie/${tmdbId}`;
+  // Extract embed iframe URL
+  let embedUrl = null;
+  $('iframe').each((i, el) => {
+    const src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src') || '';
+    // Skip non-player iframes (ads, analytics)
+    if (src.includes('vidhide') || src.includes('filemoon') || src.includes('streamwish') ||
+        src.includes('doodstream') || src.includes('upstream') || src.includes('mixdrop') ||
+        src.includes('embed') || src.includes('player')) {
+      embedUrl = src.startsWith('//') ? `https:${src}` : src;
+      return false; // break
+    }
+  });
+
+  // Fallback: cari di script tags (beberapa theme simpan embed URL di JS)
+  if (!embedUrl) {
+    const scriptContent = $('script').map((i, el) => $(el).html()).get().join('\n');
+    const embedMatch = scriptContent.match(/(?:src|url|embed)['":\s]*['"]?(https?:\/\/(?:vidhide|filemoon|streamwish|doodstream|upstream|mixdrop)[^'"\s]+)/i);
+    if (embedMatch) embedUrl = embedMatch[1];
   }
-  return `${VIDSRC_BASE}/tv/${tmdbId}/${season}/${episode}`;
+
+  return { title, embedUrl, year, duration, genre, synopsis, poster };
 }
+
+/**
+ * Get episode list for a TV series page.
+ * @param {string} url - URL halaman series
+ * @returns {{seasons: [{number, episodes: [{number, title, url}]}]}}
+ */
+async function getSeriesEpisodes(url) {
+  const { data } = await http.get(url);
+  const $ = cheerio.load(data);
+  const seasons = [];
+
+  // Common IDLIX theme: .bixbox with season tabs, episodes as list
+  $('.se-c, .season-list, [data-season]').each((i, el) => {
+    const seasonNum = $(el).find('.se-t, .title').text().match(/\d+/)?.[0] || String(i + 1);
+    const episodes = [];
+
+    $(el).find('.episodios li a, .eps-list a, .episode-item a, ul li a').each((j, epEl) => {
+      const epUrl = $(epEl).attr('href') || '';
+      const epTitle = $(epEl).text().trim();
+      const epNum = epTitle.match(/(?:ep|episode|eps)[\s.]*(\d+)/i)?.[1] || String(j + 1);
+      if (epUrl) episodes.push({ number: parseInt(epNum), title: epTitle, url: epUrl });
+    });
+
+    if (episodes.length > 0) {
+      seasons.push({ number: parseInt(seasonNum), episodes });
+    }
+  });
+
+  return { seasons };
+}
+
+// ─── PLAYWRIGHT HLS INTERCEPTION ─────────────────────────────────────────────
 
 /**
  * Check if ffmpeg is available.
@@ -121,44 +167,14 @@ function checkFfmpeg() {
 }
 
 /**
- * Intercept HLS .m3u8 URL + subtitle tracks from an embed player page using Playwright.
- * Navigates through nested iframes to reach the actual video player.
+ * Intercept HLS .m3u8 URL + subtitle from embed player via Playwright.
+ * Navigate directly to the embed URL (vidhide.org, filemoon, etc.) and intercept.
  *
- * Chain: vidsrc.to → vsembed.ru → cloudnestra.com/vidplay/filemoon → .m3u8
- *
- * @param {string} type - 'movie' or 'tv'
- * @param {number} tmdbId
- * @param {number|null} season
- * @param {number|null} episode
+ * @param {string} embedUrl - direct embed player URL (e.g. https://vidhide.org/embed/xxx)
  * @param {function(string)} onLog - progress callback
  * @returns {Promise<{m3u8Url: string, headers: object, subtitleUrls: string[]}>}
  */
-async function interceptM3u8(type, tmdbId, season, episode, onLog = () => {}) {
-  // Build list of embed URLs to try
-  const idlixBase = IDLIX_BASE();
-  const urls = [
-    type === 'movie'
-      ? `${VIDSRC_BASE}/movie/${tmdbId}`
-      : `${VIDSRC_BASE}/tv/${tmdbId}/${season}/${episode}`,
-    type === 'movie'
-      ? `https://vidsrc.xyz/embed/movie?tmdb=${tmdbId}`
-      : `https://vidsrc.xyz/embed/tv?tmdb=${tmdbId}&season=${season}&episode=${episode}`,
-    type === 'movie'
-      ? `https://player.autoembed.cc/embed/movie/${tmdbId}`
-      : `https://player.autoembed.cc/embed/tv/${tmdbId}/${season}/${episode}`,
-    type === 'movie'
-      ? `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1`
-      : `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1&s=${season}&e=${episode}`,
-  ];
-
-  if (idlixBase && !idlixBase.includes('159.65.50.100')) {
-    urls.unshift(
-      type === 'movie'
-        ? `${idlixBase}/embed/movie/${tmdbId}`
-        : `${idlixBase}/embed/tv/${tmdbId}/${season}/${episode}`
-    );
-  }
-
+async function interceptM3u8(embedUrl, onLog = () => {}) {
   let browser;
   try {
     browser = await chromium.launch({
@@ -172,210 +188,133 @@ async function interceptM3u8(type, tmdbId, season, episode, onLog = () => {}) {
       ],
     });
 
-    for (const pageUrl of urls) {
-      onLog(`[info] Trying embed: ${pageUrl.slice(0, 80)}...`);
+    onLog(`[info] Opening embed player: ${embedUrl.slice(0, 80)}...`);
 
-      let context;
-      try {
-        context = await browser.newContext({
-          userAgent: UA,
-          ignoreHTTPSErrors: true,
-          bypassCSP: true,
-        });
+    const context = await browser.newContext({
+      userAgent: UA,
+      ignoreHTTPSErrors: true,
+      bypassCSP: true,
+    });
 
-        const page = await context.newPage();
+    const page = await context.newPage();
 
-        // Global network interception — catches ALL requests including from nested iframes
-        const m3u8Urls = [];
-        const subtitleUrls = [];
-        const capturedHeaders = {};
+    // Intercept ALL network requests
+    const m3u8Urls = [];
+    const subtitleUrls = [];
+    const capturedHeaders = {};
 
-        // Use route to intercept ALL requests across all frames
-        await page.route('**/*', async (route) => {
-          const url = route.request().url();
+    await page.route('**/*', async (route) => {
+      const url = route.request().url();
 
-          if (url.includes('.m3u8')) {
-            m3u8Urls.push(url);
-            const hdrs = route.request().headers();
-            capturedHeaders.referer = hdrs.referer || hdrs['Referer'] || '';
-            capturedHeaders.origin = hdrs.origin || hdrs['Origin'] || '';
-            capturedHeaders.userAgent = hdrs['user-agent'] || UA;
-          }
-
-          if (url.includes('.vtt') || url.includes('.srt') || url.includes('subtitle') || url.includes('caption') || url.includes('track')) {
-            if (!subtitleUrls.includes(url)) subtitleUrls.push(url);
-          }
-
-          // Continue the request normally
-          await route.continue().catch(() => {});
-        });
-
-        // Navigate to the embed page
-        try {
-          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        } catch (navErr) {
-          onLog(`[warn] Navigation failed: ${navErr.message.slice(0, 80)}`);
-          await context.close();
-          continue;
-        }
-
-        // Wait for page + iframes to load
-        await page.waitForTimeout(3000);
-
-        // Try clicking play buttons in all frames (main + nested iframes)
-        const clickPlayInAllFrames = async () => {
-          const allFrames = page.frames();
-          for (const frame of allFrames) {
-            try {
-              const playSelectors = [
-                '.play-button', '#play-button', '[class*="play"]',
-                'button[aria-label="Play"]', '.jw-icon-display', '.vjs-big-play-button',
-                '.plyr__control--overlaid', '[data-plyr="play"]',
-                '.vjs-play-control', '#player', '.player-play',
-              ];
-              for (const sel of playSelectors) {
-                const btn = await frame.$(sel);
-                if (btn) {
-                  await btn.click().catch(() => {});
-                  break;
-                }
-              }
-            } catch (_) {}
-          }
-        };
-
-        await clickPlayInAllFrames();
-
-        // Wait for .m3u8 request to appear (up to 30 seconds)
-        // The nested iframe chain can take time to resolve
-        const deadline = Date.now() + 30000;
-        while (m3u8Urls.length === 0 && Date.now() < deadline) {
-          await page.waitForTimeout(2000);
-          await clickPlayInAllFrames();
-        }
-
-        if (m3u8Urls.length > 0) {
-          // Prefer master playlist
-          let bestUrl = m3u8Urls.find(u => u.includes('master')) ||
-                        m3u8Urls.find(u => !u.includes('/seg') && !u.includes('/chunk')) ||
-                        m3u8Urls[0];
-
-          onLog(`[info] Found .m3u8: ${bestUrl.slice(0, 100)}...`);
-          if (subtitleUrls.length > 0) {
-            onLog(`[info] Found ${subtitleUrls.length} subtitle track(s) from player`);
-          }
-          await context.close();
-          return {
-            m3u8Url: bestUrl,
-            headers: {
-              referer: capturedHeaders.referer || pageUrl,
-              origin: capturedHeaders.origin || new URL(pageUrl).origin,
-              userAgent: capturedHeaders.userAgent || UA,
-            },
-            subtitleUrls,
-          };
-        }
-
-        onLog(`[warn] No .m3u8 found on ${pageUrl.slice(0, 60)}`);
-        await context.close();
-      } catch (err) {
-        onLog(`[warn] Error on ${pageUrl.slice(0, 60)}: ${err.message.slice(0, 80)}`);
-        if (context) await context.close().catch(() => {});
+      if (url.includes('.m3u8')) {
+        if (!m3u8Urls.includes(url)) m3u8Urls.push(url);
+        const hdrs = route.request().headers();
+        capturedHeaders.referer = hdrs.referer || hdrs['Referer'] || '';
+        capturedHeaders.origin = hdrs.origin || hdrs['Origin'] || '';
+        capturedHeaders.userAgent = hdrs['user-agent'] || UA;
       }
+
+      if (url.includes('.vtt') || url.includes('.srt') || url.includes('subtitle') || url.includes('caption')) {
+        if (!subtitleUrls.includes(url)) subtitleUrls.push(url);
+      }
+
+      await route.continue().catch(() => {});
+    });
+
+    // Navigate to embed
+    try {
+      await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (navErr) {
+      throw new Error(`Gagal buka embed player: ${navErr.message.slice(0, 100)}`);
     }
 
-    throw new Error('Tidak dapat menemukan stream HLS (.m3u8) dari semua embed provider. Film mungkin belum tersedia.');
+    // Wait for page to load
+    await page.waitForTimeout(3000);
+
+    // Click play button in all frames
+    const clickPlay = async () => {
+      const allFrames = page.frames();
+      for (const frame of allFrames) {
+        try {
+          const playSelectors = [
+            '#fakePlayButton', '.play-button', '#play-button',
+            'button[aria-label="Play"]', '.jw-icon-display', '.vjs-big-play-button',
+            '.plyr__control--overlaid', '[data-plyr="play"]',
+            '.vjs-play-control', '#player', '.player-play',
+            '[class*="play"]', 'video',
+          ];
+          for (const sel of playSelectors) {
+            const btn = await frame.$(sel);
+            if (btn) {
+              await btn.click().catch(() => {});
+              onLog(`[info] Clicked: ${sel}`);
+              return true;
+            }
+          }
+        } catch (_) {}
+      }
+      return false;
+    };
+
+    await clickPlay();
+
+    // Wait for .m3u8 to appear (up to 35 seconds — VidHide can be slow)
+    const deadline = Date.now() + 35000;
+    while (m3u8Urls.length === 0 && Date.now() < deadline) {
+      await page.waitForTimeout(2000);
+      await clickPlay();
+    }
+
+    await context.close();
+
+    if (m3u8Urls.length === 0) {
+      throw new Error('Tidak ditemukan stream .m3u8 dari embed player. Player mungkin butuh CAPTCHA atau geo-blocked.');
+    }
+
+    // Prefer master playlist
+    let bestUrl = m3u8Urls.find(u => u.includes('master')) ||
+                  m3u8Urls.find(u => !u.includes('/seg') && !u.includes('/chunk')) ||
+                  m3u8Urls[0];
+
+    onLog(`[info] Found .m3u8: ${bestUrl.slice(0, 100)}...`);
+    if (subtitleUrls.length > 0) {
+      onLog(`[info] Found ${subtitleUrls.length} subtitle track(s)`);
+    }
+
+    return {
+      m3u8Url: bestUrl,
+      headers: {
+        referer: capturedHeaders.referer || embedUrl,
+        origin: capturedHeaders.origin || new URL(embedUrl).origin,
+        userAgent: capturedHeaders.userAgent || UA,
+      },
+      subtitleUrls,
+    };
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
 }
 
-/**
- * Fetch Indonesian subtitle from OpenSubtitles API.
- * Free tier: 100 downloads/day tanpa API key, 1000/day dengan key.
- *
- * @param {number} tmdbId
- * @param {string} type - 'movie' or 'tv'
- * @param {number|null} season
- * @param {number|null} episode
- * @param {function(string)} onLog
- * @returns {Promise<string|null>} - URL to download subtitle file, or null
- */
-async function fetchOpenSubtitlesId(tmdbId, type, season, episode, onLog = () => {}) {
-  try {
-    const params = {
-      tmdb_id: tmdbId,
-      languages: 'id',  // Indonesian
-      order_by: 'download_count',
-      order_direction: 'desc',
-    };
-    if (type === 'tv' && season && episode) {
-      params.season_number = season;
-      params.episode_number = episode;
-    }
-
-    const headers = {
-      'User-Agent': 'CosTeleBot v1.0',
-      'Accept': 'application/json',
-    };
-    const apiKey = OPENSUB_KEY();
-    if (apiKey) headers['Api-Key'] = apiKey;
-
-    const { data } = await http.get(`${OPENSUB_BASE}/subtitles`, { params, headers, timeout: 10000 });
-
-    if (!data.data || data.data.length === 0) {
-      onLog('[subtitle] Tidak ada subtitle Indonesia di OpenSubtitles');
-      return null;
-    }
-
-    // Pick the best one (highest download count, prefer .srt)
-    const best = data.data[0];
-    const fileId = best.attributes?.files?.[0]?.file_id;
-    if (!fileId) {
-      onLog('[subtitle] Subtitle ditemukan tapi tidak ada file_id');
-      return null;
-    }
-
-    onLog(`[subtitle] Found: "${best.attributes?.release || 'unknown'}" (${best.attributes?.download_count || 0} downloads)`);
-
-    // Request download link
-    const dlHeaders = { ...headers, 'Content-Type': 'application/json' };
-    const { data: dlData } = await http.post(`${OPENSUB_BASE}/download`, { file_id: fileId }, { headers: dlHeaders, timeout: 10000 });
-
-    if (dlData.link) {
-      return dlData.link;
-    }
-    onLog('[subtitle] Gagal dapat download link dari OpenSubtitles');
-    return null;
-  } catch (err) {
-    onLog(`[subtitle] OpenSubtitles error: ${err.message.slice(0, 80)}`);
-    return null;
-  }
-}
+// ─── SUBTITLE ─────────────────────────────────────────────────────────────────
 
 /**
  * Download subtitle file to local path.
- * Supports .vtt and .srt URLs. Converts .vtt to .srt if needed (ffmpeg handles both).
- *
- * @param {string} url - subtitle download URL
- * @param {string} destPath - local file path to save (without extension, will add .srt)
+ * @param {string} url
+ * @param {string} destPath - base path (without extension)
  * @param {function(string)} onLog
- * @returns {Promise<string|null>} - local path to subtitle file, or null on failure
+ * @returns {Promise<string|null>} local path or null
  */
 async function downloadSubtitle(url, destPath, onLog = () => {}) {
   try {
     const ext = url.includes('.vtt') ? '.vtt' : '.srt';
     const subPath = `${destPath}${ext}`;
-
     const { data } = await axios.get(url, {
       timeout: 15000,
       responseType: 'arraybuffer',
       headers: { 'User-Agent': UA },
     });
-
     fs.writeFileSync(subPath, data);
-    const sizeMB = (Buffer.byteLength(data) / 1024).toFixed(1);
-    onLog(`[subtitle] Downloaded: ${sizeMB} KB → ${path.basename(subPath)}`);
+    onLog(`[subtitle] Downloaded: ${(Buffer.byteLength(data) / 1024).toFixed(1)} KB`);
     return subPath;
   } catch (err) {
     onLog(`[subtitle] Download gagal: ${err.message.slice(0, 80)}`);
@@ -384,112 +323,127 @@ async function downloadSubtitle(url, destPath, onLog = () => {}) {
 }
 
 /**
- * Try to get Indonesian subtitle from multiple sources:
- * 1. Intercepted subtitle URLs from embed player (prefer Indonesian/id)
- * 2. OpenSubtitles API fallback
- *
- * @param {string[]} interceptedUrls - subtitle URLs captured from player
- * @param {number} tmdbId
- * @param {string} type - 'movie' or 'tv'
- * @param {number|null} season
- * @param {number|null} episode
- * @param {string} destPath - base path for saving subtitle (without extension)
+ * Fetch Indonesian subtitle from OpenSubtitles API (fallback).
+ * @param {string} title - film title for search
  * @param {function(string)} onLog
- * @returns {Promise<string|null>} - local subtitle file path, or null
+ * @returns {Promise<string|null>} download URL or null
  */
-async function getIndonesianSubtitle(interceptedUrls, tmdbId, type, season, episode, destPath, onLog = () => {}) {
-  // Strategy 1: Check intercepted URLs for Indonesian subtitle
-  // Many players include language in URL: /id.vtt, /ind.srt, ?lang=id, etc.
+async function fetchOpenSubtitlesId(title, onLog = () => {}) {
+  try {
+    const headers = { 'User-Agent': 'CosTeleBot v1.0', 'Accept': 'application/json' };
+    const apiKey = OPENSUB_KEY();
+    if (apiKey) headers['Api-Key'] = apiKey;
+
+    const { data } = await http.get(`${OPENSUB_BASE}/subtitles`, {
+      params: { query: title, languages: 'id', order_by: 'download_count', order_direction: 'desc' },
+      headers,
+      timeout: 10000,
+    });
+
+    if (!data.data || data.data.length === 0) {
+      onLog('[subtitle] Tidak ada subtitle Indonesia di OpenSubtitles');
+      return null;
+    }
+
+    const best = data.data[0];
+    const fileId = best.attributes?.files?.[0]?.file_id;
+    if (!fileId) return null;
+
+    onLog(`[subtitle] Found: "${best.attributes?.release || 'unknown'}" (${best.attributes?.download_count || 0} downloads)`);
+
+    const { data: dlData } = await http.post(`${OPENSUB_BASE}/download`,
+      { file_id: fileId },
+      { headers: { ...headers, 'Content-Type': 'application/json' }, timeout: 10000 }
+    );
+
+    return dlData.link || null;
+  } catch (err) {
+    onLog(`[subtitle] OpenSubtitles error: ${err.message.slice(0, 80)}`);
+    return null;
+  }
+}
+
+/**
+ * Get Indonesian subtitle: from player intercept first, then OpenSubtitles fallback.
+ * @param {string[]} interceptedUrls
+ * @param {string} title - film title
+ * @param {string} destPath - base path for saving
+ * @param {function(string)} onLog
+ * @returns {Promise<string|null>}
+ */
+async function getIndonesianSubtitle(interceptedUrls, title, destPath, onLog = () => {}) {
+  // VidHide biasanya serve subtitle Indonesia langsung (lihat meta description)
+  // Try intercepted URLs first
   const idPatterns = [/[/.]id[./]/, /[/.]ind[./]/, /indonesi/i, /lang=id/i, /bahasa/i];
 
-  // First try: find explicitly Indonesian subtitle from intercepted
   for (const url of interceptedUrls) {
-    const isIndo = idPatterns.some(p => p.test(url));
-    if (isIndo) {
-      onLog(`[subtitle] Found Indonesian subtitle from player: ${url.slice(0, 80)}`);
+    if (idPatterns.some(p => p.test(url))) {
+      onLog(`[subtitle] Found Indonesian from player`);
       const result = await downloadSubtitle(url, destPath, onLog);
       if (result) return result;
     }
   }
 
-  // Second try: if only 1 subtitle intercepted (likely the active one from player, often Indonesian on IDLIX)
+  // If only 1 subtitle (likely Indonesian on IDLIX)
   if (interceptedUrls.length === 1) {
-    onLog(`[subtitle] Trying single intercepted subtitle (mungkin Indonesia): ${interceptedUrls[0].slice(0, 80)}`);
+    onLog(`[subtitle] Trying single subtitle from player (likely Indonesian)`);
     const result = await downloadSubtitle(interceptedUrls[0], destPath, onLog);
     if (result) return result;
   }
 
-  // Strategy 2: Fallback to OpenSubtitles API
-  onLog('[subtitle] Mencari subtitle Indonesia di OpenSubtitles...');
-  const osUrl = await fetchOpenSubtitlesId(tmdbId, type, season, episode, onLog);
+  // Fallback: OpenSubtitles
+  onLog('[subtitle] Mencari subtitle di OpenSubtitles...');
+  const osUrl = await fetchOpenSubtitlesId(title, onLog);
   if (osUrl) {
     const result = await downloadSubtitle(osUrl, destPath, onLog);
     if (result) return result;
   }
 
-  // Strategy 3: If multiple intercepted URLs, try them all (might be multi-language)
+  // Try all intercepted
   if (interceptedUrls.length > 1) {
-    onLog(`[subtitle] Trying ${interceptedUrls.length} intercepted subtitle URLs...`);
     for (const url of interceptedUrls) {
       const result = await downloadSubtitle(url, destPath, onLog);
       if (result) return result;
     }
   }
 
-  onLog('[subtitle] Tidak ada subtitle Indonesia yang tersedia');
+  onLog('[subtitle] Tidak ada subtitle Indonesia tersedia');
   return null;
 }
 
+// ─── FFMPEG DOWNLOAD ──────────────────────────────────────────────────────────
+
 /**
  * Download HLS stream via ffmpeg, optionally muxing subtitle.
- * @param {string} m3u8Url - HLS master/variant playlist URL
- * @param {string} outputPath - destination .mp4 file path (full path with extension)
- * @param {object} headers - HTTP headers (referer, origin, userAgent)
- * @param {string|null} subtitlePath - local .srt/.vtt file to mux, or null
- * @param {function(string)} onLog - progress callback
- * @returns {Promise<string>} actual output file path
+ * @param {string} m3u8Url
+ * @param {string} outputPath - full .mp4 path
+ * @param {object} headers
+ * @param {string|null} subtitlePath
+ * @param {function(string)} onLog
+ * @returns {Promise<string>}
  */
 function downloadHlsWithFfmpeg(m3u8Url, outputPath, headers = {}, subtitlePath = null, onLog = () => {}) {
   return new Promise((resolve, reject) => {
-    // Build ffmpeg headers string
     const headerParts = [];
     if (headers.referer) headerParts.push(`Referer: ${headers.referer}`);
     if (headers.origin) headerParts.push(`Origin: ${headers.origin}`);
     headerParts.push(`User-Agent: ${headers.userAgent || UA}`);
     const headerStr = headerParts.join('\r\n');
 
-    const args = [
-      '-y',
-      '-headers', headerStr,
-      '-i', m3u8Url,
-    ];
+    const args = ['-y', '-headers', headerStr, '-i', m3u8Url];
 
-    // Add subtitle input if available
     if (subtitlePath && fs.existsSync(subtitlePath)) {
       args.push('-i', subtitlePath);
     }
 
-    args.push(
-      '-c:v', 'copy',
-      '-c:a', 'copy',
-      '-bsf:a', 'aac_adtstoasc',
-    );
+    args.push('-c:v', 'copy', '-c:a', 'copy', '-bsf:a', 'aac_adtstoasc');
 
-    // Mux subtitle as soft-sub (mov_text for mp4 container)
     if (subtitlePath && fs.existsSync(subtitlePath)) {
-      args.push('-c:s', 'mov_text');
-      args.push('-metadata:s:s:0', 'language=ind');
-      args.push('-metadata:s:s:0', 'title=Indonesia');
+      args.push('-c:s', 'mov_text', '-metadata:s:s:0', 'language=ind', '-metadata:s:s:0', 'title=Indonesia');
     }
 
-    args.push(
-      '-movflags', '+faststart',
-      '-timeout', '30000000',
-      '-reconnect', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
-      outputPath,
-    );
+    args.push('-movflags', '+faststart', '-timeout', '30000000',
+      '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5', outputPath);
 
     onLog(`[ffmpeg] Starting download...`);
     const proc = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -498,41 +452,30 @@ function downloadHlsWithFfmpeg(m3u8Url, outputPath, headers = {}, subtitlePath =
     let duration = 0;
 
     proc.stderr.on('data', (chunk) => {
-      const text = chunk.toString();
-      const lines = text.split('\n').filter(l => l.trim());
-
+      const lines = chunk.toString().split('\n').filter(l => l.trim());
       for (const line of lines) {
         lastLine = line;
-
-        // Parse duration from stream info: Duration: 01:32:45.67
         const durMatch = line.match(/Duration:\s*(\d+):(\d+):(\d+)/);
         if (durMatch) {
           duration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseInt(durMatch[3]);
         }
-
-        // Parse progress: time=00:05:23.45
         const timeMatch = line.match(/time=(\d+):(\d+):(\d+)/);
         if (timeMatch && duration > 0) {
           const current = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
           const pct = Math.min(99, Math.round((current / duration) * 100));
-          // Parse speed and size
           const sizeMatch = line.match(/size=\s*([\d]+\w*)/);
           const speedMatch = line.match(/speed=([\d.]+x)/);
-          const size = sizeMatch ? sizeMatch[1] : '?';
-          const speed = speedMatch ? speedMatch[1] : '?';
-          onLog(`[download] ${pct}% | size=${size} | speed=${speed}`);
+          onLog(`[download] ${pct}% | size=${sizeMatch?.[1] || '?'} | speed=${speedMatch?.[1] || '?'}`);
         }
       }
     });
 
-    proc.stdout.on('data', () => {}); // drain stdout
+    proc.stdout.on('data', () => {});
 
     proc.on('close', (code) => {
-      if (code !== 0) {
-        return reject(new Error(`ffmpeg exit ${code}: ${lastLine.slice(0, 200)}`));
-      }
+      if (code !== 0) return reject(new Error(`ffmpeg exit ${code}: ${lastLine.slice(0, 200)}`));
       if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size < 1024) {
-        return reject(new Error('ffmpeg selesai tapi file output kosong/tidak ada'));
+        return reject(new Error('ffmpeg selesai tapi file output kosong'));
       }
       onLog(`[ffmpeg] Download complete!`);
       resolve(outputPath);
@@ -542,55 +485,56 @@ function downloadHlsWithFfmpeg(m3u8Url, outputPath, headers = {}, subtitlePath =
       reject(new Error(`ffmpeg spawn error: ${err.message}. Pastikan ffmpeg ter-install.`));
     });
 
-    // Timeout: 30 minutes max
+    // Timeout 30 min
     setTimeout(() => {
       try { proc.kill('SIGTERM'); } catch (_) {}
-      reject(new Error('ffmpeg timeout (30 menit) — file mungkin terlalu besar atau koneksi lambat'));
+      reject(new Error('ffmpeg timeout (30 menit)'));
     }, 30 * 60 * 1000);
   });
 }
 
+// ─── MAIN DOWNLOAD ORCHESTRATOR ──────────────────────────────────────────────
+
 /**
- * Download video via Playwright HLS interception + ffmpeg.
- * Main entry point replacing the old yt-dlp approach.
+ * Full download pipeline: scrape embed URL → Playwright intercept → ffmpeg download.
  *
- * @param {string} url - VidSrc embed URL (used to extract TMDB ID + type)
+ * @param {string} filmUrl - full IDLIX page URL (e.g. https://pafisangirjujuan.org/some-film-2026/)
  * @param {string} outputPath - destination file path (without extension)
- * @param {string} quality - '1080', '720', '480', '360'
- * @param {function(string)} onLog - callback for progress lines
+ * @param {function(string)} onLog - progress callback
  * @returns {Promise<string>} actual output file path (.mp4)
  */
-async function downloadWithPlaywright(url, outputPath, quality = '720', onLog = null) {
+async function downloadFromIdlix(filmUrl, outputPath, onLog = null) {
   const logFn = onLog || (() => {});
 
-  // Extract TMDB ID from VidSrc URL
-  const tmdbMatch = url.match(/\/embed\/(movie|tv)\/(\d+)(?:\/(\d+)\/(\d+))?/);
-  if (!tmdbMatch) throw new Error('Cannot parse TMDB ID from VidSrc URL');
+  // Step 1: Scrape halaman film untuk dapat embed URL
+  logFn('[info] Mengambil halaman film...');
+  const detail = await getDetail(filmUrl);
 
-  const [, type, tmdbId, season, episode] = tmdbMatch;
+  if (!detail.embedUrl) {
+    throw new Error(`Tidak ditemukan embed player di halaman: ${filmUrl}\nHalaman mungkin belum punya video atau format berbeda.`);
+  }
 
-  // Step 1: Intercept .m3u8 + subtitle via Playwright
+  logFn(`[info] Embed player: ${detail.embedUrl.slice(0, 80)}`);
+
+  // Step 2: Intercept .m3u8 via Playwright
   logFn('[info] Launching browser untuk intercept HLS stream...');
-  const { m3u8Url, headers, subtitleUrls } = await interceptM3u8(type, parseInt(tmdbId), season ? parseInt(season) : null, episode ? parseInt(episode) : null, logFn);
+  const { m3u8Url, headers, subtitleUrls } = await interceptM3u8(detail.embedUrl, logFn);
 
-  // Step 2: Get Indonesian subtitle (from player intercept or OpenSubtitles fallback)
+  // Step 3: Get subtitle
   logFn('[info] Mencari subtitle Indonesia...');
   const subPath = await getIndonesianSubtitle(
     subtitleUrls || [],
-    parseInt(tmdbId),
-    type,
-    season ? parseInt(season) : null,
-    episode ? parseInt(episode) : null,
+    detail.title,
     `${outputPath}_sub`,
     logFn
   );
 
-  // Step 3: Download via ffmpeg (with subtitle muxed if available)
-  logFn('[info] Stream ditemukan! Memulai download via ffmpeg...');
+  // Step 4: Download via ffmpeg
+  logFn('[info] Memulai download via ffmpeg...');
   const mp4Path = `${outputPath}.mp4`;
   const result = await downloadHlsWithFfmpeg(m3u8Url, mp4Path, headers, subPath, logFn);
 
-  // Cleanup subtitle temp file
+  // Cleanup subtitle temp
   if (subPath && fs.existsSync(subPath)) {
     try { fs.unlinkSync(subPath); } catch (_) {}
   }
@@ -600,10 +544,9 @@ async function downloadWithPlaywright(url, outputPath, quality = '720', onLog = 
 
 module.exports = {
   search,
-  getSeriesDetail,
-  getEpisodes,
-  buildVidSrcUrl,
-  downloadWithPlaywright,
-  checkFfmpeg,
+  getDetail,
+  getSeriesEpisodes,
+  downloadFromIdlix,
   interceptM3u8,
+  checkFfmpeg,
 };
