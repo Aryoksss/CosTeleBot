@@ -3,6 +3,10 @@
  * Mega.nz resolver + streaming downloader.
  * Uses megajs library to handle Mega's client-side encryption.
  *
+ * Authentication:
+ *   - Anonymous (default): kena quota global Mega yang di-share semua user IP, sering kena limit
+ *   - Login (optional, set env MEGA_EMAIL + MEGA_PASSWORD): quota per-akun (20GB/bulan free tier)
+ *
  * Supports:
  *   - Direct Mega links: https://mega.nz/file/XXX#KEY or https://mega.nz/#!XXX!KEY
  *   - Redirector links: https://link.desustream.com/?id=... (follows 302)
@@ -21,6 +25,41 @@ function getMegajs() {
     }
   }
   return megajs;
+}
+
+// Cache login session — hanya login sekali per-restart bot, reuse storage.api untuk semua download
+let _loggedStorage = null;
+let _loginPromise = null;
+
+async function getLoggedStorage() {
+  if (_loggedStorage) return _loggedStorage;
+  if (_loginPromise) return _loginPromise; // concurrent login attempt → share promise
+
+  const email = process.env.MEGA_EMAIL;
+  const password = process.env.MEGA_PASSWORD;
+  if (!email || !password) return null; // no credentials → anonymous mode
+
+  const { Storage } = getMegajs();
+
+  _loginPromise = new Promise((resolve, reject) => {
+    const storage = new Storage({ email, password, userAgent: 'CosTeleBot/1.0' }, (err) => {
+      if (err) {
+        console.error(`\x1b[31m[ERROR]\x1b[0m [Mega] Login gagal: ${err.message}`);
+        _loginPromise = null;
+        return reject(err);
+      }
+      console.log(`\x1b[32m[OK]\x1b[0m    [Mega] Login berhasil sebagai ${email}`);
+      _loggedStorage = storage;
+      resolve(storage);
+    });
+  });
+
+  try {
+    return await _loginPromise;
+  } catch (_) {
+    _loginPromise = null;
+    return null;
+  }
 }
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
@@ -52,14 +91,26 @@ async function resolveRedirector(url) {
 }
 
 /**
+ * Create a File object using logged API (if credentials set) or anonymous.
+ */
+async function createFile(megaUrl) {
+  const { File } = getMegajs();
+  const storage = await getLoggedStorage();
+  if (storage) {
+    return File.fromURL(megaUrl, { api: storage.api });
+  }
+  const file = File.fromURL(megaUrl);
+  file.api.userAgent = 'CosTeleBot/1.0';
+  return file;
+}
+
+/**
  * Get metadata (name + size) for a Mega shared link.
  * @returns {{name, size}}
  */
 async function getInfo(megaUrl) {
-  const { File } = getMegajs();
   const resolvedUrl = await resolveRedirector(megaUrl) || megaUrl;
-  const file = File.fromURL(resolvedUrl);
-  file.api.userAgent = 'CosTeleBot/1.0';
+  const file = await createFile(resolvedUrl);
   await file.loadAttributes();
   return { name: file.name, size: file.size, file };
 }
@@ -72,11 +123,9 @@ async function getInfo(megaUrl) {
  */
 async function downloadMega(megaUrl, destPath, onProgress) {
   const fs = require('fs');
-  const { File } = getMegajs();
 
   const resolvedUrl = await resolveRedirector(megaUrl) || megaUrl;
-  const file = File.fromURL(resolvedUrl);
-  file.api.userAgent = 'CosTeleBot/1.0';
+  const file = await createFile(resolvedUrl);
   await file.loadAttributes();
 
   const totalSize = file.size;
@@ -114,4 +163,11 @@ async function downloadMega(megaUrl, destPath, onProgress) {
   });
 }
 
-module.exports = { getInfo, downloadMega, resolveRedirector };
+/**
+ * Check if logged-in (for health check display).
+ */
+function isLoggedIn() {
+  return !!_loggedStorage;
+}
+
+module.exports = { getInfo, downloadMega, resolveRedirector, isLoggedIn };

@@ -2787,7 +2787,14 @@ async function doAnimeMegaDownload(bot, chatId, qualityIdx) {
       await rimraf(tmpDir);
     } catch (err) {
       log.error(`[Anime-Mega] download error: ${err.message}`);
-      status(`❌ Download gagal: ${escHtml(err.message.slice(0, 200))}`).catch(() => {});
+      let msg = err.message.slice(0, 200);
+      if (/bandwidth|quota|limit/i.test(err.message)) {
+        msg = `Mega quota kena limit. Solusi:\n` +
+              `1. Tunggu ${Math.ceil((err.message.match(/(\d+)\s*second/i)?.[1] || 3600) / 60)} menit sampai reset, atau\n` +
+              `2. Set env MEGA_EMAIL + MEGA_PASSWORD di .env (pakai akun Mega gratis, 20GB/bulan per-akun)\n\n` +
+              `Original error: ${err.message.slice(0, 150)}`;
+      }
+      status(`❌ Download gagal:\n${escHtml(msg)}`).catch(() => {});
     }
   }, bot);
 }
