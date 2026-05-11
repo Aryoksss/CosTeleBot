@@ -4840,11 +4840,15 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       const seasons = [
         { label: '🌸 Spring 2026', slug: 'spring-2026' },
-        { label: '☀️ Summer 2025', slug: 'summer-2025' },
-        { label: '🍁 Fall 2025', slug: 'fall-2025' },
         { label: '❄️ Winter 2026', slug: 'winter-2026' },
+        { label: '🍁 Fall 2025', slug: 'fall-2025' },
+        { label: '☀️ Summer 2025', slug: 'summer-2025' },
         { label: '🌸 Spring 2025', slug: 'spring-2025' },
         { label: '❄️ Winter 2025', slug: 'winter-2025' },
+        { label: '🍁 Fall 2024', slug: 'fall-2024' },
+        { label: '☀️ Summer 2024', slug: 'summer-2024' },
+        { label: '🎬 Movie', slug: 'movie' },
+        { label: '📺 OVA', slug: 'ova' },
       ];
       const keyboard = [];
       for (let i = 0; i < seasons.length; i += 2) {
@@ -4873,6 +4877,7 @@ function startBot() {
         'action', 'adventure', 'comedy', 'drama', 'fantasy', 'romance',
         'sci-fi', 'slice-of-life', 'supernatural', 'thriller', 'horror', 'mystery',
         'magic', 'mecha', 'sports', 'shounen', 'seinen', 'ecchi',
+        'harem', 'school', 'music', 'historical', 'psychological', 'game',
       ];
       const keyboard = [];
       for (let i = 0; i < genres.length; i += 3) {
