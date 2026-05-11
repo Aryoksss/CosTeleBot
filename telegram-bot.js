@@ -173,7 +173,6 @@ const hostResolver = require('./scrapers/hostResolver');
 const megaResolver = require('./scrapers/megaResolver');
 const kusonimeScraper = require('./scrapers/kusonime');
 const gdriveResolver = require('./scrapers/gdriveResolver');
-const idlixScraper = require('./scrapers/idlix');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
@@ -414,7 +413,6 @@ const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, 
 const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const eroBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const animeBrowseCache = new Map(); // chatId -> { results, episodes, seriesIdx, oploLinks, oploEpNum }
-const idlixBrowseCache = new Map(); // chatId -> { results, seriesDetail, selectedId, selectedType }
 const aggregateCache = new Map(); // chatId -> { query, sources: { cosplay: [], r34: [], pinterest: [] } }
 
 // Last-seen timestamp untuk TTL cleanup agar Map di atas tidak tumbuh monotonic seumur uptime VPS.
@@ -424,7 +422,7 @@ function touchState(chatId) {
 }
 // Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
 // Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
-for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, animeBrowseCache, idlixBrowseCache, aggregateCache]) {
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, animeBrowseCache, aggregateCache]) {
   const origSet = m.set.bind(m);
   m.set = (key, value) => {
     touchState(key);
@@ -3164,144 +3162,6 @@ async function doAnimeKusoDownload(bot, chatId, qualityIdx, hostType) {
   }, bot);
 }
 
-// ─── IDLIX / FILM & SERIES ───────────────────────────────────────────────────
-
-/**
- * Search film/series di IDLIX site, show results.
- */
-async function doIdlixSearch(bot, chatId, query) {
-  log.info(`[IDLIX] user ${chatId} search="${query}"`);
-  const loadMsg = await bot.sendMessage(chatId, `🎬 <b>Mencari "${escHtml(query)}"...</b>`, { parse_mode: 'HTML' });
-
-  try {
-    const results = await idlixScraper.search(query);
-    if (!results.length) {
-      return bot.editMessageText(`😕 Tidak ditemukan film/series untuk "${escHtml(query)}".`, {
-        chat_id: chatId, message_id: loadMsg.message_id,
-        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'idlix_menu' }]] },
-      });
-    }
-
-    idlixBrowseCache.set(chatId, { results });
-
-    let text = `🎬 <b>Hasil Pencarian IDLIX</b>\n<i>"${escHtml(query)}"</i>\n\n`;
-    const keyboard = [];
-    results.forEach((r, i) => {
-      const typeIcon = r.type === 'tv' ? '📺' : '🎬';
-      const year = r.year ? ` (${r.year})` : '';
-      const qual = r.quality ? ` [${r.quality}]` : '';
-      text += `${i + 1}. ${typeIcon} <b>${escHtml(r.title)}</b>${year}${qual}\n`;
-      keyboard.push([{ text: `${typeIcon} ${r.title.slice(0, 45)}${year}`, callback_data: `idlix_sel_${i}` }]);
-    });
-
-    await bot.editMessageText(text, {
-      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: [...keyboard, [{ text: '🔙 Menu', callback_data: 'idlix_menu' }]] },
-    });
-  } catch (err) {
-    log.error(`[IDLIX] search error: ${err.message}`);
-    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
-      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-    }).catch(() => {});
-  }
-}
-
-/**
- * Show detail for selected film — langsung download (IDLIX embed sudah 1080p).
- */
-async function doIdlixDetail(bot, chatId, resultIndex) {
-  const cache = idlixBrowseCache.get(chatId);
-  const item = cache?.results?.[resultIndex];
-  if (!item) return bot.sendMessage(chatId, '❌ Data tidak ditemukan, coba search ulang.');
-
-  // Store selected film URL for download
-  idlixBrowseCache.set(chatId, { ...cache, selectedUrl: item.url, selectedTitle: item.title });
-
-  let text = `🎬 <b>${escHtml(item.title)}</b>`;
-  if (item.year) text += ` (${item.year})`;
-  if (item.quality) text += ` [${escHtml(item.quality)}]`;
-  text += `\n\n⬇️ Klik tombol di bawah untuk download:`;
-
-  const keyboard = [
-    [{ text: '⬇️ Download Film', callback_data: 'idlix_dl_start' }],
-    [{ text: '🔙 Kembali ke hasil', callback_data: 'idlix_back_search' }],
-  ];
-
-  await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
-}
-
-/**
- * Execute download: scrape embed → Playwright intercept → ffmpeg.
- */
-async function doIdlixDownload(bot, chatId) {
-  const cache = idlixBrowseCache.get(chatId);
-  if (!cache?.selectedUrl) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
-
-  if (!idlixScraper.checkFfmpeg()) {
-    return bot.sendMessage(chatId,
-      `❌ <b>ffmpeg tidak ter-install di VPS.</b>\n\nInstall:\n<code>apt install ffmpeg</code>`,
-      { parse_mode: 'HTML' }
-    );
-  }
-
-  const title = cache.selectedTitle || 'Film';
-  const filmUrl = cache.selectedUrl;
-
-  queueManager.addJob(chatId, title, async (jobId) => {
-    let statusMsg = null;
-    const status = async (txt) => {
-      try {
-        if (statusMsg) await bot.editMessageText(txt, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' });
-        else statusMsg = await bot.sendMessage(chatId, txt, { parse_mode: 'HTML' });
-      } catch (_) {}
-    };
-
-    try {
-      await status(`⏳ <b>Memproses ${escHtml(title)}...</b>\n<i>Scraping embed player dari IDLIX...</i>`);
-
-      const tmpDir = path.join(CONFIG.TEMP_DIR, `idlix_${Date.now()}`);
-      await fsp.mkdir(tmpDir, { recursive: true });
-      const safeTitle = title.replace(/[^\w\s\-]/g, '').slice(0, 80).trim();
-      const outputBase = path.join(tmpDir, safeTitle || 'film');
-
-      const dlStartedAt = Date.now();
-      const throttle = createProgressThrottler(3000);
-
-      const filePath = await idlixScraper.downloadFromIdlix(filmUrl, outputBase, (line) => {
-        const m = line.match(/\[download\]\s+(\d+)%.*?size=([\w?]+).*?speed=([\w?.]+)/);
-        if (m) {
-          const pct = parseInt(m[1]);
-          const size = m[2];
-          const speed = m[3];
-          throttle(() => {
-            const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
-            status(`⬇️ <b>${escHtml(title)}</b>\n<code>${bar} ${pct}%</code>\n<code>Size: ${size} · Speed: ${speed}</code>`);
-          });
-        } else if (line.includes('[info]')) {
-          throttle(() => {
-            status(`🔍 <b>${escHtml(title)}</b>\n<i>${escHtml(line.replace('[info] ', '').slice(0, 100))}</i>`);
-          });
-        } else if (line.includes('[ffmpeg]')) {
-          throttle(() => { status(`🔧 <b>Downloading stream...</b>`); });
-        }
-      });
-
-      const fileSizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(1);
-      await status(`📤 <b>Uploading ${escHtml(title)}</b>\n${fileSizeMB} MB ke Telegram...`);
-
-      await sendOne(bot, chatId, filePath, `🎬 ${title}`);
-      await status(`✅ <b>${escHtml(title)}</b> selesai! (${fileSizeMB} MB)`);
-      await rimraf(tmpDir);
-    } catch (err) {
-      log.error(`[IDLIX] download error: ${err.message}`);
-      let msg = err.message.slice(0, 400);
-      if (msg.includes('spawn error')) msg += '\n\nPastikan ffmpeg ter-install: apt install ffmpeg';
-      if (msg.includes('Tidak ditemukan embed')) msg += '\n\n💡 Halaman mungkin belum punya video.';
-      status(`❌ Download gagal:\n${escHtml(msg)}`).catch(() => {});
-    }
-  }, bot);
-}
-
 // ─── SMART / AGGREGATE SEARCH ────────────────────────────────────────────────
 /**
  * Tampilkan menu "pilih sumber" untuk query yang di-detect dari pesan bebas user.
@@ -3317,7 +3177,6 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
   if (preferredSource === 'jav') return doJavBrowse(bot, chatId, query, 1);
   if (preferredSource === 'ero') return doEroBrowse(bot, chatId, query, 1);
   if (preferredSource === 'anime') return doAnimeSearch(bot, chatId, query);
-  if (preferredSource === 'film') return doIdlixSearch(bot, chatId, query);
 
   // 'all' atau tidak ada preference → tanya user dulu
   const text = `🤖 <b>Smart Search</b>\n\nKetemu query: <b>${escHtml(query)}</b>\n\nPilih sumber pencarian:`;
@@ -3332,7 +3191,6 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
     ],
     [{ text: '🔥 EroThots', callback_data: `ssrc_ero` }],
     [{ text: '🎌 Anime (Otakudesu+Oploverz)', callback_data: `ssrc_anime` }],
-    [{ text: '🎬 Film & Series (IDLIX)', callback_data: `ssrc_film` }],
     [{ text: '🌐 Cari di Semua Sumber', callback_data: `ssrc_all` }],
     [{ text: '❌ Batal', callback_data: 'menu_awal' }],
   ];
@@ -3627,11 +3485,10 @@ async function sendMainMenu(bot, chatId) {
     ],
     [
       { text: '🎌 Anime', callback_data: 'anime_menu' },
-      { text: '🎬 Film/Series', callback_data: 'idlix_menu' },
     ],
     [
       { text: '🔎 Smart Search', callback_data: 'menu_search' },
-      { text: '📊 Profile', callback_data: 'menu_profile' },
+      { text: '� Profile', callback_data: 'menu_profile' },
     ],
     [
       { text: '📥 Terabox DL', callback_data: 'menu_terabox' },
@@ -3676,7 +3533,6 @@ function startBot() {
     { command: '/jav', description: '🎥 Javtiful Search' },
     { command: '/ero', description: '🔥 EroThots Search' },
     { command: '/anime', description: '🎌 Anime Search (Otakudesu + Oploverz + Kusonime)' },
-    { command: '/film', description: '🎬 Film & Series (IDLIX via VidSrc)' },
     { command: '/search', description: 'Cari Karakter / Album Cosplay' },
     { command: '/tasks', description: '🚦 Pantau Dasbor Antrean' },
     { command: '/stats', description: '🔰 Lihat Profil' },
@@ -3844,29 +3700,6 @@ function startBot() {
         `🎌 <b>Anime Search</b> (Otakudesu + Oploverz)\n\n` +
         `Ketik judul anime yang ingin dicari.\n` +
         `Contoh: <code>one piece</code>, <code>slime</code>, <code>dr stone</code>`,
-        {
-          parse_mode: 'HTML',
-          reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
-        }
-      );
-      autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
-    }
-  });
-
-  // ─── FILM / IDLIX ──────────────────────────────────────────────────────────
-  bot.onText(/^\/film(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    const query = match[1] && match[1].trim();
-    if (query) {
-      log.info(`[User ${msg.chat.id}] Execute /film search: ${query}`);
-      doIdlixSearch(bot, msg.chat.id, query);
-    } else {
-      log.info(`[User ${msg.chat.id}] Execute /film (prompt)`);
-      userStates.set(msg.chat.id, { step: 'AWAITING_IDLIX_SEARCH' });
-      const sentMsg = await bot.sendMessage(msg.chat.id,
-        `🎬 <b>Film & Series Search</b>\n<i>Powered by TMDB + VidSrc</i>\n\n` +
-        `Ketik judul film atau series.\n` +
-        `Contoh: <code>avengers</code>, <code>the boys</code>, <code>dr stone</code>`,
         {
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
@@ -4238,14 +4071,6 @@ function startBot() {
       userStates.delete(chatId);
       log.info(`[User ${chatId}] Pencarian Anime: ${text}`);
       doAnimeSearch(bot, chatId, text);
-      return;
-    }
-
-    // If awaiting Film/IDLIX search query
-    if (state && state.step === 'AWAITING_IDLIX_SEARCH') {
-      userStates.delete(chatId);
-      log.info(`[User ${chatId}] Pencarian Film: ${text}`);
-      doIdlixSearch(bot, chatId, text);
       return;
     }
 
@@ -4641,7 +4466,6 @@ function startBot() {
       if (src === 'jav') return doJavBrowse(bot, chatId, q, 1);
       if (src === 'ero') return doEroBrowse(bot, chatId, q, 1);
       if (src === 'anime') return doAnimeSearch(bot, chatId, q);
-      if (src === 'film') return doIdlixSearch(bot, chatId, q);
       if (src === 'all') return doAggregateSearch(bot, chatId, q);
       return;
     }
@@ -5012,239 +4836,6 @@ function startBot() {
       const slug = action.replace('anm_genre_', '');
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doAnimeGenre(bot, chatId, slug);
-    }
-
-    // ─── IDLIX / FILM CALLBACKS ────────────────────────────────────────────────
-    if (action === 'idlix_menu') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      const sentMsg = await bot.sendMessage(chatId,
-        `🎬 <b>Film & Series Hub</b>\n<i>IDLIX + Playwright + ffmpeg</i>\n\nPilih mode:`,
-        {
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '🔍 Search Film/Series', callback_data: 'idlix_search_prompt' }],
-              [
-                { text: '🎲 Gacha Film', callback_data: 'idlix_gacha_movie' },
-                { text: '🎲 Gacha Series', callback_data: 'idlix_gacha_tv' },
-              ],
-              [
-                { text: '🔥 Trending Film', callback_data: 'idlix_trending_movie' },
-                { text: '📺 Trending Series', callback_data: 'idlix_trending_tv' },
-              ],
-              [
-                { text: '🆕 Film Terbaru', callback_data: 'idlix_latest_movie' },
-                { text: '🆕 Series Terbaru', callback_data: 'idlix_latest_tv' },
-              ],
-              [{ text: '🏷️ Browse Genre', callback_data: 'idlix_genre_menu' }],
-              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
-            ]
-          }
-        }
-      );
-      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
-      return;
-    }
-    if (action === 'idlix_search_prompt') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      userStates.set(chatId, { step: 'AWAITING_IDLIX_SEARCH' });
-      const sentMsg = await bot.sendMessage(chatId,
-        `🎬 <b>Film & Series Search</b>\n\nKetik judul film atau series:`,
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'idlix_menu' }]] } }
-      );
-      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
-      return;
-    }
-    if (action === 'idlix_trending_movie' || action === 'idlix_trending_tv') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      const type = action === 'idlix_trending_movie' ? 'movie' : 'tv';
-      const loadMsg = await bot.sendMessage(chatId, `🔥 <b>Memuat trending ${type === 'movie' ? 'film' : 'series'}...</b>`, { parse_mode: 'HTML' });
-      try {
-        const { data } = await require('axios').get(`https://api.themoviedb.org/3/trending/${type}/week`, {
-          params: { api_key: '8265bd1679663a7ea12ac168da84d2e8', language: 'id-ID' },
-          timeout: 15000,
-        });
-        const results = (data.results || []).slice(0, 10).map(r => ({
-          id: r.id, title: r.title || r.name, type, year: (r.release_date || r.first_air_date || '').slice(0, 4),
-          overview: (r.overview || '').slice(0, 150), poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
-          rating: r.vote_average?.toFixed(1), source: 'idlix',
-        }));
-        idlixBrowseCache.set(chatId, { results });
-        let text = `🔥 <b>Trending ${type === 'movie' ? 'Film' : 'Series'}</b>\n\n`;
-        const keyboard = [];
-        results.forEach((r, i) => {
-          const icon = type === 'movie' ? '🎬' : '📺';
-          text += `${i + 1}. ${icon} <b>${escHtml(r.title)}</b> (${r.year}) ⭐${r.rating}\n`;
-          keyboard.push([{ text: `${icon} ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
-        });
-        keyboard.push([{ text: '🔙 Menu', callback_data: 'idlix_menu' }]);
-        await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
-      } catch (err) {
-        bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
-      }
-      return;
-    }
-    // Gacha: random pick dari popular/top_rated
-    if (action === 'idlix_gacha_movie' || action === 'idlix_gacha_tv') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      const type = action === 'idlix_gacha_movie' ? 'movie' : 'tv';
-      const loadMsg = await bot.sendMessage(chatId, `🎲 <b>Gacha ${type === 'movie' ? 'Film' : 'Series'}...</b>`, { parse_mode: 'HTML' });
-      try {
-        const randomPage = Math.floor(Math.random() * 20) + 1;
-        const { data } = await require('axios').get(`https://api.themoviedb.org/3/${type}/popular`, {
-          params: { api_key: '8265bd1679663a7ea12ac168da84d2e8', language: 'id-ID', page: randomPage },
-          timeout: 15000,
-        });
-        const pool = (data.results || []);
-        pool.sort(() => Math.random() - 0.5);
-        const results = pool.slice(0, 5).map(r => ({
-          id: r.id, title: r.title || r.name, type, year: (r.release_date || r.first_air_date || '').slice(0, 4),
-          overview: (r.overview || '').slice(0, 150), poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
-          rating: r.vote_average?.toFixed(1), source: 'idlix',
-        }));
-        idlixBrowseCache.set(chatId, { results });
-        let text = `🎲 <b>Gacha ${type === 'movie' ? 'Film' : 'Series'}</b>\n\n`;
-        const keyboard = [];
-        results.forEach((r, i) => {
-          const icon = type === 'movie' ? '🎬' : '📺';
-          text += `${i + 1}. ${icon} <b>${escHtml(r.title)}</b> (${r.year}) ⭐${r.rating}\n`;
-          keyboard.push([{ text: `${icon} ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
-        });
-        keyboard.push([
-          { text: '🔄 Reroll', callback_data: action },
-          { text: '🔙 Menu', callback_data: 'idlix_menu' },
-        ]);
-        await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
-      } catch (err) {
-        bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
-      }
-      return;
-    }
-    // Latest (now playing / on air)
-    if (action === 'idlix_latest_movie' || action === 'idlix_latest_tv') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      const type = action === 'idlix_latest_movie' ? 'movie' : 'tv';
-      const endpoint = type === 'movie' ? 'movie/now_playing' : 'tv/on_the_air';
-      const loadMsg = await bot.sendMessage(chatId, `🆕 <b>Memuat ${type === 'movie' ? 'film' : 'series'} terbaru...</b>`, { parse_mode: 'HTML' });
-      try {
-        const { data } = await require('axios').get(`https://api.themoviedb.org/3/${endpoint}`, {
-          params: { api_key: '8265bd1679663a7ea12ac168da84d2e8', language: 'id-ID' },
-          timeout: 15000,
-        });
-        const results = (data.results || []).slice(0, 10).map(r => ({
-          id: r.id, title: r.title || r.name, type, year: (r.release_date || r.first_air_date || '').slice(0, 4),
-          overview: (r.overview || '').slice(0, 150), poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
-          rating: r.vote_average?.toFixed(1), source: 'idlix',
-        }));
-        idlixBrowseCache.set(chatId, { results });
-        let text = `🆕 <b>${type === 'movie' ? 'Film' : 'Series'} Terbaru</b>\n\n`;
-        const keyboard = [];
-        results.forEach((r, i) => {
-          const icon = type === 'movie' ? '🎬' : '📺';
-          text += `${i + 1}. ${icon} <b>${escHtml(r.title)}</b> (${r.year}) ⭐${r.rating}\n`;
-          keyboard.push([{ text: `${icon} ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
-        });
-        keyboard.push([{ text: '🔙 Menu', callback_data: 'idlix_menu' }]);
-        await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
-      } catch (err) {
-        bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
-      }
-      return;
-    }
-    // Genre menu
-    if (action === 'idlix_genre_menu') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      // TMDB genre IDs for movies
-      const genres = [
-        { id: 28, name: 'Action' }, { id: 12, name: 'Adventure' }, { id: 16, name: 'Animation' },
-        { id: 35, name: 'Comedy' }, { id: 80, name: 'Crime' }, { id: 18, name: 'Drama' },
-        { id: 14, name: 'Fantasy' }, { id: 27, name: 'Horror' }, { id: 9648, name: 'Mystery' },
-        { id: 10749, name: 'Romance' }, { id: 878, name: 'Sci-Fi' }, { id: 53, name: 'Thriller' },
-        { id: 10752, name: 'War' }, { id: 37, name: 'Western' }, { id: 99, name: 'Documentary' },
-      ];
-      const keyboard = [];
-      for (let i = 0; i < genres.length; i += 3) {
-        const row = [];
-        for (let j = i; j < Math.min(i + 3, genres.length); j++) {
-          row.push({ text: genres[j].name, callback_data: `idlix_genre_${genres[j].id}` });
-        }
-        keyboard.push(row);
-      }
-      keyboard.push([{ text: '🔙 Kembali', callback_data: 'idlix_menu' }]);
-      const sentMsg = await bot.sendMessage(chatId, `🏷️ <b>Browse by Genre</b>\n<i>Film (TMDB)</i>\n\nPilih genre:`, {
-        parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard },
-      });
-      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
-      return;
-    }
-    if (action.startsWith('idlix_genre_')) {
-      const genreId = action.replace('idlix_genre_', '');
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      const loadMsg = await bot.sendMessage(chatId, `🏷️ <b>Memuat genre...</b>`, { parse_mode: 'HTML' });
-      try {
-        const { data } = await require('axios').get(`https://api.themoviedb.org/3/discover/movie`, {
-          params: { api_key: '8265bd1679663a7ea12ac168da84d2e8', language: 'id-ID', with_genres: genreId, sort_by: 'popularity.desc' },
-          timeout: 15000,
-        });
-        const results = (data.results || []).slice(0, 10).map(r => ({
-          id: r.id, title: r.title || r.name, type: 'movie', year: (r.release_date || '').slice(0, 4),
-          overview: (r.overview || '').slice(0, 150), poster: r.poster_path ? `https://image.tmdb.org/t/p/w500${r.poster_path}` : null,
-          rating: r.vote_average?.toFixed(1), source: 'idlix',
-        }));
-        idlixBrowseCache.set(chatId, { results });
-        let text = `🏷️ <b>Genre Browse</b>\n\n`;
-        const keyboard = [];
-        results.forEach((r, i) => {
-          text += `${i + 1}. 🎬 <b>${escHtml(r.title)}</b> (${r.year}) ⭐${r.rating}\n`;
-          keyboard.push([{ text: `🎬 ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
-        });
-        keyboard.push([
-          { text: '🔄 Reroll', callback_data: action },
-          { text: '🔙 Genre', callback_data: 'idlix_genre_menu' },
-        ]);
-        await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
-      } catch (err) {
-        bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
-      }
-      return;
-    }
-    if (action.startsWith('idlix_sel_')) {
-      const idx = parseInt(action.replace('idlix_sel_', ''), 10);
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return doIdlixDetail(bot, chatId, idx);
-    }
-    if (action.startsWith('idlix_season_')) {
-      const seasonNum = parseInt(action.replace('idlix_season_', ''), 10);
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return doIdlixSeason(bot, chatId, seasonNum);
-    }
-    if (action.startsWith('idlix_ep_')) {
-      const epNum = parseInt(action.replace('idlix_ep_', ''), 10);
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return doIdlixEpisodePicker(bot, chatId, epNum);
-    }
-    if (action.startsWith('idlix_dl_') || action === 'idlix_dl_start') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return doIdlixDownload(bot, chatId);
-    }
-    if (action === 'idlix_back_search') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      const cache = idlixBrowseCache.get(chatId);
-      if (cache?.results?.length) {
-        let text = `🎬 <b>Hasil Pencarian</b>\n\n`;
-        const keyboard = [];
-        cache.results.forEach((r, i) => {
-          const icon = r.type === 'movie' ? '🎬' : '📺';
-          text += `${i + 1}. ${icon} <b>${escHtml(r.title)}</b> (${r.year})\n`;
-          keyboard.push([{ text: `${icon} ${r.title.slice(0, 45)}`, callback_data: `idlix_sel_${i}` }]);
-        });
-        keyboard.push([{ text: '🔙 Menu', callback_data: 'idlix_menu' }]);
-        await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } });
-      } else {
-        userStates.set(chatId, { step: 'AWAITING_IDLIX_SEARCH' });
-        await bot.sendMessage(chatId, '🎬 Ketik judul film/series:', { reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'idlix_menu' }]] } });
-      }
-      return;
     }
 
     if (action === 'menu_vps') {

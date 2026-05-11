@@ -29,7 +29,7 @@ const log = {
 // Trigger word → extract group 1 = query
 const TRIGGERS = [
   /^(?:bot\s+)?(?:tolong\s+)?(?:cari(?:in|kan)?|nyari|carikan)\s+(.+)/i,
-  /^(?:saya\s+)?(?:pengen|mau|ingin)\s+(?:liat|lihat|cari|nyari|nemu|nonton|download|tonton)\s+(?:cosplay\s+|video\s+|pin\s+|pinterest\s+|anime\s+|film\s+)?(.+)/i,
+  /^(?:saya\s+)?(?:pengen|mau|ingin)\s+(?:liat|lihat|cari|nyari|nemu|nonton|download|tonton)\s+(?:cosplay\s+|video\s+|pin\s+|pinterest\s+|anime\s+)?(.+)/i,
   /^(?:saya\s+)?(?:mau|pengen|ingin)\s+(?:nonton|download|tonton)\s+(.+)/i,
   /^(?:nonton|tonton|download)\s+(?:anime\s+)?(.+)/i,
   /^(?:search(?:\s+for)?|looking\s+for|find(?:\s+me)?|show\s+me)\s+(.+)/i,
@@ -45,7 +45,6 @@ const SOURCE_HINTS = {
   jav: /\b(jav(?:tiful)?|japanese\s+adult|jav\s*video)\b/i,
   ero: /\b(erothots?|ero\s*thots?|onlyfans?\s*leaks?)\b/i,
   anime: /\b(anime|otakudesu|oploverz|streaming\s*anime|sub\s*indo|nonton\s*anime)\b/i,
-  film: /\b(film|movie|series|serial|drakor|drama\s*korea|netflix|bioskop|idlix|lk21|rebahin|nonton\s*film|nonton\s*drakor|nonton\s*movie)\b/i,
 };
 
 function detectSourceHint(text) {
@@ -100,12 +99,11 @@ The bot supports these scraping sources:
 - "jav": Javtiful (Japanese adult videos, JAV codes like MIDE-XXX, SSNI-XXX)
 - "ero": EroThots (OnlyFans leaks, adult webcam/amateur videos)
 - "anime": Anime streaming (Otakudesu + Oploverz, sub Indo, episode download)
-- "film": Film & Series (IDLIX via VidSrc, movie/drakor/series download)
 - "all": search all sources at once
 
 Classify user message into intent. Return ONLY a JSON object, no prose, no markdown.
 Schema:
-{ "intent": "search" | "other", "query": "<extracted search query>" | null, "preferred_source": "cosplay" | "r34" | "pinterest" | "jav" | "ero" | "anime" | "film" | "all" | null }
+{ "intent": "search" | "other", "query": "<extracted search query>" | null, "preferred_source": "cosplay" | "r34" | "pinterest" | "jav" | "ero" | "anime" | "all" | null }
 
 Rules:
 - If user wants to find/search something visual/media → intent="search"
@@ -117,7 +115,6 @@ Rules:
 - If user mentions "jav", "javtiful", or JAV code format (e.g., MIDE-232, SSNI-001) → preferred_source="jav"
 - If user mentions "erothots", "onlyfans leak", or adult amateur content → preferred_source="ero"
 - If user mentions "anime", "nonton", "streaming", "sub indo", "episode", or anime titles → preferred_source="anime"
-- If user mentions "film", "movie", "series", "drakor", "drama korea", "netflix", "bioskop", "idlix", "lk21" → preferred_source="film"
 - Non-search messages (greetings, questions unrelated to media, help requests) → intent="other"
 - Keep query in original language, don't translate`;
 
@@ -183,7 +180,7 @@ async function detectIntentLLM(text) {
     if (!parsed || typeof parsed !== 'object') throw new Error('invalid shape');
     const intent = parsed.intent === 'search' ? 'search' : 'other';
     const query = intent === 'search' && typeof parsed.query === 'string' ? parsed.query.trim().slice(0, 150) : null;
-    const validSources = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'anime', 'film', 'all'];
+    const validSources = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'anime', 'all'];
     const preferredSource = validSources.includes(parsed.preferred_source) ? parsed.preferred_source : null;
 
     const result = {
