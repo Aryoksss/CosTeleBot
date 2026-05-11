@@ -409,6 +409,7 @@ const r34BrowseCache = new Map(); // chatId -> { posts: [], page, query }
 const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, prevBookmarks: [] }
 const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const eroBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
+const animeBrowseCache = new Map(); // chatId -> { results, episodes, seriesIdx, oploLinks, oploEpNum }
 const aggregateCache = new Map(); // chatId -> { query, sources: { cosplay: [], r34: [], pinterest: [] } }
 
 // Last-seen timestamp untuk TTL cleanup agar Map di atas tidak tumbuh monotonic seumur uptime VPS.
@@ -418,7 +419,7 @@ function touchState(chatId) {
 }
 // Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
 // Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
-for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, aggregateCache]) {
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, animeBrowseCache, aggregateCache]) {
   const origSet = m.set.bind(m);
   m.set = (key, value) => {
     touchState(key);
@@ -2465,8 +2466,7 @@ async function doAnimeSearch(bot, chatId, query) {
     }
 
     // Cache results
-    const state = touchState(chatId);
-    state.animeResults = unique.slice(0, 20);
+    animeBrowseCache.set(chatId, { results: unique.slice(0, 20) });
 
     let text = `🎌 <b>Hasil Pencarian Anime</b>\n<i>"${escHtml(query)}"</i>\n\n`;
     const keyboard = [];
@@ -2496,8 +2496,8 @@ async function doAnimeSearch(bot, chatId, query) {
  * Show episode list for selected anime.
  */
 async function doAnimeEpisodes(bot, chatId, seriesIndex, page = 1) {
-  const state = touchState(chatId);
-  const series = state.animeResults?.[seriesIndex];
+  const cache = animeBrowseCache.get(chatId);
+  const series = cache?.results?.[seriesIndex];
   if (!series) return bot.sendMessage(chatId, '❌ Data anime tidak ditemukan, coba search ulang.');
 
   const loadMsg = await bot.sendMessage(chatId, `📺 <b>Memuat episode ${escHtml(series.title)}...</b>`, { parse_mode: 'HTML' });
@@ -2531,8 +2531,7 @@ async function doAnimeEpisodes(bot, chatId, seriesIndex, page = 1) {
     }
 
     // Cache episodes
-    state.animeEpisodes = episodes;
-    state.animeSeriesIdx = seriesIndex;
+    animeBrowseCache.set(chatId, { ...cache, episodes, seriesIdx: seriesIndex });
 
     // Paginate: 20 eps per page
     const perPage = 20;
@@ -2577,9 +2576,9 @@ async function doAnimeEpisodes(bot, chatId, seriesIndex, page = 1) {
  * Show quality options for Oploverz episode, or start download for Otakudesu (Gofile).
  */
 async function doAnimeDownload(bot, chatId, epNumber) {
-  const state = touchState(chatId);
-  const episodes = state.animeEpisodes;
-  const series = state.animeResults?.[state.animeSeriesIdx];
+  const cache = animeBrowseCache.get(chatId);
+  const episodes = cache?.episodes;
+  const series = cache?.results?.[cache?.seriesIdx];
   if (!episodes || !series) return bot.sendMessage(chatId, '❌ Data episode hilang, coba search ulang.');
 
   const ep = episodes.find(e => e.number === epNumber);
@@ -2615,8 +2614,7 @@ async function doAnimeDownload(bot, chatId, epNumber) {
     if (links.length === 0) return bot.sendMessage(chatId, '😕 Tidak ada link download tersedia.');
 
     // Cache for callback
-    state.animeOploLinks = links;
-    state.animeOploEpNum = epNumber;
+    animeBrowseCache.set(chatId, { ...cache, oploLinks: links, oploEpNum: epNumber });
 
     let text = `📥 <b>${escHtml(series.title)} - Episode ${epNumber}</b>\n\nPilih kualitas:\n`;
     const keyboard = [];
@@ -2638,10 +2636,10 @@ async function doAnimeDownload(bot, chatId, epNumber) {
  * Execute Oploverz download via host resolver.
  */
 async function doAnimeOploDownload(bot, chatId, linkIndex) {
-  const state = touchState(chatId);
-  const links = state.animeOploLinks;
-  const series = state.animeResults?.[state.animeSeriesIdx];
-  const epNum = state.animeOploEpNum;
+  const cache = animeBrowseCache.get(chatId);
+  const links = cache?.oploLinks;
+  const series = cache?.results?.[cache?.seriesIdx];
+  const epNum = cache?.oploEpNum;
   if (!links || !series) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
 
   const link = links[linkIndex];
@@ -4207,11 +4205,11 @@ function startBot() {
     if (action === 'anm_back_search') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       // Re-show last search results
-      const state = touchState(chatId);
-      if (state.animeResults?.length) {
+      const cache = animeBrowseCache.get(chatId);
+      if (cache?.results?.length) {
         let text = `🎌 <b>Hasil Pencarian Anime</b>\n\n`;
         const keyboard = [];
-        state.animeResults.slice(0, 10).forEach((r, i) => {
+        cache.results.slice(0, 10).forEach((r, i) => {
           const statusTag = r.status === 'Ongoing' ? '🟢' : '✅';
           text += `${i + 1}. ${statusTag} <b>${escHtml(r.title)}</b>\n`;
           keyboard.push([{ text: `${i + 1}. ${r.title.slice(0, 45)}`, callback_data: `anm_sel_${i}` }]);

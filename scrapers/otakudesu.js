@@ -13,7 +13,7 @@ const cheerio = require('cheerio');
 const DOMAINS = () => {
   const env = process.env.OTAKUDESU_DOMAINS || process.env.OTAKUDESU_DOMAIN || '';
   if (env) return env.split(',').map(d => d.trim()).filter(Boolean);
-  return ['https://otakudesu.fit', 'https://otakudesu.cloud', 'https://otakudesu.la', 'https://otakudesu.ro'];
+  return ['https://otakudesu.fit', 'https://otakudesu.blog', 'https://otakudesu.cloud', 'https://otakudesu.la', 'https://otakudesu.ro'];
 };
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
@@ -42,42 +42,85 @@ async function fetchWithFallback(pathFn) {
 }
 
 /**
- * Search anime by title.
+ * Search anime by title across all domains.
+ * Unlike fetchWithFallback (which stops at first HTTP success), search tries ALL domains
+ * and merges results — because different domains have different catalogs.
  * @returns {Array<{title, slug, url, poster, status, type}>}
  */
 async function search(query) {
-  const { data, usedBase } = await fetchWithFallback(
-    (base) => `${base}/?s=${encodeURIComponent(query)}`
+  const domains = DOMAINS();
+  const allResults = [];
+
+  // Try all domains in parallel for speed
+  const responses = await Promise.allSettled(
+    domains.map(base => http.get(`${base}/?s=${encodeURIComponent(query)}`))
   );
-  const $ = cheerio.load(data);
-  const results = [];
 
-  // Otakudesu search results: div.listupd article or similar
-  // Pattern: <article> with <a href> + <img> + title
-  $('article, .bs, .bsx, .result-item, .chi_anime').each((_, el) => {
-    const $el = $(el);
-    const $a = $el.find('a[href*="/series/"]').first();
-    if (!$a.length) return;
-    const href = $a.attr('href') || '';
-    const title = $a.attr('title') || $el.find('.tt, h2, h3, .title').first().text().trim() || $a.text().trim();
-    const poster = $el.find('img').first().attr('src') || $el.find('img').first().attr('data-src') || '';
-    const status = $el.find('.status, .epx').text().trim() || '';
-    const type = $el.find('.type, .typez').text().trim() || 'Anime';
+  for (const res of responses) {
+    if (res.status !== 'fulfilled') continue;
+    const $ = cheerio.load(res.value.data);
 
-    if (title && href) {
-      results.push({
-        title: title.replace(/\s+/g, ' ').trim(),
-        slug: href.replace(/.*\/series\//, '').replace(/\/$/, ''),
-        url: href,
-        poster,
-        status,
-        type,
-        source: 'otakudesu',
-      });
-    }
-  });
+    // --- Modern layout (.fit): <article> with a[href*="/series/"] ---
+    $('article, .bs, .bsx, .result-item, .chi_anime').each((_, el) => {
+      const $el = $(el);
+      const $a = $el.find('a[href*="/series/"]').first();
+      if (!$a.length) return;
+      const href = $a.attr('href') || '';
+      const title = $a.attr('title') || $el.find('.tt, h2, h3, .title').first().text().trim() || $a.text().trim();
+      const poster = $el.find('img').first().attr('src') || $el.find('img').first().attr('data-src') || '';
+      const status = $el.find('.status, .epx').text().trim() || '';
 
-  return results.slice(0, 15);
+      if (title && href) {
+        allResults.push({
+          title: title.replace(/\s+/g, ' ').trim(),
+          slug: href.replace(/.*\/series\//, '').replace(/\/$/, ''),
+          url: href,
+          poster,
+          status,
+          type: 'Anime',
+          source: 'otakudesu',
+        });
+      }
+    });
+
+    // --- Classic layout (.blog): <ul class="chivsrc"><li> with a[href*="/anime/"] ---
+    $('ul.chivsrc li, .chivsrc li').each((_, el) => {
+      const $el = $(el);
+      // Find series/anime link (not episode/batch links)
+      const $a = $el.find('a[href*="/anime/"]').first();
+      if (!$a.length) return;
+      const href = $a.attr('href') || '';
+      const title = $a.text().trim()
+        .replace(/\s*Subtitle Indonesia$/i, '')
+        .replace(/\s*\(Episode.*?\)$/i, '');
+      const poster = $el.find('img').first().attr('src') || '';
+      const statusText = $el.find('.set').filter((_, s) => $(s).text().includes('Status')).text().replace(/.*Status\s*:\s*/i, '').trim();
+
+      if (title && href) {
+        allResults.push({
+          title: title.replace(/\s+/g, ' ').trim(),
+          slug: href.replace(/.*\/anime\//, '').replace(/\/$/, ''),
+          url: href,
+          poster,
+          status: statusText || '',
+          type: 'Anime',
+          source: 'otakudesu',
+        });
+      }
+    });
+  }
+
+  // Dedupe by normalized title
+  const seen = new Set();
+  const unique = [];
+  for (const r of allResults) {
+    const key = r.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(r);
+  }
+
+  return unique.slice(0, 15);
 }
 
 /**
@@ -101,13 +144,17 @@ async function getEpisodes(seriesUrl) {
   const $ = cheerio.load(data);
   const episodes = [];
 
-  // Episode list: table rows or list items with episode links
+  // Episode list: links containing "episode" in href
+  // Modern (.fit): href like "/one-piece-episode-1161-subtitle-indonesia/"
+  // Classic (.blog): href like "/episode/wpoiec-episode-1161-sub-indo/"
   $('a[href*="episode"]').each((_, el) => {
     const $a = $(el);
     const href = $a.attr('href') || '';
     const text = $a.text().trim();
-    // Filter only episode links (not series links)
-    if (!href.includes('-episode-') && !href.includes('-ep-')) return;
+    // Filter: must contain "episode" pattern in path (not just query params)
+    if (!href.match(/episode[_\-/]/i)) return;
+    // Skip if it's a series/anime link (not episode)
+    if (href.includes('/series/') || href.includes('/anime/')) return;
     // Extract episode number from text or URL
     const numMatch = text.match(/(?:Episode|Eps?)\s*(\d+)/i) || href.match(/episode[_-]?(\d+)/i);
     const num = numMatch ? parseInt(numMatch[1], 10) : 0;
