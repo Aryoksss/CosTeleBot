@@ -3333,16 +3333,16 @@ async function doIdlixEpisodePicker(bot, chatId, epNum) {
 }
 
 /**
- * Execute download via yt-dlp.
+ * Execute download via Playwright HLS interception + ffmpeg.
  */
 async function doIdlixDownload(bot, chatId, quality) {
   const cache = idlixBrowseCache.get(chatId);
   if (!cache?.selectedId) return bot.sendMessage(chatId, '❌ Data hilang, coba search ulang.');
 
-  // Check yt-dlp + ffmpeg
-  if (!idlixScraper.checkYtDlp()) {
+  // Check ffmpeg (required for HLS download)
+  if (!idlixScraper.checkFfmpeg()) {
     return bot.sendMessage(chatId,
-      `❌ <b>yt-dlp tidak ter-install di VPS.</b>\n\nInstall dulu:\n<code>pip install yt-dlp</code>\natau:\n<code>curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && chmod +x /usr/local/bin/yt-dlp</code>`,
+      `❌ <b>ffmpeg tidak ter-install di VPS.</b>\n\nInstall dulu:\n<code>apt install ffmpeg</code>`,
       { parse_mode: 'HTML' }
     );
   }
@@ -3373,7 +3373,7 @@ async function doIdlixDownload(bot, chatId, quality) {
     };
 
     try {
-      await status(`⏳ <b>Resolving stream untuk ${escHtml(titleLabel)}...</b>\n<i>yt-dlp sedang extract HLS dari VidSrc...</i>`);
+      await status(`⏳ <b>Resolving stream untuk ${escHtml(titleLabel)}...</b>\n<i>Playwright sedang intercept HLS dari embed player...</i>`);
 
       const tmpDir = path.join(CONFIG.TEMP_DIR, `idlix_${Date.now()}`);
       await fsp.mkdir(tmpDir, { recursive: true });
@@ -3383,19 +3383,25 @@ async function doIdlixDownload(bot, chatId, quality) {
       const dlStartedAt = Date.now();
       const throttle = createProgressThrottler(3000);
 
-      const filePath = await idlixScraper.downloadWithYtDlp(vidSrcUrl, outputBase, quality, (line) => {
-        // Parse yt-dlp progress line: [download]  42.3% of ~500.00MiB at 8.50MiB/s ETA 00:45
-        const m = line.match(/\[download\]\s+([\d.]+)%.*?at\s+([\d.]+\w+\/s).*?ETA\s+(\S+)/);
+      const filePath = await idlixScraper.downloadWithPlaywright(vidSrcUrl, outputBase, quality, (line) => {
+        // Parse ffmpeg progress: [download] 42% | size=150M | speed=2.1x
+        const m = line.match(/\[download\]\s+(\d+)%.*?size=([\w?]+).*?speed=([\w?.]+)/);
         if (m) {
-          const pct = parseFloat(m[1]);
-          const speed = m[2];
-          const eta = m[3];
+          const pct = parseInt(m[1]);
+          const size = m[2];
+          const speed = m[3];
           throttle(() => {
             const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
-            status(`⬇️ <b>${escHtml(titleLabel)}</b>\n<code>${bar} ${pct.toFixed(1)}%</code>\n<code>${speed} · ETA ${eta}</code>`);
+            status(`⬇️ <b>${escHtml(titleLabel)}</b>\n<code>${bar} ${pct}%</code>\n<code>Size: ${size} · Speed: ${speed}</code>`);
           });
-        } else if (line.includes('[Merger]') || line.includes('[ffmpeg]')) {
-          status(`🔧 <b>Merging video...</b>`);
+        } else if (line.includes('[info]')) {
+          throttle(() => {
+            status(`🔍 <b>${escHtml(titleLabel)}</b>\n<i>${escHtml(line.replace('[info] ', '').slice(0, 100))}</i>`);
+          });
+        } else if (line.includes('[ffmpeg]')) {
+          throttle(() => {
+            status(`🔧 <b>Processing video...</b>`);
+          });
         }
         lastProgress = line;
       });
@@ -3409,7 +3415,8 @@ async function doIdlixDownload(bot, chatId, quality) {
     } catch (err) {
       log.error(`[IDLIX] download error: ${err.message}`);
       let msg = err.message.slice(0, 400);
-      if (msg.includes('spawn error')) msg += '\n\nPastikan yt-dlp + ffmpeg ter-install di VPS.';
+      if (msg.includes('spawn error')) msg += '\n\nPastikan ffmpeg ter-install di VPS: apt install ffmpeg';
+      if (msg.includes('Tidak dapat menemukan')) msg += '\n\n💡 Tip: Coba film/episode lain, atau tunggu beberapa menit lalu coba lagi.';
       status(`❌ Download gagal:\n${escHtml(msg)}`).catch(() => {});
     }
   }, bot);
@@ -5131,7 +5138,7 @@ function startBot() {
     if (action === 'idlix_menu') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       const sentMsg = await bot.sendMessage(chatId,
-        `🎬 <b>Film & Series Hub</b>\n<i>TMDB + VidSrc + yt-dlp</i>\n\nPilih mode:`,
+        `🎬 <b>Film & Series Hub</b>\n<i>TMDB + VidSrc + Playwright</i>\n\nPilih mode:`,
         {
           parse_mode: 'HTML',
           reply_markup: {
