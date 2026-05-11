@@ -122,7 +122,9 @@ function checkFfmpeg() {
 
 /**
  * Intercept HLS .m3u8 URL + subtitle tracks from an embed player page using Playwright.
- * Navigates through iframes and waits for network requests containing .m3u8 and .vtt/.srt.
+ * Navigates through nested iframes to reach the actual video player.
+ *
+ * Chain: vidsrc.to → vsembed.ru → cloudnestra.com/vidplay/filemoon → .m3u8
  *
  * @param {string} type - 'movie' or 'tv'
  * @param {number} tmdbId
@@ -132,14 +134,12 @@ function checkFfmpeg() {
  * @returns {Promise<{m3u8Url: string, headers: object, subtitleUrls: string[]}>}
  */
 async function interceptM3u8(type, tmdbId, season, episode, onLog = () => {}) {
-  // Build list of URLs to try
+  // Build list of embed URLs to try
   const idlixBase = IDLIX_BASE();
   const urls = [
-    // VidSrc embed (primary — most reliable for HLS interception)
     type === 'movie'
       ? `${VIDSRC_BASE}/movie/${tmdbId}`
       : `${VIDSRC_BASE}/tv/${tmdbId}/${season}/${episode}`,
-    // VidSrc alternatives
     type === 'movie'
       ? `https://vidsrc.xyz/embed/movie?tmdb=${tmdbId}`
       : `https://vidsrc.xyz/embed/tv?tmdb=${tmdbId}&season=${season}&episode=${episode}`,
@@ -151,7 +151,6 @@ async function interceptM3u8(type, tmdbId, season, episode, onLog = () => {}) {
       : `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1&s=${season}&e=${episode}`,
   ];
 
-  // If IDLIX base is configured and not default IP, add it as first option
   if (idlixBase && !idlixBase.includes('159.65.50.100')) {
     urls.unshift(
       type === 'movie'
@@ -186,34 +185,29 @@ async function interceptM3u8(type, tmdbId, season, episode, onLog = () => {}) {
 
         const page = await context.newPage();
 
-        // Collect .m3u8 URLs and subtitle URLs from network requests
+        // Global network interception — catches ALL requests including from nested iframes
         const m3u8Urls = [];
         const subtitleUrls = [];
         const capturedHeaders = {};
 
-        page.on('request', (req) => {
-          const url = req.url();
+        // Use route to intercept ALL requests across all frames
+        await page.route('**/*', async (route) => {
+          const url = route.request().url();
+
           if (url.includes('.m3u8')) {
             m3u8Urls.push(url);
-            const hdrs = req.headers();
-            capturedHeaders.referer = hdrs.referer || hdrs.Referer || '';
-            capturedHeaders.origin = hdrs.origin || hdrs.Origin || '';
+            const hdrs = route.request().headers();
+            capturedHeaders.referer = hdrs.referer || hdrs['Referer'] || '';
+            capturedHeaders.origin = hdrs.origin || hdrs['Origin'] || '';
             capturedHeaders.userAgent = hdrs['user-agent'] || UA;
           }
-          // Capture subtitle requests (.vtt, .srt, subtitle API calls)
-          if (url.includes('.vtt') || url.includes('.srt') || url.includes('subtitle') || url.includes('caption')) {
+
+          if (url.includes('.vtt') || url.includes('.srt') || url.includes('subtitle') || url.includes('caption') || url.includes('track')) {
             if (!subtitleUrls.includes(url)) subtitleUrls.push(url);
           }
-        });
 
-        page.on('response', (res) => {
-          const url = res.url();
-          if (url.includes('.m3u8') && !m3u8Urls.includes(url)) {
-            m3u8Urls.push(url);
-          }
-          if ((url.includes('.vtt') || url.includes('.srt') || url.includes('subtitle') || url.includes('caption')) && !subtitleUrls.includes(url)) {
-            subtitleUrls.push(url);
-          }
+          // Continue the request normally
+          await route.continue().catch(() => {});
         });
 
         // Navigate to the embed page
@@ -225,63 +219,43 @@ async function interceptM3u8(type, tmdbId, season, episode, onLog = () => {}) {
           continue;
         }
 
-        // Wait a bit for initial JS to load
-        await page.waitForTimeout(2000);
+        // Wait for page + iframes to load
+        await page.waitForTimeout(3000);
 
-        // Try to find and click play button (common patterns)
-        try {
-          const playSelectors = [
-            '.play-button', '#play-button', '[class*="play"]',
-            'button[aria-label="Play"]', '.jw-icon-display', '.vjs-big-play-button',
-            '.plyr__control--overlaid', '[data-plyr="play"]',
-          ];
-          for (const sel of playSelectors) {
-            const btn = await page.$(sel);
-            if (btn) {
-              await btn.click().catch(() => {});
-              onLog(`[info] Clicked play button: ${sel}`);
-              break;
-            }
-          }
-        } catch (_) {}
-
-        // Also try clicking inside iframes
-        const frames = page.frames();
-        for (const frame of frames) {
-          if (frame === page.mainFrame()) continue;
-          try {
-            const playSelectors = [
-              '.play-button', '#play-button', '[class*="play"]',
-              'button[aria-label="Play"]', '.jw-icon-display', '.vjs-big-play-button',
-              '.plyr__control--overlaid', '[data-plyr="play"]',
-            ];
-            for (const sel of playSelectors) {
-              const btn = await frame.$(sel);
-              if (btn) {
-                await btn.click().catch(() => {});
-                onLog(`[info] Clicked play in iframe: ${sel}`);
-                break;
-              }
-            }
-          } catch (_) {}
-        }
-
-        // Wait for .m3u8 request to appear (up to 25 seconds)
-        const deadline = Date.now() + 25000;
-        while (m3u8Urls.length === 0 && Date.now() < deadline) {
-          await page.waitForTimeout(1000);
-
-          const laterFrames = page.frames();
-          for (const frame of laterFrames) {
-            if (frame === page.mainFrame()) continue;
+        // Try clicking play buttons in all frames (main + nested iframes)
+        const clickPlayInAllFrames = async () => {
+          const allFrames = page.frames();
+          for (const frame of allFrames) {
             try {
-              const btn = await frame.$('.play-button, .jw-icon-display, .vjs-big-play-button, [class*="play"]');
-              if (btn) await btn.click().catch(() => {});
+              const playSelectors = [
+                '.play-button', '#play-button', '[class*="play"]',
+                'button[aria-label="Play"]', '.jw-icon-display', '.vjs-big-play-button',
+                '.plyr__control--overlaid', '[data-plyr="play"]',
+                '.vjs-play-control', '#player', '.player-play',
+              ];
+              for (const sel of playSelectors) {
+                const btn = await frame.$(sel);
+                if (btn) {
+                  await btn.click().catch(() => {});
+                  break;
+                }
+              }
             } catch (_) {}
           }
+        };
+
+        await clickPlayInAllFrames();
+
+        // Wait for .m3u8 request to appear (up to 30 seconds)
+        // The nested iframe chain can take time to resolve
+        const deadline = Date.now() + 30000;
+        while (m3u8Urls.length === 0 && Date.now() < deadline) {
+          await page.waitForTimeout(2000);
+          await clickPlayInAllFrames();
         }
 
         if (m3u8Urls.length > 0) {
+          // Prefer master playlist
           let bestUrl = m3u8Urls.find(u => u.includes('master')) ||
                         m3u8Urls.find(u => !u.includes('/seg') && !u.includes('/chunk')) ||
                         m3u8Urls[0];
