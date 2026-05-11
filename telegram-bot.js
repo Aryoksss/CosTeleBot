@@ -920,7 +920,9 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
 
       downloadLink = api.zipDlink;
       fileName = api.name;
-      log.info(`[Terabox] Source: ${api.source}, File: ${fileName} (${api.sizeMB} MB)`);
+      // Extension dari filename, fallback ke .zip (karena xAPIverse zip-all)
+      zipPath = `${tmpBase}_raw${path.extname(fileName) || '.zip'}`;
+      log.info(`[Terabox] Source: ${api.source}, File: ${fileName} (${api.sizeMB} MB), savePath: ${zipPath}`);
     }
 
     await status(`⬇️ <b>Mengunduh ${fileName}...</b>\n📦`);
@@ -2980,12 +2982,21 @@ async function doAnimeOploDownload(bot, chatId, linkIndex) {
         const ext = link.format.includes('mkv') ? '.mkv' : '.mp4';
         const filePath = path.join(tmpDir, `${series.title.replace(/[^\w\s-]/g, '').slice(0, 50)} Ep${epNum} ${link.quality}${ext}`);
 
-        const throttle = createProgressThrottler(async (bar) => {
-          status(`⬇️ <b>${escHtml(title)}</b>\n${bar}`);
-        }, 3000);
+        const dlStartedAt = Date.now();
+        const throttle = createProgressThrottler(2500);
 
-        await downloadStream(resolved.directUrl, filePath, (pct, speed, eta) => {
-          throttle(renderProgressBar(pct, speed, eta));
+        await downloadStream(resolved.directUrl, filePath, (pct, dl, tot) => {
+          throttle(() => {
+            const txt = renderProgressBar({
+              icon: '⬇️',
+              title: title,
+              done: dl,
+              total: tot || 0,
+              unit: 'bytes',
+              startedAt: dlStartedAt,
+            });
+            status(txt);
+          });
         }, null, { referer: 'https://buzzheavier.com/' });
 
         await status(`📤 <b>Uploading ke Telegram...</b>`);
@@ -3045,12 +3056,24 @@ async function doAnimeMegaDownload(bot, chatId, qualityIdx) {
       await fsp.mkdir(tmpDir, { recursive: true });
       const filePath = path.join(tmpDir, info.name);
 
-      const throttle = createProgressThrottler(async (bar) => {
-        status(`⬇️ <b>${escHtml(title)}</b>\n${bar}`);
-      }, 3000);
+      const dlStartedAt = Date.now();
+      const throttle = createProgressThrottler(2500);
 
       await megaResolver.downloadMega(megaLink.url, filePath, (pct, speed, eta) => {
-        throttle(renderProgressBar(pct, speed, eta));
+        // megaResolver kirim pct (0-100), speed (B/s), eta (s).
+        // Convert ke done/total (approx dari pct + total size yang kita tau dari info).
+        throttle(() => {
+          const done = Math.round((pct / 100) * info.size);
+          const txt = renderProgressBar({
+            icon: '⬇️',
+            title: title,
+            done: done,
+            total: info.size,
+            unit: 'bytes',
+            startedAt: dlStartedAt,
+          });
+          status(txt);
+        });
       });
 
       await status(`📤 <b>Uploading ke Telegram...</b>\n${escHtml(info.name)}`);
@@ -3133,12 +3156,22 @@ async function doAnimeKusoDownload(bot, chatId, qualityIdx, hostType) {
       await fsp.mkdir(tmpDir, { recursive: true });
       const tmpPath = path.join(tmpDir, `download.tmp`);
 
-      const throttle = createProgressThrottler(async (bar) => {
-        status(`⬇️ <b>${escHtml(title)}</b>\n${bar}`);
-      }, 3000);
+      const dlStartedAt = Date.now();
+      const throttle = createProgressThrottler(2500);
 
-      const result = await gdriveResolver.downloadGDrive(link.url, tmpPath, (pct, speed, eta) => {
-        throttle(renderProgressBar(pct, speed, eta));
+      const result = await gdriveResolver.downloadGDrive(link.url, tmpPath, (done, total) => {
+        throttle(() => {
+          const txt = renderProgressBar({
+            icon: '⬇️',
+            title: title,
+            done: done,
+            total: total || 0,
+            unit: 'bytes',
+            startedAt: dlStartedAt,
+            subtitle: total > 0 ? null : 'Total size unknown (GDrive tidak return content-length)',
+          });
+          status(txt);
+        });
       });
 
       // Rename to actual filename

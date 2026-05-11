@@ -132,12 +132,11 @@ async function downloadGDrive(gdriveUrl, destPath, onProgress) {
 
     res2.data.on('data', (chunk) => {
       downloaded += chunk.length;
-      if (onProgress && totalSize > 0) {
-        const pct = (downloaded / totalSize) * 100;
-        const elapsed = (Date.now() - startTime) / 1000;
-        const speed = elapsed > 0 ? downloaded / elapsed : 0;
-        const eta = speed > 0 ? (totalSize - downloaded) / speed : 0;
-        onProgress(pct, speed, eta);
+      if (onProgress) {
+        // Pass (done, total) — konsumen bisa pakai renderProgressBar langsung.
+        // Kalau totalSize=0 (GDrive kadang nggak kirim content-length), total=0 dan
+        // renderer akan display bar indeterminate.
+        onProgress(downloaded, totalSize);
       }
     });
 
