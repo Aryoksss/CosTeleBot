@@ -177,37 +177,13 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
     validateStatus: () => true,
   };
   if (accountToken) reqCfg.headers['Authorization'] = `Bearer ${accountToken}`;
-  if (proxy) {
-    try {
-      // https-proxy-agent v7 + socks-proxy-agent v8 = CommonJS compatible.
-      // v9+/v9+ ESM-only yang butuh dynamic import.
-      let HttpsProxyAgent, SocksProxyAgent;
-      try {
-        ({ HttpsProxyAgent } = require('https-proxy-agent'));
-        ({ SocksProxyAgent } = require('socks-proxy-agent'));
-      } catch (requireErr) {
-        // Fallback: dynamic import untuk package ESM-only
-        console.log(`[Gofile-DL] require gagal (${requireErr.code}), fallback dynamic import`);
-        const https = await import('https-proxy-agent');
-        const socks = await import('socks-proxy-agent');
-        HttpsProxyAgent = https.HttpsProxyAgent;
-        SocksProxyAgent = socks.SocksProxyAgent;
-      }
+  // Proxy TIDAK dipakai untuk CDN download — langsung dari VPS (lebih stabil untuk file besar).
+  // Proxy hanya untuk resolve page di atas (accountToken fetch).
 
-      const proxyUrl = proxy.username
-        ? `${proxy.server.replace('://', `://${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`)}`
-        : proxy.server;
-      reqCfg.httpsAgent = proxy.server.startsWith('socks')
-        ? new SocksProxyAgent(proxyUrl)
-        : new HttpsProxyAgent(proxyUrl);
-      reqCfg.httpAgent = reqCfg.httpsAgent;
-      console.log(`[Gofile-DL] axios via proxy agent: ${proxy.server}`);
-    } catch (e) {
-      console.log(`[Gofile-DL] proxy agent load gagal (${e.message}), fallback no-proxy`);
-    }
-  }
-
-  console.log(`[Gofile-DL] axios GET streaming...`);
+  // Gofile CDN (store*.gofile.io) accessible langsung dari VPS tanpa proxy.
+  // Proxy hanya dibutuhkan untuk resolve page (gofile.io), bukan download CDN.
+  // Skip proxy untuk download agar tidak kena timeout WARP pada file besar.
+  console.log(`[Gofile-DL] axios GET streaming (direct, no proxy for CDN)...`);
 
   // Retry loop untuk 429 (rate-limit per CDN node) dan 5xx. Max 3 attempt dengan backoff 3s/6s/12s.
   const MAX_RETRIES = 3;
@@ -266,36 +242,72 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
   }
 
   // Stream ke disk dengan progress callback tiap ~1 detik.
-  return await new Promise((resolve, reject) => {
-    const writer = fs.createWriteStream(destPath);
-    let downloaded = 0;
-    let lastTick = Date.now();
-    res.data.on('data', (chunk) => {
-      downloaded += chunk.length;
-      const now = Date.now();
-      if (onProgress && now - lastTick >= 1000) {
-        onProgress(downloaded, total);
-        lastTick = now;
+  // Resume support: jika stream abort, retry dengan Range header (max 3 resume attempts).
+  const RESUME_MAX = 3;
+  let resumeAttempt = 0;
+  let totalDownloaded = 0;
+
+  while (true) {
+    const size = await new Promise((resolve, reject) => {
+      const writeOpts = totalDownloaded > 0 ? { flags: 'a' } : undefined; // append mode for resume
+      const writer = fs.createWriteStream(destPath, writeOpts);
+      let chunkDownloaded = 0;
+      let lastTick = Date.now();
+
+      res.data.on('data', (chunk) => {
+        chunkDownloaded += chunk.length;
+        totalDownloaded += chunk.length;
+        const now = Date.now();
+        if (onProgress && now - lastTick >= 1000) {
+          onProgress(totalDownloaded, total);
+          lastTick = now;
+        }
+      });
+      res.data.on('error', (err) => {
+        writer.close();
+        reject(new Error(`Stream abort: ${err.message} (downloaded ${(totalDownloaded / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB)`));
+      });
+      writer.on('error', (err) => {
+        try { res.data.destroy(); } catch (_) { }
+        reject(new Error(`Write error: ${err.message}`));
+      });
+      writer.on('finish', () => {
+        if (onProgress) onProgress(totalDownloaded, total);
+        const fileSize = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
+        console.log(`[Gofile-DL] END size=${(fileSize / 1048576).toFixed(1)}MB downloaded=${(totalDownloaded / 1048576).toFixed(1)}MB`);
+        resolve(fileSize);
+      });
+      res.data.pipe(writer);
+    }).catch(async (err) => {
+      // Resume logic: retry with Range header
+      resumeAttempt++;
+      if (resumeAttempt > RESUME_MAX || totalDownloaded === 0) {
+        // Can't resume or too many retries — clean up and throw
+        if (fs.existsSync(destPath)) { try { fs.unlinkSync(destPath); } catch (_) { } }
+        throw err;
+      }
+
+      console.log(`[Gofile-DL] Stream aborted at ${(totalDownloaded / 1048576).toFixed(1)}MB, resume attempt ${resumeAttempt}/${RESUME_MAX}...`);
+      await new Promise(r => setTimeout(r, 3000 * resumeAttempt)); // backoff
+
+      // Re-request with Range header
+      const resumeCfg = { ...reqCfg, headers: { ...reqCfg.headers, 'Range': `bytes=${totalDownloaded}-` } };
+      try {
+        res = await axios(resumeCfg);
+        if (res.status !== 206 && res.status !== 200) {
+          throw new Error(`Resume failed: HTTP ${res.status}`);
+        }
+        console.log(`[Gofile-DL] Resume OK from byte ${totalDownloaded}, status=${res.status}`);
+        return null; // signal to continue loop
+      } catch (resumeErr) {
+        if (fs.existsSync(destPath)) { try { fs.unlinkSync(destPath); } catch (_) { } }
+        throw new Error(`Resume failed: ${resumeErr.message}`);
       }
     });
-    res.data.on('error', (err) => {
-      writer.close();
-      if (fs.existsSync(destPath)) { try { fs.unlinkSync(destPath); } catch (_) { } }
-      reject(new Error(`Stream error: ${err.message}`));
-    });
-    writer.on('error', (err) => {
-      try { res.data.destroy(); } catch (_) { }
-      if (fs.existsSync(destPath)) { try { fs.unlinkSync(destPath); } catch (_) { } }
-      reject(new Error(`Write error: ${err.message}`));
-    });
-    writer.on('finish', () => {
-      if (onProgress) onProgress(downloaded, total); // tick final
-      const size = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
-      console.log(`[Gofile-DL] END size=${(size / 1048576).toFixed(1)}MB downloaded=${(downloaded / 1048576).toFixed(1)}MB`);
-      resolve(size);
-    });
-    res.data.pipe(writer);
-  });
+
+    if (size !== null) return size; // download complete
+    // size === null means we resumed, loop again to pipe the new stream
+  }
 }
 
 module.exports = {
