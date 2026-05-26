@@ -3989,6 +3989,62 @@ function startBot() {
     }
   });
 
+  // ─── PUSH NOTIFICATION KE APLIKASI GALERI ────────────────────────────────
+  // Penggunaan: /notif <pesan>
+  // Contoh: /notif Hei sayang, lagi ngapain? 💕
+  // Hanya bisa dipakai oleh admin (ADMIN_IDS di .env)
+  bot.onText(/^\/notif(?:\s+(.+))?$/s, async (msg, match) => {
+    const chatId = msg.chat.id;
+    bot.deleteMessage(chatId, msg.message_id).catch(() => {});
+
+    if (!isAdmin(chatId)) {
+      bot.sendMessage(chatId, '⛔ Command ini hanya untuk admin.').catch(() => {});
+      return;
+    }
+
+    const text = match[1] && match[1].trim();
+    if (!text) {
+      bot.sendMessage(chatId,
+        '❌ <b>Format salah.</b>\n\nGunakan: <code>/notif pesan kamu di sini</code>',
+        { parse_mode: 'HTML' }
+      ).catch(() => {});
+      return;
+    }
+
+    const senderName = msg.from?.first_name || 'Kamu';
+
+    try {
+      const res = await axios.post(
+        'https://qcqejwhspgjyqjxjiwku.supabase.co/functions/v1/push-notification',
+        {
+          type: 'scheduled',
+          title: `💬 ${senderName}`,
+          body: text,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+          },
+          timeout: 10000,
+        }
+      );
+
+      const sent = res.data?.results?.filter(r => r.status === 'fulfilled').length ?? '?';
+      bot.sendMessage(chatId,
+        `✅ <b>Notif terkirim!</b>\n\n<b>Pesan:</b> ${escHtml(text)}\n<b>Device:</b> ${sent} penerima`,
+        { parse_mode: 'HTML' }
+      ).catch(() => {});
+      log.ok(`[Notif] Admin ${chatId} kirim notif: "${text.slice(0, 60)}"`);
+    } catch (e) {
+      log.error(`[Notif] Gagal kirim: ${e.message}`);
+      bot.sendMessage(chatId,
+        `❌ Gagal kirim notif: <code>${escHtml(e.message.slice(0, 200))}</code>`,
+        { parse_mode: 'HTML' }
+      ).catch(() => {});
+    }
+  });
+
   // Handling user messages for Terabox manual and Passwords
   bot.on('message', async (msg) => {
     if (!msg.text || msg.text.startsWith('/')) return;
