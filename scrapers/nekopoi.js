@@ -209,9 +209,14 @@ async function interceptM3u8(embedUrls, postUrl, onLog = () => {}) {
           if (url.includes('.m3u8')) {
             if (!m3u8Urls.includes(url)) m3u8Urls.push(url);
             const hdrs = route.request().headers();
-            capturedHeaders.referer = hdrs.referer || hdrs['Referer'] || embedUrl;
-            capturedHeaders.origin = hdrs.origin || hdrs['Origin'] || new URL(embedUrl).origin;
+            // Capture the actual headers sent with the m3u8 request
+            capturedHeaders.referer = hdrs.referer || hdrs['Referer'] || '';
+            capturedHeaders.origin = hdrs.origin || hdrs['Origin'] || '';
             capturedHeaders.userAgent = hdrs['user-agent'] || UA;
+            capturedHeaders.cookie = hdrs.cookie || hdrs['Cookie'] || '';
+            // The frame URL that triggered the m3u8 is the best referer for CDN
+            const frameUrl = route.request().frame()?.url() || '';
+            if (frameUrl && !capturedHeaders.frameUrl) capturedHeaders.frameUrl = frameUrl;
           }
           if (url.includes('.vtt') || url.includes('.srt') || url.includes('subtitle') || url.includes('caption')) {
             if (!subtitleUrls.includes(url)) subtitleUrls.push(url);
@@ -262,13 +267,21 @@ async function interceptM3u8(embedUrls, postUrl, onLog = () => {}) {
                           m3u8Urls[0];
           onLog(`[info] Found .m3u8: ${bestUrl.slice(0, 100)}`);
           if (subtitleUrls.length > 0) onLog(`[info] Found ${subtitleUrls.length} subtitle(s)`);
+
+          // Use frame URL as referer if available (most accurate for CDN)
+          const bestReferer = capturedHeaders.frameUrl || capturedHeaders.referer || embedUrl;
+          const bestOrigin = capturedHeaders.origin || new URL(embedUrl).origin;
+
+          onLog(`[info] Headers: referer=${bestReferer.slice(0, 60)} origin=${bestOrigin.slice(0, 40)}`);
+
           await context.close();
           return {
             m3u8Url: bestUrl,
             headers: {
-              referer: capturedHeaders.referer || embedUrl,
-              origin: capturedHeaders.origin || new URL(embedUrl).origin,
+              referer: bestReferer,
+              origin: bestOrigin,
               userAgent: capturedHeaders.userAgent || UA,
+              cookie: capturedHeaders.cookie || '',
             },
             subtitleUrls,
           };
@@ -302,14 +315,26 @@ function checkFfmpeg() {
  */
 function downloadHls(m3u8Url, outputPath, headers = {}, onLog = () => {}) {
   return new Promise((resolve, reject) => {
-    const headerParts = [];
-    if (headers.referer) headerParts.push(`Referer: ${headers.referer}`);
-    if (headers.origin) headerParts.push(`Origin: ${headers.origin}`);
-    headerParts.push(`User-Agent: ${headers.userAgent || UA}`);
+    // CDN servers check Referer, Origin, and User-Agent strictly
+    // Build a comprehensive header string
+    const referer = headers.referer || 'https://streampoi.com/';
+    const origin = headers.origin || new URL(referer).origin;
+    const ua = headers.userAgent || UA;
+
+    const headerLines = [
+      `Referer: ${referer}`,
+      `Origin: ${origin}`,
+      `User-Agent: ${ua}`,
+      'Accept: */*',
+      'Accept-Language: en-US,en;q=0.9',
+      'Connection: keep-alive',
+    ];
+    if (headers.cookie) headerLines.push(`Cookie: ${headers.cookie}`);
+    const headerStr = headerLines.join('\r\n');
 
     const args = [
       '-y',
-      '-headers', headerParts.join('\r\n'),
+      '-headers', headerStr,
       '-i', m3u8Url,
       '-c', 'copy',
       '-bsf:a', 'aac_adtstoasc',
@@ -318,6 +343,7 @@ function downloadHls(m3u8Url, outputPath, headers = {}, onLog = () => {}) {
       '-reconnect', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
+      '-reconnect_on_http_error', '403,429,500,502,503',
       outputPath,
     ];
 
