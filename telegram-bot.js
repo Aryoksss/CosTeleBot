@@ -173,7 +173,6 @@ const hostResolver = require('./scrapers/hostResolver');
 const megaResolver = require('./scrapers/megaResolver');
 const kusonimeScraper = require('./scrapers/kusonime');
 const gdriveResolver = require('./scrapers/gdriveResolver');
-const nekopoiScraper = require('./scrapers/nekopoi');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
@@ -414,7 +413,6 @@ const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, 
 const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const eroBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const animeBrowseCache = new Map(); // chatId -> { results, episodes, seriesIdx, oploLinks, oploEpNum }
-const nekopoiCache = new Map(); // chatId -> { posts: [], page, category, query, selectedPost }
 const aggregateCache = new Map(); // chatId -> { query, sources: { cosplay: [], r34: [], pinterest: [] } }
 
 // Last-seen timestamp untuk TTL cleanup agar Map di atas tidak tumbuh monotonic seumur uptime VPS.
@@ -424,7 +422,7 @@ function touchState(chatId) {
 }
 // Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
 // Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
-for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, animeBrowseCache, nekopoiCache, aggregateCache]) {
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, animeBrowseCache, aggregateCache]) {
   const origSet = m.set.bind(m);
   m.set = (key, value) => {
     touchState(key);
@@ -3164,187 +3162,6 @@ async function doAnimeKusoDownload(bot, chatId, qualityIdx, hostType) {
   }, bot);
 }
 
-// ─── NEKOPOI ──────────────────────────────────────────────────────────────────
-
-async function doNekopoiBrowse(bot, chatId, category = 'hentai', page = 1) {
-  const loadMsg = await bot.sendMessage(chatId,
-    `🐱 <b>Nekopoi - ${category.toUpperCase()}</b>\n<i>Memuat halaman ${page}...</i>`,
-    { parse_mode: 'HTML' }
-  );
-  try {
-    const posts = await nekopoiScraper.browse(category, page);
-    if (!posts.length) {
-      return bot.editMessageText('😕 Tidak ada post ditemukan.', {
-        chat_id: chatId, message_id: loadMsg.message_id,
-        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] },
-      });
-    }
-    nekopoiCache.set(chatId, { posts, page, category, query: null });
-    await _nekopoiShowList(bot, chatId, loadMsg.message_id, posts, page, category);
-  } catch (err) {
-    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
-      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-    }).catch(() => {});
-  }
-}
-
-async function doNekopoiSearch(bot, chatId, query, page = 1) {
-  const loadMsg = await bot.sendMessage(chatId,
-    `🔍 <b>Nekopoi - Search</b>\n<i>Mencari "${escHtml(query)}"...</i>`,
-    { parse_mode: 'HTML' }
-  );
-  try {
-    const posts = await nekopoiScraper.search(query, page);
-    if (!posts.length) {
-      return bot.editMessageText(`😕 Tidak ada hasil untuk "${escHtml(query)}".`, {
-        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'neko_menu' }]] },
-      });
-    }
-    nekopoiCache.set(chatId, { posts, page, category: null, query });
-    await _nekopoiShowList(bot, chatId, loadMsg.message_id, posts, page, null, query);
-  } catch (err) {
-    bot.editMessageText(`❌ Error: ${escHtml(err.message.slice(0, 200))}`, {
-      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-    }).catch(() => {});
-  }
-}
-
-async function _nekopoiShowList(bot, chatId, msgId, posts, page, category, query) {
-  let text = `🐱 <b>Nekopoi${category ? ' - ' + category.toUpperCase() : ''}${query ? ` - "${escHtml(query)}"` : ''}</b>\n`;
-  text += `<i>Halaman ${page} • ${posts.length} hasil</i>\n\n`;
-
-  const keyboard = [];
-  posts.slice(0, 10).forEach((p, i) => {
-    text += `${i + 1}. <b>${escHtml(p.title.slice(0, 60))}</b>\n`;
-    keyboard.push([{ text: `${i + 1}. ${p.title.slice(0, 45)}`, callback_data: `neko_sel_${i}` }]);
-  });
-
-  const navRow = [];
-  if (page > 1) navRow.push({ text: '◀ Prev', callback_data: `neko_page_${page - 1}` });
-  navRow.push({ text: '▶ Next', callback_data: `neko_page_${page + 1}` });
-  keyboard.push(navRow);
-  keyboard.push([{ text: '🔙 Menu Nekopoi', callback_data: 'neko_menu' }]);
-
-  await bot.editMessageText(text, {
-    chat_id: chatId, message_id: msgId, parse_mode: 'HTML',
-    reply_markup: { inline_keyboard: keyboard },
-  }).catch(() => bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } }));
-}
-
-async function doNekopoiDetail(bot, chatId, idx) {
-  const cache = nekopoiCache.get(chatId);
-  const post = cache?.posts?.[idx];
-  if (!post) return bot.sendMessage(chatId, '❌ Data hilang, coba browse ulang.');
-
-  nekopoiCache.set(chatId, { ...cache, selectedPost: post });
-
-  const loadMsg = await bot.sendMessage(chatId,
-    `⏳ <b>Memuat detail...</b>`, { parse_mode: 'HTML' }
-  );
-
-  try {
-    const detail = await nekopoiScraper.getDetail(post.url);
-
-    let text = `🐱 <b>${escHtml(detail.title || post.title)}</b>\n\n`;
-    if (detail.synopsis) text += `<i>${escHtml(detail.synopsis)}</i>\n\n`;
-    text += `🎬 ${detail.embeds.length} embed player tersedia\n`;
-    if (detail.mirrors.length > 0) text += `🔗 ${detail.mirrors.length} mirror link\n`;
-
-    const keyboard = [];
-
-    if (detail.embeds.length > 0 && nekopoiScraper.checkFfmpeg()) {
-      keyboard.push([{ text: '⬇️ Download Video', callback_data: 'neko_dl' }]);
-    }
-
-    if (detail.mirrors.length > 0) {
-      // Show first 3 mirror links as buttons
-      detail.mirrors.slice(0, 3).forEach((m, i) => {
-        keyboard.push([{ text: `🔗 ${m.label || `Mirror ${i + 1}`}`, url: m.url }]);
-      });
-    }
-
-    keyboard.push([{ text: '🔙 Kembali', callback_data: 'neko_back_list' }]);
-
-    if (detail.thumb) {
-      await bot.editMessageText('...', { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => {});
-      await bot.sendPhoto(chatId, detail.thumb, {
-        caption: text, parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: keyboard },
-      }).catch(() => bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } }));
-      bot.deleteMessage(chatId, loadMsg.message_id).catch(() => {});
-    } else {
-      await bot.editMessageText(text, {
-        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: keyboard },
-      });
-    }
-  } catch (err) {
-    bot.editMessageText(`❌ ${escHtml(err.message.slice(0, 200))}`, {
-      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-    }).catch(() => {});
-  }
-}
-
-async function doNekopoiDownload(bot, chatId) {
-  const cache = nekopoiCache.get(chatId);
-  const post = cache?.selectedPost;
-  if (!post) return bot.sendMessage(chatId, '❌ Data hilang, coba pilih post ulang.');
-
-  if (!nekopoiScraper.checkFfmpeg()) {
-    return bot.sendMessage(chatId,
-      `❌ <b>ffmpeg tidak ter-install.</b>\n<code>apt install ffmpeg</code>`,
-      { parse_mode: 'HTML' }
-    );
-  }
-
-  const title = post.title || 'nekopoi_video';
-
-  queueManager.addJob(chatId, `Nekopoi: ${title.slice(0, 40)}`, async (jobId) => {
-    let statusMsg = null;
-    const status = async (txt) => {
-      try {
-        if (statusMsg) await bot.editMessageText(txt, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' });
-        else statusMsg = await bot.sendMessage(chatId, txt, { parse_mode: 'HTML' });
-      } catch (_) {}
-    };
-
-    try {
-      await status(`⏳ <b>Memproses ${escHtml(title.slice(0, 60))}...</b>\n<i>Launching browser untuk intercept stream...</i>`);
-
-      const tmpDir = path.join(CONFIG.TEMP_DIR, `neko_${Date.now()}`);
-      await fsp.mkdir(tmpDir, { recursive: true });
-      const safeTitle = title.replace(/[^\w\s\-]/g, '').slice(0, 80).trim() || 'video';
-      const outputBase = path.join(tmpDir, safeTitle);
-
-      const throttle = createProgressThrottler(3000);
-      const filePath = await nekopoiScraper.downloadFromNekopoi(post.url, outputBase, (line) => {
-        const m = line.match(/\[download\]\s+(\d+)%.*?size=([\w?]+).*?speed=([\w?.]+)/);
-        if (m) {
-          const [, pct, size, speed] = m;
-          throttle(() => {
-            const bar = '█'.repeat(Math.round(+pct / 5)) + '░'.repeat(20 - Math.round(+pct / 5));
-            status(`⬇️ <b>${escHtml(title.slice(0, 50))}</b>\n<code>${bar} ${pct}%</code>\n<code>${size} · ${speed}</code>`);
-          });
-        } else if (line.includes('[info]')) {
-          throttle(() => status(`🔍 <b>${escHtml(title.slice(0, 50))}</b>\n<i>${escHtml(line.replace('[info] ', '').slice(0, 100))}</i>`));
-        }
-      });
-
-      const sizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(1);
-      await status(`📤 <b>Uploading ${escHtml(title.slice(0, 50))}</b>\n${sizeMB} MB...`);
-      await sendOne(bot, chatId, filePath, `🐱 ${title}`);
-      await status(`✅ <b>${escHtml(title.slice(0, 50))}</b> selesai! (${sizeMB} MB)`);
-      await rimraf(tmpDir);
-    } catch (err) {
-      log.error(`[Nekopoi] download error: ${err.message}`);
-      let msg = err.message.slice(0, 400);
-      if (msg.includes('spawn error')) msg += '\n\napt install ffmpeg';
-      status(`❌ Download gagal:\n${escHtml(msg)}`).catch(() => {});
-    }
-  }, bot);
-}
-
 // ─── SMART / AGGREGATE SEARCH ────────────────────────────────────────────────
 /**
  * Tampilkan menu "pilih sumber" untuk query yang di-detect dari pesan bebas user.
@@ -3668,7 +3485,6 @@ async function sendMainMenu(bot, chatId) {
     ],
     [
       { text: '🎌 Anime', callback_data: 'anime_menu' },
-      { text: '🐱 Nekopoi', callback_data: 'neko_menu' },
     ],
     [
       { text: '🔎 Smart Search', callback_data: 'menu_search' },
@@ -3720,7 +3536,6 @@ function startBot() {
     { command: '/jav', description: '🎥 Javtiful Search' },
     { command: '/ero', description: '🔥 EroThots Search' },
     { command: '/anime', description: '🎌 Anime Search (Otakudesu + Oploverz + Kusonime)' },
-    { command: '/nekopoi', description: '🐱 Nekopoi Hentai/JAV Browse & Download' },
     { command: '/search', description: 'Cari Karakter / Album Cosplay' },
     { command: '/tasks', description: '🚦 Pantau Dasbor Antrean' },
     { command: '/stats', description: '🔰 Lihat Profil' },
@@ -3892,30 +3707,6 @@ function startBot() {
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
         }
-      );
-      autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
-    }
-  });
-
-  // ─── NEKOPOI ─────────────────────────────────────────────────────────────────
-  bot.onText(/^\/nekopoi(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => {});
-    const query = match[1] && match[1].trim();
-    if (query) {
-      log.info(`[User ${msg.chat.id}] Execute /nekopoi search: ${query}`);
-      doNekopoiSearch(bot, msg.chat.id, query);
-    } else {
-      log.info(`[User ${msg.chat.id}] Execute /nekopoi (menu)`);
-      // Trigger neko_menu
-      const sentMsg = await sendMenuWithThumb(bot, msg.chat.id,
-        `🐱 <b>Nekopoi</b>\n<i>Hentai & JAV Sub Indo</i>\n\nPilih kategori:`,
-        [
-          [{ text: '🎌 Hentai', callback_data: 'neko_cat_hentai' }, { text: '🎬 JAV', callback_data: 'neko_cat_jav' }],
-          [{ text: '👘 JAV Cosplay', callback_data: 'neko_cat_jav-cosplay' }, { text: '🎨 2D', callback_data: 'neko_cat_2d' }],
-          [{ text: '🖥️ 3D', callback_data: 'neko_cat_3d' }],
-          [{ text: '🔍 Search', callback_data: 'neko_search_prompt' }],
-          [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
-        ]
       );
       autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
     }
@@ -4436,14 +4227,6 @@ function startBot() {
       userStates.delete(chatId);
       log.info(`[User ${chatId}] Pencarian Anime: ${text}`);
       doAnimeSearch(bot, chatId, text);
-      return;
-    }
-
-    // If awaiting Nekopoi search
-    if (state && state.step === 'AWAITING_NEKOPOI_SEARCH') {
-      userStates.delete(chatId);
-      log.info(`[User ${chatId}] Nekopoi search: ${text}`);
-      doNekopoiSearch(bot, chatId, text);
       return;
     }
 
@@ -5266,74 +5049,6 @@ function startBot() {
       const slug = action.replace('anm_genre_', '');
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doAnimeGenre(bot, chatId, slug);
-    }
-
-    // ─── NEKOPOI CALLBACKS ────────────────────────────────────────────────────
-    if (action === 'neko_menu') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      bot.answerCallbackQuery(query.id).catch(() => {});
-      const sentMsg = await bot.sendMessage(chatId,
-        `🐱 <b>Nekopoi</b>\n<i>Hentai & JAV Sub Indo</i>\n\nPilih kategori:`,
-        {
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '🎌 Hentai', callback_data: 'neko_cat_hentai' }, { text: '🎬 JAV', callback_data: 'neko_cat_jav' }],
-              [{ text: '👘 JAV Cosplay', callback_data: 'neko_cat_jav-cosplay' }, { text: '🎨 2D', callback_data: 'neko_cat_2d' }],
-              [{ text: '🖥️ 3D', callback_data: 'neko_cat_3d' }],
-              [{ text: '🔍 Search', callback_data: 'neko_search_prompt' }],
-              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
-            ],
-          },
-        }
-      ).catch(() => null);
-      if (sentMsg) autoCleanOldMenu(bot, chatId, sentMsg.message_id);
-      return;
-    }
-    if (action === 'neko_search_prompt') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      bot.answerCallbackQuery(query.id).catch(() => {});
-      userStates.set(chatId, { step: 'AWAITING_NEKOPOI_SEARCH' });
-      const sentMsg = await bot.sendMessage(chatId,
-        `🔍 <b>Nekopoi Search</b>\n\nKetik judul hentai/JAV yang dicari:`,
-        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '❌ Batal', callback_data: 'neko_menu' }]] } }
-      ).catch(() => null);
-      if (sentMsg) autoCleanOldMenu(bot, chatId, sentMsg.message_id);
-      return;
-    }
-    if (action.startsWith('neko_cat_')) {
-      const cat = action.replace('neko_cat_', '');
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      bot.answerCallbackQuery(query.id).catch(() => {});
-      return doNekopoiBrowse(bot, chatId, cat, 1);
-    }
-    if (action.startsWith('neko_page_')) {
-      const page = parseInt(action.replace('neko_page_', ''), 10);
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      bot.answerCallbackQuery(query.id).catch(() => {});
-      const cache = nekopoiCache.get(chatId);
-      if (cache?.query) return doNekopoiSearch(bot, chatId, cache.query, page);
-      return doNekopoiBrowse(bot, chatId, cache?.category || 'hentai', page);
-    }
-    if (action.startsWith('neko_sel_')) {
-      const idx = parseInt(action.replace('neko_sel_', ''), 10);
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      bot.answerCallbackQuery(query.id).catch(() => {});
-      return doNekopoiDetail(bot, chatId, idx);
-    }
-    if (action === 'neko_dl') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      bot.answerCallbackQuery(query.id).catch(() => {});
-      return doNekopoiDownload(bot, chatId);
-    }
-    if (action === 'neko_back_list') {
-      bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
-      bot.answerCallbackQuery(query.id).catch(() => {});
-      const cache = nekopoiCache.get(chatId);
-      if (!cache?.posts?.length) return doNekopoiBrowse(bot, chatId);
-      const sentMsg = await bot.sendMessage(chatId, '⏳', { parse_mode: 'HTML' }).catch(() => null);
-      if (sentMsg) await _nekopoiShowList(bot, chatId, sentMsg.message_id, cache.posts, cache.page || 1, cache.category, cache.query);
-      return;
     }
 
     if (action === 'menu_vps') {
