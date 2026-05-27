@@ -209,14 +209,14 @@ async function interceptM3u8(embedUrls, postUrl, onLog = () => {}) {
           if (url.includes('.m3u8')) {
             if (!m3u8Urls.includes(url)) m3u8Urls.push(url);
             const hdrs = route.request().headers();
-            // Capture the actual headers sent with the m3u8 request
             capturedHeaders.referer = hdrs.referer || hdrs['Referer'] || '';
             capturedHeaders.origin = hdrs.origin || hdrs['Origin'] || '';
             capturedHeaders.userAgent = hdrs['user-agent'] || UA;
             capturedHeaders.cookie = hdrs.cookie || hdrs['Cookie'] || '';
-            // The frame URL that triggered the m3u8 is the best referer for CDN
-            const frameUrl = route.request().frame()?.url() || '';
-            if (frameUrl && !capturedHeaders.frameUrl) capturedHeaders.frameUrl = frameUrl;
+            try {
+              const frameUrl = route.request().frame()?.url() || '';
+              if (frameUrl && !capturedHeaders.frameUrl) capturedHeaders.frameUrl = frameUrl;
+            } catch (_) {}
           }
           if (url.includes('.vtt') || url.includes('.srt') || url.includes('subtitle') || url.includes('caption')) {
             if (!subtitleUrls.includes(url)) subtitleUrls.push(url);
@@ -228,13 +228,12 @@ async function interceptM3u8(embedUrls, postUrl, onLog = () => {}) {
           await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
         } catch (e) {
           onLog(`[warn] Nav error: ${e.message.slice(0, 60)}`);
-          await context.close();
+          await context.close().catch(() => {});
           continue;
         }
 
         await page.waitForTimeout(3000);
 
-        // Click play buttons
         const clickPlay = async () => {
           for (const sel of [
             'video', '.vjs-big-play-button', '.jw-icon-display', '.jw-display-icon-container',
@@ -246,7 +245,6 @@ async function interceptM3u8(embedUrls, postUrl, onLog = () => {}) {
               if (el) { await el.click().catch(() => {}); break; }
             } catch (_) {}
           }
-          // Also try programmatic play
           await page.evaluate(() => {
             document.querySelectorAll('video').forEach(v => v.play().catch(() => {}));
           }).catch(() => {});
@@ -254,7 +252,6 @@ async function interceptM3u8(embedUrls, postUrl, onLog = () => {}) {
 
         await clickPlay();
 
-        // Wait up to 30s for m3u8
         const deadline = Date.now() + 30000;
         while (m3u8Urls.length === 0 && Date.now() < deadline) {
           await page.waitForTimeout(2000);
@@ -266,38 +263,50 @@ async function interceptM3u8(embedUrls, postUrl, onLog = () => {}) {
                           m3u8Urls.find(u => !u.includes('/seg') && !u.includes('/chunk')) ||
                           m3u8Urls[0];
           onLog(`[info] Found .m3u8: ${bestUrl.slice(0, 100)}`);
-          if (subtitleUrls.length > 0) onLog(`[info] Found ${subtitleUrls.length} subtitle(s)`);
 
-          // Use frame URL as referer if available (most accurate for CDN)
+          // Extract all cookies from browser context for this domain
+          let cookieStr = capturedHeaders.cookie || '';
+          try {
+            const cookies = await context.cookies();
+            if (cookies.length > 0) {
+              const cookieParts = cookies.map(c => `${c.name}=${c.value}`);
+              cookieStr = cookieParts.join('; ');
+              onLog(`[info] Captured ${cookies.length} cookies from browser session`);
+            }
+          } catch (_) {}
+
           const bestReferer = capturedHeaders.frameUrl || capturedHeaders.referer || embedUrl;
           const bestOrigin = capturedHeaders.origin || new URL(embedUrl).origin;
+          onLog(`[info] Referer: ${bestReferer.slice(0, 80)}`);
 
-          onLog(`[info] Headers: referer=${bestReferer.slice(0, 60)} origin=${bestOrigin.slice(0, 40)}`);
-
-          await context.close();
+          await context.close().catch(() => {});
           return {
             m3u8Url: bestUrl,
             headers: {
               referer: bestReferer,
               origin: bestOrigin,
               userAgent: capturedHeaders.userAgent || UA,
-              cookie: capturedHeaders.cookie || '',
+              cookie: cookieStr,
             },
             subtitleUrls,
           };
         }
 
         onLog(`[warn] No .m3u8 from ${embedUrl.slice(0, 60)}`);
-        await context.close();
+        await context.close().catch(() => {});
       } catch (err) {
-        onLog(`[warn] Error: ${err.message.slice(0, 80)}`);
+        onLog(`[warn] Embed error: ${err.message.slice(0, 80)}`);
         if (context) await context.close().catch(() => {});
       }
     }
 
     throw new Error('Tidak dapat menemukan stream HLS dari semua embed player. Coba video lain.');
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      // Small delay to let any pending CDP operations finish
+      await new Promise(r => setTimeout(r, 500));
+      await browser.close().catch(() => {});
+    }
   }
 }
 
