@@ -37,33 +37,50 @@ const CATEGORIES = {
 
 /**
  * Parse post list from a cheerio-loaded page.
+ * Nekopoi uses .nk-search-results > ul > li > a.nk-search-item for category pages.
  */
 function parsePostList($, base) {
   const posts = [];
-  // Main content cards: .nk-hentai-grid .nk-post-card or .nk-jav-grid items
-  $('article.nk-post-card, .nk-hentai-grid article, .nk-jav-grid article, h2.entry-title').each((i, el) => {
-    let title, link, thumb;
 
-    if ($(el).is('h2')) {
-      // Fallback: h2.entry-title
-      const a = $(el).find('a').first();
-      link = a.attr('href');
-      title = a.text().trim();
-      thumb = null;
-    } else {
-      const a = $(el).find('.nk-post-thumb a, h2 a, h3 a, .entry-title a').first();
-      link = a.attr('href') || $(el).find('a').first().attr('href');
-      title = $(el).find('h2, h3, .nk-post-title, .entry-title').first().text().trim()
-        || $(el).find('a').first().attr('title') || '';
-      thumb = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || null;
-    }
+  // Primary selector: category/search pages use .nk-search-item
+  $('.nk-search-results .nk-search-item, .nk-search-item').each((i, el) => {
+    const link = $(el).attr('href') || $(el).find('a').first().attr('href');
+    const title = $(el).find('h2, h3').first().text().trim();
+    // Thumbnail via background-image style
+    const style = $(el).find('[style*="background-image"]').attr('style') || '';
+    const thumbMatch = style.match(/url\(['"]?([^'")\s]+)['"]?\)/);
+    const thumb = thumbMatch ? thumbMatch[1] : $(el).find('img').attr('src') || null;
 
     if (!link || !title) return;
-    // Skip category/page links
     if (link.match(/\/category\/|\/page\/|\/hentai-list|\/jav-list|\/genre-list/)) return;
-
     posts.push({ title, url: link, thumb, source: 'nekopoi' });
   });
+
+  // Fallback: .nk-post-card or article-based (homepage)
+  if (posts.length === 0) {
+    $('article.nk-post-card, .nk-hentai-grid article, .nk-jav-grid article').each((i, el) => {
+      const a = $(el).find('.nk-post-thumb a, h2 a, h3 a, .entry-title a').first();
+      const link = a.attr('href') || $(el).find('a').first().attr('href');
+      const title = $(el).find('h2, h3, .entry-title').first().text().trim()
+        || $(el).find('a').first().attr('title') || '';
+      const thumb = $(el).find('img').attr('src') || $(el).find('img').attr('data-src') || null;
+      if (!link || !title) return;
+      if (link.match(/\/category\/|\/page\/|\/hentai-list|\/jav-list/)) return;
+      posts.push({ title, url: link, thumb, source: 'nekopoi' });
+    });
+  }
+
+  // Last fallback: any h2 a links
+  if (posts.length === 0) {
+    $('h2 a, h3 a').each((i, el) => {
+      const link = $(el).attr('href') || '';
+      const title = $(el).text().trim();
+      if (!link || !title) return;
+      if (link.match(/\/category\/|\/page\/|\/hentai-list|\/jav-list|\/genre-list/)) return;
+      posts.push({ title, url: link, thumb: null, source: 'nekopoi' });
+    });
+  }
+
   return posts;
 }
 
@@ -76,7 +93,7 @@ async function browse(category = 'hentai', page = 1) {
   const base = BASE();
   const catPath = CATEGORIES[category] || CATEGORIES.hentai;
   const url = page > 1 ? `${base}${catPath}page/${page}/` : `${base}${catPath}`;
-  const { data } = await http.get(url);
+  const { data } = await http.get(url, { headers: { 'Referer': base } });
   const $ = cheerio.load(data);
   return parsePostList($, base);
 }
@@ -93,20 +110,7 @@ async function search(query, page = 1) {
     : `${base}/?s=${encodeURIComponent(query)}`;
   const { data } = await http.get(url);
   const $ = cheerio.load(data);
-
-  // If no results, try category-level titles
-  const posts = parsePostList($, base);
-
-  // Fallback: grab h2/h3 links from search results
-  if (posts.length === 0) {
-    $('h2 a, h3 a, .entry-title a').each((i, el) => {
-      const link = $(el).attr('href') || '';
-      const title = $(el).text().trim();
-      if (!link || link.match(/\/category\/|\/page\/|\/hentai-list|\/jav-list/)) return;
-      posts.push({ title, url: link, thumb: null, source: 'nekopoi' });
-    });
-  }
-  return posts;
+  return parsePostList($, base);
 }
 
 /**
