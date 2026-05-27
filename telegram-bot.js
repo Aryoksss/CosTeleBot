@@ -4230,6 +4230,59 @@ function startBot() {
       return;
     }
 
+    // If awaiting notif message (from menu_notif button)
+    if (state && state.step === 'AWAITING_NOTIF_MESSAGE') {
+      userStates.delete(chatId);
+      if (!isAdmin(chatId)) return;
+
+      const senderName = msg.from?.first_name || 'Admin';
+      let title, body;
+      if (text.includes(' | ')) {
+        const sep = text.indexOf(' | ');
+        title = text.slice(0, sep).trim();
+        body = text.slice(sep + 3).trim();
+      } else {
+        title = `💬 ${senderName}`;
+        body = text;
+      }
+
+      if (!body) {
+        bot.sendMessage(chatId, '❌ Pesan kosong, notif tidak dikirim.', { parse_mode: 'HTML' }).catch(() => {});
+        return;
+      }
+
+      const previewMsg = await bot.sendMessage(chatId,
+        `📤 <b>Mengirim notifikasi...</b>\n\n<b>Title:</b> ${escHtml(title)}\n<b>Pesan:</b> ${escHtml(body)}`,
+        { parse_mode: 'HTML' }
+      ).catch(() => null);
+
+      try {
+        const { sent, failed, total } = await sendPushNotif({ title, body, chatId });
+        const statusIcon = failed === 0 ? '✅' : (sent > 0 ? '⚠️' : '❌');
+        const deviceLine = total > 0
+          ? `<b>Device:</b> ${sent}/${total} berhasil${failed > 0 ? `, ${failed} gagal` : ''}`
+          : `<b>Device:</b> Tidak ada penerima terdaftar`;
+        const resultText = `${statusIcon} <b>Notifikasi ${sent > 0 ? 'Terkirim' : 'Gagal'}</b>\n\n<b>Title:</b> ${escHtml(title)}\n<b>Pesan:</b> ${escHtml(body)}\n${deviceLine}`;
+
+        if (previewMsg) {
+          bot.editMessageText(resultText, { chat_id: chatId, message_id: previewMsg.message_id, parse_mode: 'HTML' })
+            .catch(() => bot.sendMessage(chatId, resultText, { parse_mode: 'HTML' }).catch(() => {}));
+        } else {
+          bot.sendMessage(chatId, resultText, { parse_mode: 'HTML' }).catch(() => {});
+        }
+        log.ok(`[Notif] Admin ${chatId} → title="${title.slice(0, 40)}" body="${body.slice(0, 60)}" sent=${sent}/${total}`);
+      } catch (e) {
+        log.error(`[Notif] Gagal: ${e.message}`);
+        const errText = `❌ <b>Gagal kirim notif</b>\n\n<code>${escHtml(e.message.slice(0, 300))}</code>`;
+        if (previewMsg) {
+          bot.editMessageText(errText, { chat_id: chatId, message_id: previewMsg.message_id, parse_mode: 'HTML' }).catch(() => {});
+        } else {
+          bot.sendMessage(chatId, errText, { parse_mode: 'HTML' }).catch(() => {});
+        }
+      }
+      return;
+    }
+
     // Direct link paste
     if (text.includes('terabox.com') || text.includes('1024terabox.com')) {
       userStates.set(chatId, { step: 'AWAITING_SOURCE', url: text });
@@ -5020,20 +5073,18 @@ function startBot() {
       bot.answerCallbackQuery(query.id).catch(() => {});
       bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
 
-      const senderName = query.from?.first_name || 'Admin';
+      userStates.set(chatId, { step: 'AWAITING_NOTIF_MESSAGE' });
+
       await bot.sendMessage(chatId,
-        `🔔 <b>Push Notification</b>\n\n` +
+        `🔔 <b>Kirim Push Notification</b>\n\n` +
+        `Ketik pesan yang ingin dikirim:\n\n` +
         `<b>Format:</b>\n` +
-        `• <code>/notif pesan kamu</code>\n` +
-        `  → Title: <i>${escHtml(senderName)}</i>\n\n` +
-        `• <code>/notif Judul | pesan kamu</code>\n` +
-        `  → Title kustom sebelum <code>|</code>\n\n` +
-        `<b>Contoh:</b>\n` +
-        `<code>/notif Lagi ngapain sayang? 💕</code>\n` +
-        `<code>/notif Info | Ada update baru! 🚀</code>`,
+        `• <code>pesan kamu</code> — title otomatis\n` +
+        `• <code>Judul | pesan kamu</code> — title kustom\n\n` +
+        `<i>Contoh: Info | Ada update baru! 🚀</i>`,
         {
           parse_mode: 'HTML',
-          reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] },
+          reply_markup: { inline_keyboard: [[{ text: '❌ Batal', callback_data: 'menu_awal' }]] },
         }
       ).catch(() => {});
       return;
