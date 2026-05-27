@@ -4235,6 +4235,10 @@ function startBot() {
       userStates.delete(chatId);
       if (!isAdmin(chatId)) return;
 
+      // Hapus prompt message dan input user
+      if (state.promptMsgId) bot.deleteMessage(chatId, state.promptMsgId).catch(() => {});
+      bot.deleteMessage(chatId, msg.message_id).catch(() => {});
+
       const senderName = msg.from?.first_name || 'Admin';
       let title, body;
       if (text.includes(' | ')) {
@@ -5075,7 +5079,7 @@ function startBot() {
 
       userStates.set(chatId, { step: 'AWAITING_NOTIF_MESSAGE' });
 
-      await bot.sendMessage(chatId,
+      const promptMsg = await bot.sendMessage(chatId,
         `🔔 <b>Kirim Push Notification</b>\n\n` +
         `Ketik pesan yang ingin dikirim:\n\n` +
         `<b>Format:</b>\n` +
@@ -5087,6 +5091,8 @@ function startBot() {
           reply_markup: { inline_keyboard: [[{ text: '❌ Batal', callback_data: 'menu_awal' }]] },
         }
       ).catch(() => {});
+      // Simpan message_id prompt agar bisa dihapus setelah notif terkirim
+      if (promptMsg) userStates.set(chatId, { step: 'AWAITING_NOTIF_MESSAGE', promptMsgId: promptMsg.message_id });
       return;
     }
 
