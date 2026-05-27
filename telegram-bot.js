@@ -3990,10 +3990,47 @@ function startBot() {
   });
 
   // ─── PUSH NOTIFICATION KE APLIKASI GALERI ────────────────────────────────
-  // Penggunaan: /notif <pesan>
-  // Contoh: /notif Hei sayang, lagi ngapain? 💕
-  // Hanya bisa dipakai oleh admin (ADMIN_IDS di .env)
-  bot.onText(/^\/notif(?:\s+(.+))?$/s, async (msg, match) => {
+  // Format:
+  //   /notif <pesan>                  → kirim dengan title default (nama sender)
+  //   /notif <title> | <pesan>        → kirim dengan title kustom
+  //   /notif                          → tampilkan help + contoh
+  // Hanya admin. Rate-limit: 1 notif per 10 detik.
+
+  const notifLastSent = new Map(); // chatId → timestamp
+
+  async function sendPushNotif({ title, body, chatId }) {
+    const MAX_RETRIES = 2;
+    let lastErr = null;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const res = await axios.post(
+          process.env.SUPABASE_NOTIF_URL || 'https://qcqejwhspgjyqjxjiwku.supabase.co/functions/v1/push-notification',
+          { type: 'scheduled', title, body },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+            },
+            timeout: 12000,
+          }
+        );
+        const results = res.data?.results || [];
+        const sent = results.filter(r => r.status === 'fulfilled').length;
+        const failed = results.filter(r => r.status === 'rejected').length;
+        const total = results.length;
+        return { sent, failed, total, raw: res.data };
+      } catch (e) {
+        lastErr = e;
+        if (attempt < MAX_RETRIES) {
+          log.warn(`[Notif] attempt ${attempt} gagal: ${e.message}, retry...`);
+          await sleep(2000);
+        }
+      }
+    }
+    throw lastErr;
+  }
+
+  bot.onText(/^\/notif(?:\s+([\s\S]+))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
     bot.deleteMessage(chatId, msg.message_id).catch(() => {});
 
@@ -4002,46 +4039,106 @@ function startBot() {
       return;
     }
 
-    const text = match[1] && match[1].trim();
-    if (!text) {
-      bot.sendMessage(chatId,
-        '❌ <b>Format salah.</b>\n\nGunakan: <code>/notif pesan kamu di sini</code>',
+    const senderName = msg.from?.first_name || 'Admin';
+    const input = match[1] && match[1].trim();
+
+    // Tanpa argumen → tampilkan help
+    if (!input) {
+      await bot.sendMessage(chatId,
+        `🔔 <b>Push Notification</b>\n\n` +
+        `<b>Format:</b>\n` +
+        `• <code>/notif pesan kamu</code>\n` +
+        `  → Title: <i>${escHtml(senderName)}</i>\n\n` +
+        `• <code>/notif Judul | pesan kamu</code>\n` +
+        `  → Title: <i>Judul</i>, Body: <i>pesan kamu</i>\n\n` +
+        `<b>Contoh:</b>\n` +
+        `<code>/notif Lagi ngapain sayang? 💕</code>\n` +
+        `<code>/notif Info | Ada update baru tersedia! 🚀</code>\n\n` +
+        `<b>Catatan:</b> Rate-limit 1 notif / 10 detik.`,
         { parse_mode: 'HTML' }
       ).catch(() => {});
       return;
     }
 
-    const senderName = msg.from?.first_name || 'Kamu';
+    // Rate-limit check
+    const lastSent = notifLastSent.get(chatId) || 0;
+    const cooldown = 10000;
+    const elapsed = Date.now() - lastSent;
+    if (elapsed < cooldown) {
+      const wait = Math.ceil((cooldown - elapsed) / 1000);
+      bot.sendMessage(chatId,
+        `⏳ <b>Tunggu ${wait} detik lagi</b> sebelum kirim notif berikutnya.`,
+        { parse_mode: 'HTML' }
+      ).catch(() => {});
+      return;
+    }
+
+    // Parse: "Title | body" atau langsung body
+    let title, body;
+    if (input.includes(' | ')) {
+      const sep = input.indexOf(' | ');
+      title = input.slice(0, sep).trim();
+      body = input.slice(sep + 3).trim();
+    } else {
+      title = `💬 ${senderName}`;
+      body = input;
+    }
+
+    if (!body) {
+      bot.sendMessage(chatId,
+        `❌ Pesan tidak boleh kosong.\n\nContoh: <code>/notif Halo sayang 💕</code>`,
+        { parse_mode: 'HTML' }
+      ).catch(() => {});
+      return;
+    }
+
+    // Preview + kirim
+    const previewMsg = await bot.sendMessage(chatId,
+      `📤 <b>Mengirim notifikasi...</b>\n\n` +
+      `<b>Title:</b> ${escHtml(title)}\n` +
+      `<b>Pesan:</b> ${escHtml(body)}`,
+      { parse_mode: 'HTML' }
+    ).catch(() => null);
+
+    notifLastSent.set(chatId, Date.now());
 
     try {
-      const res = await axios.post(
-        'https://qcqejwhspgjyqjxjiwku.supabase.co/functions/v1/push-notification',
-        {
-          type: 'scheduled',
-          title: `💬 ${senderName}`,
-          body: text,
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
-          },
-          timeout: 10000,
-        }
-      );
+      const { sent, failed, total } = await sendPushNotif({ title, body, chatId });
 
-      const sent = res.data?.results?.filter(r => r.status === 'fulfilled').length ?? '?';
-      bot.sendMessage(chatId,
-        `✅ <b>Notif terkirim!</b>\n\n<b>Pesan:</b> ${escHtml(text)}\n<b>Device:</b> ${sent} penerima`,
-        { parse_mode: 'HTML' }
-      ).catch(() => {});
-      log.ok(`[Notif] Admin ${chatId} kirim notif: "${text.slice(0, 60)}"`);
+      const statusIcon = failed === 0 ? '✅' : (sent > 0 ? '⚠️' : '❌');
+      const deviceLine = total > 0
+        ? `<b>Device:</b> ${sent}/${total} berhasil${failed > 0 ? `, ${failed} gagal` : ''}`
+        : `<b>Device:</b> Tidak ada penerima terdaftar`;
+
+      const resultText =
+        `${statusIcon} <b>Notifikasi ${sent > 0 ? 'Terkirim' : 'Gagal'}</b>\n\n` +
+        `<b>Title:</b> ${escHtml(title)}\n` +
+        `<b>Pesan:</b> ${escHtml(body)}\n` +
+        `${deviceLine}`;
+
+      if (previewMsg) {
+        bot.editMessageText(resultText, {
+          chat_id: chatId, message_id: previewMsg.message_id, parse_mode: 'HTML'
+        }).catch(() => bot.sendMessage(chatId, resultText, { parse_mode: 'HTML' }).catch(() => {}));
+      } else {
+        bot.sendMessage(chatId, resultText, { parse_mode: 'HTML' }).catch(() => {});
+      }
+
+      log.ok(`[Notif] Admin ${chatId} → title="${title.slice(0, 40)}" body="${body.slice(0, 60)}" sent=${sent}/${total}`);
     } catch (e) {
       log.error(`[Notif] Gagal kirim: ${e.message}`);
-      bot.sendMessage(chatId,
-        `❌ Gagal kirim notif: <code>${escHtml(e.message.slice(0, 200))}</code>`,
-        { parse_mode: 'HTML' }
-      ).catch(() => {});
+      const errText =
+        `❌ <b>Gagal kirim notifikasi</b>\n\n` +
+        `<code>${escHtml(e.message.slice(0, 300))}</code>\n\n` +
+        `💡 Cek <code>SUPABASE_SERVICE_KEY</code> di .env atau status Supabase Edge Function.`;
+
+      if (previewMsg) {
+        bot.editMessageText(errText, {
+          chat_id: chatId, message_id: previewMsg.message_id, parse_mode: 'HTML'
+        }).catch(() => bot.sendMessage(chatId, errText, { parse_mode: 'HTML' }).catch(() => {}));
+      } else {
+        bot.sendMessage(chatId, errText, { parse_mode: 'HTML' }).catch(() => {});
+      }
     }
   });
 
