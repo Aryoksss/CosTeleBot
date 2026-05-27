@@ -3497,7 +3497,10 @@ async function sendMainMenu(bot, chatId) {
   ];
 
   if (isAdmin(chatId)) {
-    keyboard.push([{ text: '💻 Admin Dashboard', callback_data: 'menu_vps' }]);
+    keyboard.push([
+      { text: '💻 Admin Dashboard', callback_data: 'menu_vps' },
+      { text: '🔔 Kirim Notif', callback_data: 'menu_notif' },
+    ]);
   }
 
   const sentMsg = await sendMenuWithThumb(bot, chatId, text, keyboard);
@@ -5007,6 +5010,32 @@ function startBot() {
 
       const txt = `💻 <b>Statistik Server VPS Global</b>\n━━━━━━━━━━━━━━━━━━\n⏳ <b>Uptime:</b> ${hrs} Jam ${mins} Menit\n💾 <b>RAM Node.js:</b> ${ramMB} MB\n🖥️ <b>RAM VPS:</b> Sisa ${freeMemMB} MB / ${totalMemMB} MB\n\n📈 <b>Kinerja Bot:</b>\n🌐 Trafik Disalurkan: <b>${dlFormatted}</b>\n✅ Total Eksekusi Terkirim: <b>${botStats.totalJobs}</b> \n━━━━━━━━━━━━━━━━━━`;
       await bot.sendMessage(chatId, txt, { parse_mode: 'HTML' });
+      return;
+    }
+
+    if (action === 'menu_notif') {
+      if (!isAdmin(chatId)) {
+        return bot.answerCallbackQuery(query.id, { text: '⛔ Akses Ditolak: Anda bukan Admin!', show_alert: true });
+      }
+      bot.answerCallbackQuery(query.id).catch(() => {});
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => {});
+
+      const senderName = query.from?.first_name || 'Admin';
+      await bot.sendMessage(chatId,
+        `🔔 <b>Push Notification</b>\n\n` +
+        `<b>Format:</b>\n` +
+        `• <code>/notif pesan kamu</code>\n` +
+        `  → Title: <i>${escHtml(senderName)}</i>\n\n` +
+        `• <code>/notif Judul | pesan kamu</code>\n` +
+        `  → Title kustom sebelum <code>|</code>\n\n` +
+        `<b>Contoh:</b>\n` +
+        `<code>/notif Lagi ngapain sayang? 💕</code>\n` +
+        `<code>/notif Info | Ada update baru! 🚀</code>`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] },
+        }
+      ).catch(() => {});
       return;
     }
 
