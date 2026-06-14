@@ -176,6 +176,8 @@ const gdriveResolver = require('./scrapers/gdriveResolver');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
+const groq = require('./groqClient');
+const assistant = require('./assistant');
 const { renderProgressBar, createProgressThrottler } = require('./utils/progressUi');
 const healthcheck = require('./utils/healthcheck');
 const backup = require('./utils/backup');
@@ -405,6 +407,8 @@ async function sanitizeMediasForTelegram(medias, statusCallback) {
 // ─── STATE MANAGEMENT ────────────────────────────────────────────────────────
 // Format: chatId -> { step: 'AWAITING_SOURCE' | 'AWAITING_PASSWORD', url: string }
 const userStates = new Map();
+// Anti-spam ringan untuk balasan AI assistant (chatId -> timestamp terakhir balas).
+const chatReplyCooldown = new Map();
 const browseCache = new Map(); // chatId -> { posts: [], page, category, query }
 const menuTracker = new Map(); // chatId -> lastMessageId (Untuk auto-clean menu lama)
 const kemonoTracker = new Map(); // chatId -> array of message_ids (Untuk auto-clean media gacha)
@@ -4284,10 +4288,11 @@ function startBot() {
       return;
     }
 
-    // ── Smart Search: detect intent dari pesan bebas ──
-    // Hanya kalau tidak ada state aktif (password/awaiting search) dan pesan bukan URL.
-    // Skip text yang terlalu pendek (< 5 char) untuk hindari false positive pada "ya"/"ok".
-    if (text.length >= 5 && text.length <= 200 && !text.startsWith('http')) {
+    // ── Smart Search + AI Assistant untuk pesan bebas ──
+    // Sampai sini berarti: bukan command, bukan link terdeteksi, dan tidak ada
+    // state AWAITING_* aktif. Coba deteksi niat pencarian; kalau bukan pencarian,
+    // balas sebagai asisten interaktif yang tahu daftar command.
+    if (!text.startsWith('http') && text.length <= 500) {
       try {
         const intent = await intentDetector.detectIntent(text);
         if (intent.intent === 'search' && intent.query) {
@@ -4295,8 +4300,25 @@ function startBot() {
           bot.deleteMessage(chatId, msg.message_id).catch(() => { });
           return doSmartSearchMenu(bot, chatId, intent.query, intent.preferredSource);
         }
+
+        // Bukan pencarian → balas sebagai asisten (kalau diaktifkan + Groq tersedia).
+        // Nonaktifkan dengan env GROQ_CHAT_REPLY=0.
+        if (process.env.GROQ_CHAT_REPLY !== '0' && groq.hasKey()) {
+          const last = chatReplyCooldown.get(chatId) || 0;
+          if (Date.now() - last < 1500) return; // anti-spam ringan per user
+          chatReplyCooldown.set(chatId, Date.now());
+
+          bot.sendChatAction(chatId, 'typing').catch(() => { });
+          // Sembunyikan command admin dari user biasa.
+          const cmds = isAdmin(chatId) ? COMMANDS : COMMANDS.filter(c => !c.adminOnly);
+          const reply = await assistant.chatReply(text, cmds);
+          if (reply && reply.trim()) {
+            await bot.sendMessage(chatId, reply.trim()).catch(() => { });
+          }
+          return;
+        }
       } catch (e) {
-        log.warn(`[SmartSearch] detect error: ${e.message}`);
+        log.warn(`[SmartSearch/Assistant] error: ${e.message}`);
       }
     }
   });
