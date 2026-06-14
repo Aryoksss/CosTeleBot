@@ -173,6 +173,7 @@ const hostResolver = require('./scrapers/hostResolver');
 const megaResolver = require('./scrapers/megaResolver');
 const kusonimeScraper = require('./scrapers/kusonime');
 const gdriveResolver = require('./scrapers/gdriveResolver');
+const teraboxResolver = require('./scrapers/teraboxResolver');
 const historyTracker = require('./history');
 const statsDb = require('./statsDb');
 const intentDetector = require('./intentDetector');
@@ -182,6 +183,7 @@ const { renderProgressBar, createProgressThrottler } = require('./utils/progress
 const healthcheck = require('./utils/healthcheck');
 const backup = require('./utils/backup');
 const dashboard = require('./utils/dashboard');
+const browserReaper = require('./utils/browserReaper');
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -473,41 +475,61 @@ async function autoCleanOldMenu(bot, chatId, newMsgId) {
 }
 
 // ─── TERABOX DOWNLOAD PIPELINE ───────────────────────────────────────────────
+// Strategi: xAPIverse (berbayar, zip semua file, paling proven) sebagai PRIMARY.
+// Kalau gagal / kehabisan credit / key kosong → fallback ke provider GRATIS
+// (tera-core, dst) lewat teraboxResolver. Return shape selalu sama agar
+// processDownload tidak perlu tahu provider mana yang dipakai.
 async function getApiResult(teraboxUrl) {
-  // xAPIverse: paid credits, zip-all-files, proven work
   let lastErr = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const { data } = await axios.post(CONFIG.XAPIVERSE_URL, { url: teraboxUrl }, {
-        headers: { 'Content-Type': 'application/json', 'xAPIverse-Key': CONFIG.XAPIVERSE_KEY },
-        timeout: 30000,
-      });
-      if (!data.list || !data.list.length) {
-        throw new Error(data.message || 'xAPIverse return empty list');
+
+  // PRIMARY: xAPIverse (hanya kalau key tersedia)
+  if (CONFIG.XAPIVERSE_KEY) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const { data } = await axios.post(CONFIG.XAPIVERSE_URL, { url: teraboxUrl }, {
+          headers: { 'Content-Type': 'application/json', 'xAPIverse-Key': CONFIG.XAPIVERSE_KEY },
+          timeout: 30000,
+        });
+        if (!data.list || !data.list.length) throw new Error(data.message || 'xAPIverse return empty list');
+        const item = data.list[0];
+        if (!item.zip_dlink) throw new Error('xAPIverse no zip_dlink (file mungkin dihapus/private)');
+        return {
+          zipDlink: item.zip_dlink,
+          name: item.name || 'archive',
+          sizeMB: (item.size / 1024 / 1024).toFixed(1),
+          credits: data.free_credits_remaining || '?',
+          provider: 'xAPIverse',
+        };
+      } catch (e) {
+        lastErr = e;
+        log.warn(`[Terabox] xAPIverse attempt ${attempt}/3 gagal: ${e.message}`);
+        if (attempt < 3) await sleep(2000 * attempt);
       }
-      const item = data.list[0];
-      if (!item.zip_dlink) {
-        throw new Error('xAPIverse no zip_dlink (file mungkin sudah dihapus atau private)');
-      }
-      return {
-        zipDlink: item.zip_dlink,
-        name: item.name || 'archive',
-        sizeMB: (item.size / 1024 / 1024).toFixed(1),
-        credits: data.free_credits_remaining || '?',
-      };
-    } catch (e) {
-      lastErr = e;
-      const status = e.response?.status;
-      if (status && status >= 400 && status < 500) {
-        const body = e.response?.data;
-        const msg = typeof body === 'object' ? (body.message || body.error || JSON.stringify(body)) : String(body || e.message);
-        throw new Error(`Terabox API error (${status}): ${msg.slice(0, 200)}`);
-      }
-      log.warn(`[Terabox] attempt ${attempt}/3 gagal: ${e.message}`);
-      if (attempt < 3) await sleep(2000 * attempt);
     }
+    log.warn('[Terabox] xAPIverse gagal total → fallback provider gratis (tera-core)...');
+  } else {
+    log.info('[Terabox] XAPIVERSE_KEY kosong → langsung pakai provider gratis (tera-core)...');
   }
-  throw new Error(`Terabox API tidak responsif setelah 3 retry: ${lastErr?.message || 'unknown'}`);
+
+  // FALLBACK: provider gratis (tera-core, dst)
+  try {
+    const { files, source } = await teraboxResolver.resolve(teraboxUrl);
+    const best = teraboxResolver.pickBestFile(files);
+    if (!best || !best.directLink) throw new Error('tidak ada file dengan direct link');
+    if (files.length > 1) {
+      log.warn(`[Terabox] ${source}: folder berisi ${files.length} file — unduh terbesar (${best.filename}). Multi-file belum didukung di jalur gratis.`);
+    }
+    log.info(`[Terabox] Resolved via ${source} (gratis): ${best.filename}`);
+    return {
+      zipDlink: best.directLink,
+      name: best.filename || 'terabox_file',
+      sizeMB: ((best.sizeBytes || 0) / 1024 / 1024).toFixed(1),
+      credits: `${source} (gratis)`,
+      provider: source,
+    };
+  } catch (e2) {
+    throw new Error(`Semua resolver Terabox gagal. xAPIverse: ${lastErr ? lastErr.message : 'n/a'} | gratis: ${e2.message}`);
+  }
 }
 
 async function _downloadStreamOnce(url, destPath, onProgress, cookie = null, opts = {}) {
@@ -3533,6 +3555,9 @@ function startBot() {
   if (CONFIG.LOCAL_API_URL) botOptions.baseApiUrl = CONFIG.LOCAL_API_URL;
   const bot = new TelegramBot(CONFIG.BOT_TOKEN, botOptions);
   log.ok('Bot Telegram aktif ✅');
+
+  // Jaring pengaman: bersihkan proses Chromium (Playwright) yang nyangkut.
+  browserReaper.startBrowserReaper();
 
   // Start dashboard web kalau env DASHBOARD_USER+DASHBOARD_PASS di-set
   dashboard.startDashboard({
