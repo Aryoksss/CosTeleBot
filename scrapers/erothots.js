@@ -178,8 +178,31 @@ async function probeSourceSize(url) {
   }
 }
 
+/**
+ * Browse video terbaru (paginasi via /videos/<page>). Untuk fitur "lihat-lihat" + gacha.
+ * @param {number} page
+ * @returns {Promise<{items, hasNext}>}
+ */
+async function scrapeBrowse(page = 1) {
+  const url = page > 1 ? `${BASE_URL}/videos/${page}` : `${BASE_URL}/videos`;
+  log.info(`[EroThots] browse page=${page}`);
+  try {
+    const r = await client.get(url);
+    if (r.status !== 200) { log.warn(`[EroThots] browse HTTP ${r.status}`); return { items: [], hasNext: false }; }
+    const items = parseListingHTML(r.data);
+    // /videos/<page> punya banyak halaman; anggap masih ada next selama dapat cukup item.
+    const hasNext = items.length >= 20;
+    log.info(`[EroThots] browse → ${items.length} items (next=${hasNext})`);
+    return { items, hasNext };
+  } catch (e) {
+    log.error(`[EroThots] browse error: ${e.message}`);
+    return { items: [], hasNext: false };
+  }
+}
+
 module.exports = {
   scrapeSearch,
+  scrapeBrowse,
   scrapeDetail,
   probeSourceSize,
 };

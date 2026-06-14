@@ -2377,25 +2377,30 @@ async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
 }
 
 // ─── EROTHOTS HANDLERS ───────────────────────────────────────────────────────
-async function doEroBrowse(bot, chatId, query, page = 1) {
-  log.info(`[User ${chatId}] Request EroThots search "${query}" page=${page}`);
-  const loadMsg = await bot.sendMessage(chatId, `🔥 <b>Memuat EroThots...</b>\n<i>Query: ${escHtml(query)}</i>`, { parse_mode: 'HTML' });
+async function doEroBrowse(bot, chatId, query, page = 1, mode = 'search') {
+  const isBrowse = mode === 'browse';
+  log.info(`[User ${chatId}] EroThots ${mode} "${isBrowse ? '(latest)' : query}" page=${page}`);
+  const loadMsg = await bot.sendMessage(chatId, `🔥 <b>Memuat EroThots...</b>${isBrowse ? '' : `\n<i>Query: ${escHtml(query)}</i>`}`, { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
 
   try {
-    const { items, hasNext } = await erothotsScraper.scrapeSearch(query, page);
+    const { items, hasNext } = isBrowse
+      ? await erothotsScraper.scrapeBrowse(page)
+      : await erothotsScraper.scrapeSearch(query, page);
     if (!items.length) {
-      return bot.editMessageText(`⚠️ Tidak ada video ditemukan untuk <b>${escHtml(query)}</b>.`, {
+      return bot.editMessageText(`⚠️ Tidak ada video ${isBrowse ? 'di halaman ini' : `untuk <b>${escHtml(query)}</b>`}.`, {
         chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
         reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] }
       });
     }
 
     const shown = items.slice(0, 8);
-    eroBrowseCache.set(chatId, { items: shown, query, page, hasNext });
+    eroBrowseCache.set(chatId, { items: shown, query, page, hasNext, mode });
 
-    let text = `🔥 <b>EroThots:</b> <i>${escHtml(query)}</i> · Halaman ${page}\n\n`;
-    if (page > 1) text += `<i>⚠️ Catatan: page 2+ sering campur dengan video lain (bukan filter query).</i>\n\n`;
+    let text = isBrowse
+      ? `🔥 <b>EroThots — Terbaru</b> · Halaman ${page}\n\n`
+      : `🔥 <b>EroThots:</b> <i>${escHtml(query)}</i> · Halaman ${page}\n\n`;
+    if (!isBrowse && page > 1) text += `<i>⚠️ Catatan: page 2+ sering campur dengan video lain (bukan filter query).</i>\n\n`;
     shown.forEach((v, i) => {
       const dur = v.durationText ? ` · ⏱️ ${v.durationText}` : '';
       text += `${i + 1}. ${escHtml(v.title.slice(0, 75))}${dur}\n`;
@@ -2412,7 +2417,7 @@ async function doEroBrowse(bot, chatId, query, page = 1) {
     if (page > 1) navRow.push({ text: '◀ Prev', callback_data: `eropage_${page - 1}` });
     if (hasNext) navRow.push({ text: 'Next ▶', callback_data: `eropage_${page + 1}` });
     if (navRow.length) buttons.push(navRow);
-    buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+    buttons.push([{ text: '🎲 Gacha', callback_data: 'ero_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]);
 
     await bot.editMessageText(text, {
       chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
@@ -2421,6 +2426,52 @@ async function doEroBrowse(bot, chatId, query, page = 1) {
   } catch (err) {
     log.error(`[EroThots] browse error: ${err.message}`);
     bot.editMessageText(`❌ Gagal: ${err.message}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+  }
+}
+
+/**
+ * Menu EroThots: Search / Browse Terbaru / Gacha.
+ */
+async function doEroMenu(bot, chatId) {
+  const sentMsg = await bot.sendMessage(chatId, `🔥 <b>EroThots</b>\n\nPilih mode:`, {
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🔍 Search', callback_data: 'ero_search_prompt' }],
+        [{ text: '📋 Browse Terbaru', callback_data: 'ero_browse' }, { text: '🎲 Gacha', callback_data: 'ero_gacha' }],
+        [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+      ]
+    }
+  });
+  autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+}
+
+/**
+ * Gacha EroThots: ambil halaman browse acak → pilih video acak yang belum pernah dilihat.
+ */
+async function doEroGacha(bot, chatId) {
+  const loadMsg = await bot.sendMessage(chatId, '🎲 <b>Gacha EroThots...</b>', { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+  try {
+    const page = Math.floor(Math.random() * 20) + 1;
+    const { items } = await erothotsScraper.scrapeBrowse(page);
+    if (!items.length) {
+      return bot.editMessageText('😔 Gacha kosong, coba lagi.', {
+        chat_id: chatId, message_id: loadMsg.message_id,
+        reply_markup: { inline_keyboard: [[{ text: '🎲 Reroll', callback_data: 'ero_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] }
+      });
+    }
+    const unseen = items.filter(v => !historyTracker.hasSeen(chatId, 'ero', v.link));
+    const pool = unseen.length ? unseen : items;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    historyTracker.markSeen(chatId, 'ero', pick.link);
+    // Simpan sebagai listing 1-item supaya detail/download pakai index 0.
+    eroBrowseCache.set(chatId, { items: [pick], query: '', page, hasNext: false, mode: 'gacha' });
+    bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
+    return doEroDetail(bot, chatId, pick);
+  } catch (e) {
+    log.error(`[EroThots] gacha error: ${e.message}`);
+    bot.editMessageText(`❌ Gacha gagal: ${escHtml(e.message.slice(0, 150))}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
   }
 }
 
@@ -3574,7 +3625,7 @@ async function sendMainMenu(bot, chatId) {
     [
       { text: '🎬 Rule34', callback_data: 'menu_r34' },
       { text: '🎥 Javtiful', callback_data: 'jav_menu' },
-      { text: '🔥 EroThots', callback_data: 'ero_search_prompt' },
+      { text: '🔥 EroThots', callback_data: 'ero_menu' },
     ],
     [
       { text: '📌 Pinterest', callback_data: 'pin_search_prompt' },
@@ -3791,20 +3842,11 @@ function startBot() {
     }
   });
 
-  registerCommand({ name: 'ero', description: '🔥 EroThots Search' }, async (msg, query) => {
+  registerCommand({ name: 'ero', description: '🔥 EroThots (Search/Browse/Gacha)' }, async (msg, query) => {
     if (query) {
       doEroBrowse(bot, msg.chat.id, query, 1);
     } else {
-      userStates.set(msg.chat.id, { step: 'AWAITING_ERO_SEARCH' });
-      const sentMsg = await bot.sendMessage(msg.chat.id,
-        `🔥 <b>EroThots Search</b>\n\nKetik nama creator, kategori, atau kata kunci.\n` +
-        `Contoh: <code>cosplay</code>, <code>onlyfans</code>, <code>asian</code>.`,
-        {
-          parse_mode: 'HTML',
-          reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] }
-        }
-      );
-      autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
+      doEroMenu(bot, msg.chat.id);
     }
   });
 
@@ -4956,6 +4998,18 @@ function startBot() {
     }
 
     // ── EroThots Callbacks ──
+    if (action === 'ero_menu') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doEroMenu(bot, chatId);
+    }
+    if (action === 'ero_browse') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doEroBrowse(bot, chatId, null, 1, 'browse');
+    }
+    if (action === 'ero_gacha') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doEroGacha(bot, chatId);
+    }
     if (action === 'ero_search_prompt') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       userStates.set(chatId, { step: 'AWAITING_ERO_SEARCH' });
@@ -4973,15 +5027,16 @@ function startBot() {
       const cache = eroBrowseCache.get(chatId);
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       if (cache?.fromAggregate) return doAggregateSearch(bot, chatId, cache.query);
-      if (!cache) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /ero.');
-      return doEroBrowse(bot, chatId, cache.query, cache.page);
+      if (!cache) return doEroMenu(bot, chatId);
+      if (cache.mode === 'gacha') return doEroMenu(bot, chatId);
+      return doEroBrowse(bot, chatId, cache.query, cache.page, cache.mode || 'search');
     }
     if (action.startsWith('eropage_')) {
       const pg = parseInt(action.replace('eropage_', ''), 10);
       const cache = eroBrowseCache.get(chatId);
       if (!cache) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /ero.');
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return doEroBrowse(bot, chatId, cache.query, pg);
+      return doEroBrowse(bot, chatId, cache.query, pg, cache.mode || 'search');
     }
     if (action.startsWith('erodl_')) {
       const idx = parseInt(action.replace('erodl_', ''), 10);
