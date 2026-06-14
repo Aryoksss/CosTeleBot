@@ -17,7 +17,7 @@
  *   }
  */
 
-const axios = require('axios');
+const groq = require('./groqClient');
 
 const log = {
   info: (m) => console.log(`\x1b[36m[INFO]\x1b[0m  ${m}`),
@@ -107,7 +107,9 @@ Schema:
 
 Rules:
 - If user wants to find/search something visual/media → intent="search"
-- Extract core query (character name, topic, tag) without filler words like "tolong", "bot", "saya", "i want", "dong"
+- Extract the core query (character name, topic, tag) and remove filler words like "tolong", "bot", "saya", "i want", "dong", "pengen"
+- Fix obvious typos in the query, but PRESERVE proper nouns (character / cosplayer / anime titles) and their original language — do NOT translate names/titles
+- Normalize JAV codes to uppercase with a dash (e.g. "mide232" or "mide 232" → "MIDE-232")
 - Default preferred_source to "all" if not specified
 - If user mentions "r34" or "rule34" → preferred_source="r34"
 - If user mentions "pinterest" or "pin" → preferred_source="pinterest"
@@ -115,14 +117,9 @@ Rules:
 - If user mentions "jav", "javtiful", or JAV code format (e.g., MIDE-232, SSNI-001) → preferred_source="jav"
 - If user mentions "erothots", "onlyfans leak", or adult amateur content → preferred_source="ero"
 - If user mentions "anime", "nonton", "streaming", "sub indo", "episode", or anime titles → preferred_source="anime"
-- Non-search messages (greetings, questions unrelated to media, help requests) → intent="other"
-- Keep query in original language, don't translate`;
+- Non-search messages (greetings, questions unrelated to media, help requests) → intent="other"`;
 
-// Circuit breaker: kalau LLM error berturut-turut, disable sementara
-let llmDisabledUntil = 0;
-const LLM_DISABLE_DURATION = 10 * 60 * 1000; // 10 menit
-let llmErrorStreak = 0;
-const LLM_ERROR_STREAK_THRESHOLD = 3;
+// Circuit breaker & retry kini ditangani terpusat di groqClient.js.
 
 // In-memory cache untuk dedupe message yang sama (TTL 1 jam)
 const llmCache = new Map(); // key=text.toLowerCase(), value={result, expiresAt}
@@ -146,35 +143,21 @@ function cacheSet(text, result) {
 }
 
 async function detectIntentLLM(text) {
-  if (!process.env.GROQ_API_KEY) return null;
-  if (Date.now() < llmDisabledUntil) return null;
+  if (!groq.isEnabled()) return null;
 
   const cached = cacheGet(text);
   if (cached) return { ...cached, via: 'llm-cache' };
 
-  const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-
   try {
     const t0 = Date.now();
-    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-      model,
+    const parsed = await groq.chatJSON({
       messages: [
         { role: 'system', content: LLM_SYSTEM_PROMPT },
         { role: 'user', content: text.slice(0, 500) }, // cap input
       ],
       temperature: 0,
-      max_tokens: 150,
-      response_format: { type: 'json_object' },
-    }, {
-      headers: {
-        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 10000,
+      maxTokens: 150,
     });
-
-    const content = res.data.choices[0].message.content;
-    const parsed = JSON.parse(content);
 
     // Validasi schema
     if (!parsed || typeof parsed !== 'object') throw new Error('invalid shape');
@@ -195,19 +178,11 @@ async function detectIntentLLM(text) {
       result.intent = 'other';
     }
 
-    llmErrorStreak = 0;
     cacheSet(text, { intent: result.intent, query: result.query, preferredSource: result.preferredSource });
     log.info(`[Intent-LLM] "${text.slice(0, 60)}" → ${result.intent}${result.query ? ` "${result.query}" src=${result.preferredSource}` : ''} (${Date.now() - t0}ms)`);
     return result;
   } catch (e) {
-    llmErrorStreak++;
-    const status = e.response?.status;
-    log.warn(`[Intent-LLM] error (streak=${llmErrorStreak}/${LLM_ERROR_STREAK_THRESHOLD}): HTTP ${status || '?'} ${e.message}`);
-    if (llmErrorStreak >= LLM_ERROR_STREAK_THRESHOLD) {
-      llmDisabledUntil = Date.now() + LLM_DISABLE_DURATION;
-      llmErrorStreak = 0;
-      log.warn(`[Intent-LLM] circuit breaker tripped, disable LLM selama 10 menit`);
-    }
+    log.warn(`[Intent-LLM] error: ${e.message}`);
     return null;
   }
 }

@@ -3525,42 +3525,65 @@ function startBot() {
     },
   });
 
-  // Set Telegram Menu Commands
-  bot.setMyCommands([
-    { command: '/start', description: 'Buka Menu Utama' },
-    { command: '/browse', description: 'Jelajahi Postingan Cosplay Terbaru' },
-    { command: '/gacha', description: '🎲 Gacha Cosplay Random (Surprise Me)' },
-    { command: '/maple', description: '🍁 Gacha Patreon' },
-    { command: '/r34', description: '🎬 Rule34 Video (Browse & Gacha)' },
-    { command: '/pin', description: '📌 Pinterest Search (image/video)' },
-    { command: '/jav', description: '🎥 Javtiful Search' },
-    { command: '/ero', description: '🔥 EroThots Search' },
-    { command: '/anime', description: '🎌 Anime Search (Otakudesu + Oploverz + Kusonime)' },
-    { command: '/search', description: 'Cari Karakter / Album Cosplay' },
-    { command: '/tasks', description: '🚦 Pantau Dasbor Antrean' },
-    { command: '/stats', description: '🔰 Lihat Profil' },
-    { command: '/health', description: '🏥 Cek kesehatan bot + semua sumber' },
-    { command: '/backup', description: '💾 Export data kamu (JSON)' },
-    { command: '/clear', description: '🧹 Bersihkan Seluruh Chat' }
-  ]).catch(() => log.warn('Gagal set command menu.'));
+  // ─── COMMAND REGISTRY ────────────────────────────────────────────────────────
+  // Satu sumber kebenaran untuk semua slash-command. Menyeragamkan:
+  //   - regex anchored + dukungan format grup /cmd@NamaBot (case-insensitive)
+  //   - auto-clean pesan command user
+  //   - logging seragam
+  //   - admin gating (adminOnly)
+  //   - error handling (try/catch) di satu tempat
+  //   - sinkronisasi menu setMyCommands otomatis dari daftar yang sama
+  //
+  // handler menerima (msg, arg, match): `arg` = argumen setelah command (atau null).
+  const COMMANDS = [];
 
-  // Menus
-  bot.onText(/\/start/, (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { }); // Auto-clean chat dari sisi user
-    log.info(`[User ${msg.chat.id}] Execute /start`);
+  function registerCommand(opts, handler) {
+    const { name, aliases = [], description = null, adminOnly = false, autoClean = true, hasArg = true } = opts;
+    const names = [name, ...aliases].map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    // hasArg  → tangkap argumen opsional setelah spasi, anchored di akhir
+    // !hasArg → tanpa argumen tapi tetap toleran trailing text, tetap anchored
+    const suffix = hasArg ? '(?:\\s+([\\s\\S]+))?$' : '(?:\\s[\\s\\S]*)?$';
+    const re = new RegExp(`^\\/(?:${names.join('|')})(?:@\\w+)?${suffix}`, 'i');
+
+    if (description) COMMANDS.push({ command: `/${name}`, description, adminOnly });
+
+    bot.onText(re, async (msg, match) => {
+      const chatId = msg.chat.id;
+      if (autoClean) bot.deleteMessage(chatId, msg.message_id).catch(() => { });
+      if (adminOnly && !isAdmin(chatId)) return;
+      const arg = hasArg && match && match[1] ? match[1].trim() : null;
+      log.info(`[User ${chatId}] Execute /${name}${arg ? ' ' + arg.slice(0, 60) : ''}`);
+      try {
+        await handler(msg, arg, match);
+      } catch (e) {
+        log.error(`[Cmd /${name}] ${e.message}`);
+        bot.sendMessage(chatId, `❌ Gagal menjalankan /${name}: <code>${escHtml(String(e.message).slice(0, 200))}</code>`, { parse_mode: 'HTML' }).catch(() => { });
+      }
+    });
+  }
+
+  // Sinkronkan menu Telegram dari registry. Command publik untuk semua user,
+  // command admin di-scope khusus ke tiap chat admin (best-effort, abaikan kalau lib lama).
+  function syncCommandMenu() {
+    const pub = COMMANDS.filter(c => !c.adminOnly).map(({ command, description }) => ({ command, description }));
+    bot.setMyCommands(pub).catch(() => log.warn('Gagal set command menu (public).'));
+    const all = COMMANDS.map(({ command, description }) => ({ command, description }));
+    for (const id of ADMIN_IDS) {
+      bot.setMyCommands(all, { scope: JSON.stringify({ type: 'chat', chat_id: Number(id) }) }).catch(() => { });
+    }
+  }
+
+  // ─── COMMAND HANDLERS ────────────────────────────────────────────────────────
+  registerCommand({ name: 'start', description: 'Buka Menu Utama', hasArg: false }, (msg) => {
     sendMainMenu(bot, msg.chat.id);
   });
 
-  bot.onText(/\/browse/, (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { }); // Auto-clean
-    log.info(`[User ${msg.chat.id}] Execute /browse`);
+  registerCommand({ name: 'browse', description: 'Jelajahi Postingan Cosplay Terbaru', hasArg: false }, (msg) => {
     doCosplayteleBrowse(bot, msg.chat.id, 'home', 1);
   });
 
-  bot.onText(/^\/gacha(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    const arg = match[1] && match[1].trim().toLowerCase();
-    log.info(`[User ${msg.chat.id}] Execute /gacha ${arg || '(default)'}`);
+  registerCommand({ name: 'gacha', description: '🎲 Gacha Cosplay Random (Surprise Me)' }, (msg, arg) => {
+    const a = arg && arg.toLowerCase();
     // Shortcut mode dari argument
     const modeMap = {
       random: 'random', rand: 'random',
@@ -3568,30 +3591,24 @@ function startBot() {
       '3d': 'trending3d', '7d': 'trending7d',
       ero: 'ero', nude: 'nude', video: 'video',
     };
-    if (arg && modeMap[arg]) return doCosplayteleGacha(bot, msg.chat.id, modeMap[arg]);
+    if (a && modeMap[a]) return doCosplayteleGacha(bot, msg.chat.id, modeMap[a]);
     // Default: random
     doCosplayteleGacha(bot, msg.chat.id, 'random');
   });
 
-  bot.onText(/\/maple/, (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { }); // Auto-clean
+  registerCommand({ name: 'maple', description: '🍁 Gacha Patreon', hasArg: false }, (msg) => {
     const urls = [
       'https://kemono.cr/patreon/user/3295915',
       'https://kemono.cr/patreon/user/49965584'
     ];
     const pickedUrl = urls[Math.floor(Math.random() * urls.length)];
-    log.info(`[User ${msg.chat.id}] Execute /maple Kemono Gacha (${pickedUrl})`);
     doKemonoGacha(bot, msg.chat.id, pickedUrl);
   });
 
-  bot.onText(/^\/r34(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    const query = match[1];
+  registerCommand({ name: 'r34', description: '🎬 Rule34 Video (Browse & Gacha)' }, async (msg, query) => {
     if (query) {
-      log.info(`[User ${msg.chat.id}] Execute /r34 search: ${query}`);
       doR34Browse(bot, msg.chat.id, 1, query);
     } else {
-      log.info(`[User ${msg.chat.id}] Execute /r34 (Menu)`);
       const sentMsg = await bot.sendMessage(msg.chat.id, `🎬 <b>Rule34 Video</b>\n\nPilih mode:`, {
         parse_mode: 'HTML',
         reply_markup: {
@@ -3607,14 +3624,10 @@ function startBot() {
     }
   });
 
-  bot.onText(/^\/pin(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    const query = match[1] && match[1].trim();
+  registerCommand({ name: 'pin', description: '📌 Pinterest Search (image/video)' }, async (msg, query) => {
     if (query) {
-      log.info(`[User ${msg.chat.id}] Execute /pin search: ${query}`);
       doPinSearch(bot, msg.chat.id, query);
     } else {
-      log.info(`[User ${msg.chat.id}] Execute /pin (prompt)`);
       userStates.set(msg.chat.id, { step: 'AWAITING_PIN_SEARCH' });
       const sentMsg = await bot.sendMessage(msg.chat.id,
         `📌 <b>Pinterest Search</b>\n\nKetik query pencarian (karakter, tag, atau kata kunci).\n` +
@@ -3628,25 +3641,18 @@ function startBot() {
     }
   });
 
-  bot.onText(/^\/jav(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    const query = match[1] && match[1].trim();
-
+  registerCommand({ name: 'jav', description: '🎥 Javtiful Search' }, async (msg, query) => {
     // Special shortcut: /jav gacha / /jav random / /jav trending
     if (query) {
       const lc = query.toLowerCase();
       if (lc === 'gacha' || lc === 'random' || lc === 'surprise') {
-        log.info(`[User ${msg.chat.id}] Execute /jav gacha (latest)`);
         return doJavGacha(bot, msg.chat.id, 'latest');
       }
       if (lc === 'trending' || lc === 'hot') {
-        log.info(`[User ${msg.chat.id}] Execute /jav gacha (trending)`);
         return doJavGacha(bot, msg.chat.id, 'trending');
       }
-      log.info(`[User ${msg.chat.id}] Execute /jav search: ${query}`);
       doJavBrowse(bot, msg.chat.id, query, 1, 'search');
     } else {
-      log.info(`[User ${msg.chat.id}] Execute /jav (menu)`);
       const sentMsg = await bot.sendMessage(msg.chat.id,
         `🎥 <b>Javtiful</b>\n\nPilih mode:`,
         {
@@ -3668,14 +3674,10 @@ function startBot() {
     }
   });
 
-  bot.onText(/^\/ero(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    const query = match[1] && match[1].trim();
+  registerCommand({ name: 'ero', description: '🔥 EroThots Search' }, async (msg, query) => {
     if (query) {
-      log.info(`[User ${msg.chat.id}] Execute /ero search: ${query}`);
       doEroBrowse(bot, msg.chat.id, query, 1);
     } else {
-      log.info(`[User ${msg.chat.id}] Execute /ero (prompt)`);
       userStates.set(msg.chat.id, { step: 'AWAITING_ERO_SEARCH' });
       const sentMsg = await bot.sendMessage(msg.chat.id,
         `🔥 <b>EroThots Search</b>\n\nKetik nama creator, kategori, atau kata kunci.\n` +
@@ -3690,14 +3692,10 @@ function startBot() {
   });
 
   // ─── ANIME ─────────────────────────────────────────────────────────────────
-  bot.onText(/^\/anime(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    const query = match[1] && match[1].trim();
+  registerCommand({ name: 'anime', description: '🎌 Anime Search (Otakudesu + Oploverz + Kusonime)' }, async (msg, query) => {
     if (query) {
-      log.info(`[User ${msg.chat.id}] Execute /anime search: ${query}`);
       doAnimeSearch(bot, msg.chat.id, query);
     } else {
-      log.info(`[User ${msg.chat.id}] Execute /anime (prompt)`);
       userStates.set(msg.chat.id, { step: 'AWAITING_ANIME_SEARCH' });
       const sentMsg = await bot.sendMessage(msg.chat.id,
         `🎌 <b>Anime Search</b> (Otakudesu + Oploverz)\n\n` +
@@ -3712,12 +3710,9 @@ function startBot() {
     }
   });
 
-  bot.onText(/^\/search(?:\s+(.+))?$/, async (msg, match) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { }); // Auto-clean
-    const query = match[1];
+  registerCommand({ name: 'search', description: 'Cari Karakter / Album Cosplay' }, async (msg, query) => {
     if (query) {
       // Jika ada query langsung, tampilkan pilihan sumber
-      log.info(`[User ${msg.chat.id}] Execute /search ${query}`);
       const text = `🔍 <b>Cari: "${query}"</b>\n\nPilih sumber pencarian:`;
       const keyboard = [
         [{ text: '📚 Cosplaytele', callback_data: `dosearch_cosplay_${query}` }],
@@ -3727,7 +3722,6 @@ function startBot() {
       const sentMsg = await sendMenuWithThumb(bot, msg.chat.id, text, keyboard);
       autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
     } else {
-      log.info(`[User ${msg.chat.id}] Execute /search (No Query)`);
       const text = `🔍 <b>Pencarian Karakter</b>\n\nPilih sumber pencarian:`;
       const keyboard = [
         [{ text: '📚 Cari di Cosplaytele', callback_data: 'menu_search_cosplay' }],
@@ -3770,8 +3764,7 @@ function startBot() {
     }
   }
 
-  bot.onText(/\/clear/, async (msg) => {
-    log.info(`[User ${msg.chat.id}] Execute /clear (WIPING ALL)`);
+  registerCommand({ name: 'clear', description: '🧹 Bersihkan Seluruh Chat', hasArg: false, autoClean: false }, async (msg) => {
     const sentMsg = await bot.sendMessage(msg.chat.id, '🧹 <i>Tornado Pembersih Aktif! Menghapus hampir seribu riwayat pesan terakhir secara mendalam...</i>', { parse_mode: 'HTML' });
     await bulkWipeMessages(bot, msg.chat.id, msg.message_id, 1000);
     // Hapus chat sapu bersihnya juga setelah beberapa detik
@@ -3781,10 +3774,7 @@ function startBot() {
   });
 
 
-  bot.onText(/^\/stat(?:\s|$)/, async (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    if (!isAdmin(msg.chat.id)) return; // Hanya admin (lihat ADMIN_IDS env)
-
+  registerCommand({ name: 'stat', description: '💻 Statistik Server VPS (admin)', adminOnly: true, hasArg: false }, async (msg) => {
     const uptimeSec = Math.floor((Date.now() - botStats.startTime) / 1000);
     const hrs = Math.floor(uptimeSec / 3600);
     const mins = Math.floor((uptimeSec % 3600) / 60);
@@ -3799,9 +3789,7 @@ function startBot() {
     autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
   });
 
-  bot.onText(/^\/stats(?:\s|$)/, async (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-
+  registerCommand({ name: 'stats', description: '🔰 Lihat Profil', hasArg: false }, async (msg) => {
     const s = statsDb.getUserStats(msg.chat.id);
     const exp = Math.floor(s.downloadBytes / (1024 * 1024)) + (s.gachaCasts * 50); // 1 MB = 1 EXP, 1 Gacha = 50 EXP
 
@@ -3831,12 +3819,9 @@ function startBot() {
   });
 
   // /tasks — lihat status antrean queue manager
-  bot.onText(/^\/tasks(?:\s|$)/, async (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
+  registerCommand({ name: 'tasks', description: '🚦 Pantau Dasbor Antrean', hasArg: false }, async (msg) => {
     const activeArr = Array.from(queueManager.activeJobs.values());
     const pending = queueManager.snapshotQueues();
-    const mySelfActive = activeArr.filter(j => j.chatId === msg.chat.id);
-    const mySelfQueued = pending.find(p => p.chatId === msg.chat.id);
 
     let text = `🚦 <b>Dasbor Antrean</b>\n`;
     text += `📊 Global: ${activeArr.length}/${queueManager.maxConcurrency} aktif · ${pending.reduce((s, p) => s + p.pending, 0)} antri\n\n`;
@@ -3878,10 +3863,7 @@ function startBot() {
   });
 
   // /health and /ping — same behavior, alias
-  bot.onText(/^\/(health|ping)(?:\s|$)/, async (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    log.info(`[User ${msg.chat.id}] Execute /health`);
-
+  registerCommand({ name: 'health', aliases: ['ping'], description: '🏥 Cek kesehatan bot + semua sumber', hasArg: false }, async (msg) => {
     const loadMsg = await bot.sendMessage(msg.chat.id,
       `🏥 <b>Health Check</b>\n<i>Ping semua sumber...</i>`,
       { parse_mode: 'HTML' }
@@ -3911,9 +3893,7 @@ function startBot() {
   });
 
   // /backup — export user data as JSON file
-  bot.onText(/^\/backup(?:\s|$)/, async (msg) => {
-    bot.deleteMessage(msg.chat.id, msg.message_id).catch(() => { });
-    log.info(`[User ${msg.chat.id}] Execute /backup`);
+  registerCommand({ name: 'backup', description: '💾 Export data kamu (JSON)', hasArg: false }, async (msg) => {
     try {
       await fsp.mkdir(CONFIG.TEMP_DIR, { recursive: true });
       const { path: filePath, filename, payload } = backup.writeBackupFile(msg.chat.id, CONFIG.TEMP_DIR);
@@ -4033,17 +4013,9 @@ function startBot() {
     throw lastErr;
   }
 
-  bot.onText(/^\/notif(?:\s+([\s\S]+))?$/, async (msg, match) => {
+  registerCommand({ name: 'notif', description: '🔔 Push Notification (admin)', adminOnly: true }, async (msg, input) => {
     const chatId = msg.chat.id;
-    bot.deleteMessage(chatId, msg.message_id).catch(() => {});
-
-    if (!isAdmin(chatId)) {
-      bot.sendMessage(chatId, '⛔ Command ini hanya untuk admin.').catch(() => {});
-      return;
-    }
-
     const senderName = msg.from?.first_name || 'Admin';
-    const input = match[1] && match[1].trim();
 
     // Tanpa argumen → tampilkan help
     if (!input) {
@@ -4144,6 +4116,9 @@ function startBot() {
       }
     }
   });
+
+  // Sinkronkan menu command Telegram dari registry (setelah semua registerCommand di atas).
+  syncCommandMenu();
 
   // Handling user messages for Terabox manual and Passwords
   bot.on('message', async (msg) => {
