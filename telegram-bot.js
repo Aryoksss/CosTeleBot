@@ -3607,16 +3607,19 @@ async function sendMainMenu(bot, chatId) {
   const text =
     `👋 <b>CosTele Bot</b>\n` +
     `<i>Multi-source media scraper</i>\n\n` +
-    `Pilih kategori:`;
+    `💬 <b>Tip:</b> langsung ketik aja apa yang kamu mau —\n` +
+    `bot pakai AI buat ngerti & jalanin sendiri.\n` +
+    `Contoh: <code>cari ganyu</code> · <code>gacha cosplay</code> · <code>MIDE-232</code>\n\n` +
+    `Atau pilih menu di bawah 👇`;
 
-  // Layout 2-tier: menu utama ringkas (grouped), submenu per-source.
-  // Grouping:
-  //   Row 1: Cosplay (primary) — 2 button cepat
-  //   Row 2: Video adult — 3 button dalam 1 row (R34 / JAV / EroThots)
+  // Layout grouped per-kategori, baris dikelompokkan biar gampang dipindai:
+  //   Row 1: Cosplay (primary) — Browse + Gacha
+  //   Row 2: Video adult — R34 / JAV / EroThots
   //   Row 3: Image / Patreon — Pinterest + Patreon Gacha
-  //   Row 4: Smart search + Profile
-  //   Row 5: Utility — Terabox DL + Clear
-  //   Row 6 (admin only): Dashboard
+  //   Row 4: Anime + Smart Search (AI)
+  //   Row 5: Terabox DL + Profile
+  //   Row 6: Antrean + Clear Chat
+  //   Row 7 (admin only): Dashboard / Notif / Health
   const keyboard = [
     [
       { text: '📚 Browse Cosplay', callback_data: 'menu_browse' },
@@ -3633,21 +3636,23 @@ async function sendMainMenu(bot, chatId) {
     ],
     [
       { text: '🎌 Anime', callback_data: 'anime_menu' },
-    ],
-    [
       { text: '🔎 Smart Search', callback_data: 'menu_search' },
-      { text: '� Profile', callback_data: 'menu_profile' },
     ],
     [
       { text: '📥 Terabox DL', callback_data: 'menu_terabox' },
+      { text: '👤 Profile', callback_data: 'menu_profile' },
+    ],
+    [
+      { text: '🚦 Antrean', callback_data: 'tasks_refresh' },
       { text: '🧹 Clear Chat', callback_data: 'menu_clear' },
     ],
   ];
 
   if (isAdmin(chatId)) {
     keyboard.push([
-      { text: '💻 Admin Dashboard', callback_data: 'menu_vps' },
-      { text: '🔔 Kirim Notif', callback_data: 'menu_notif' },
+      { text: '💻 Dashboard', callback_data: 'menu_vps' },
+      { text: '🏥 Health', callback_data: 'health_recheck' },
+      { text: '🔔 Notif', callback_data: 'menu_notif' },
     ]);
   }
 
@@ -4641,24 +4646,39 @@ function startBot() {
         });
       }
       if (activeArr.length === 0 && pending.length === 0) text += `<i>Tidak ada job aktif.</i>`;
-      await bot.editMessageText(text, {
-        chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [[
-            { text: '🔄 Refresh', callback_data: 'tasks_refresh' },
-            { text: '🔙 Menu', callback_data: 'menu_awal' },
-          ]]
-        }
-      }).catch(() => { });
+      const tasksKeyboard = {
+        inline_keyboard: [[
+          { text: '🔄 Refresh', callback_data: 'tasks_refresh' },
+          { text: '🔙 Menu', callback_data: 'menu_awal' },
+        ]]
+      };
+      // Menu utama dikirim sebagai foto (reze.jpg) → editMessageText tidak bisa
+      // mengedit caption foto. Kalau pesan asal foto, hapus & kirim pesan teks baru.
+      if (query.message.photo) {
+        bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+        await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: tasksKeyboard }).catch(() => { });
+      } else {
+        await bot.editMessageText(text, {
+          chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML',
+          reply_markup: tasksKeyboard
+        }).catch(() => { });
+      }
       return;
     }
     // Health recheck (same flow as /health)
     if (action === 'health_recheck') {
-      const loadMsg = query.message;
+      const fromPhoto = !!query.message.photo;
+      let loadMsg = query.message;
       try {
-        await bot.editMessageText(`🏥 <b>Health Check</b>\n<i>Recheck in progress...</i>`, {
-          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-        });
+        if (fromPhoto) {
+          // Menu utama foto → tidak bisa di-edit jadi teks; hapus & kirim baru.
+          bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+          loadMsg = await bot.sendMessage(chatId, `🏥 <b>Health Check</b>\n<i>Recheck in progress...</i>`, { parse_mode: 'HTML' });
+        } else {
+          await bot.editMessageText(`🏥 <b>Health Check</b>\n<i>Recheck in progress...</i>`, {
+            chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+          });
+        }
         const results = await healthcheck.checkAllSources();
         const sysInfo = healthcheck.getSystemInfo(botStats.startTime);
         const report = healthcheck.formatHealthReport(results, sysInfo);
