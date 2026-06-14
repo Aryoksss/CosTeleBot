@@ -23,6 +23,30 @@ echo "==> [$(date '+%F %T')] Deploy $APP_NAME (branch $BRANCH) di $(pwd)"
 PM2="$(command -v pm2 || true)"
 [ -z "$PM2" ] && PM2="npx pm2"
 
+# --- Notifikasi Telegram (best-effort, ambil token & chat dari .env VPS) ---
+read_env() {
+  local v
+  v="$(grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  v="${v%$'\r'}"                 # buang CR (file CRLF)
+  v="${v%\"}"; v="${v#\"}"       # buang kutip ganda di ujung
+  v="${v%\'}"; v="${v#\'}"       # buang kutip tunggal di ujung
+  printf '%s' "$v"
+}
+
+notify() {
+  local msg="$1" token chat
+  token="$(read_env BOT_TOKEN)"
+  chat="$(read_env DEPLOY_NOTIFY_CHAT)"
+  [ -z "$chat" ] && chat="$(read_env ADMIN_IDS | cut -d, -f1)"
+  [ -n "$token" ] && [ -n "$chat" ] || return 0
+  curl -fsS -m 10 "https://api.telegram.org/bot${token}/sendMessage" \
+    --data-urlencode "chat_id=${chat}" \
+    --data-urlencode "text=${msg}" >/dev/null 2>&1 || true
+}
+
+# Kirim notif kalau deploy gagal di tengah jalan
+trap 'notify "❌ Deploy CosTeleBot GAGAL. Cek log GitHub Actions."' ERR
+
 # --- Tarik kode terbaru, paksa samakan dengan origin (deploy box) ---
 OLD_REV="$(git rev-parse HEAD 2>/dev/null || echo none)"
 git fetch --all --prune
@@ -62,4 +86,5 @@ else
 fi
 $PM2 save >/dev/null 2>&1 || true
 
+notify "✅ Deploy CosTeleBot sukses → $(git rev-parse --short HEAD) ($(date '+%F %T'))"
 echo "==> [$(date '+%F %T')] Deploy selesai ✅"

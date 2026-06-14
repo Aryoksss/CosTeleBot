@@ -84,3 +84,38 @@ crontab -e
 `deploy.sh` otomatis skip reload kalau HEAD tidak berubah, jadi aman dijalankan
 sesering apa pun lewat cron. GitHub Actions memakai `FORCE_RELOAD=1` supaya manual
 re-run tetap reload walau commit-nya sama.
+
+---
+
+## Notifikasi Deploy ke Telegram
+
+`deploy.sh` otomatis kirim pesan ke admin saat deploy sukses/gagal — ambil
+`BOT_TOKEN` + chat tujuan dari `.env` VPS.
+
+- Chat tujuan default = `DEPLOY_NOTIFY_CHAT`, fallback ke `ADMIN_IDS` pertama.
+- Tambahkan di `.env` VPS (opsional, kalau mau beda dari admin pertama):
+  ```
+  DEPLOY_NOTIFY_CHAT=123456789
+  ```
+- Tidak ada token/chat → notif di-skip diam-diam (tidak error).
+
+---
+
+## Operasional VPS (#10)
+
+### Log rotation (biar disk tidak penuh)
+```bash
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 10M
+pm2 set pm2-logrotate:retain 7
+pm2 set pm2-logrotate:compress true
+```
+
+### Health-check terjadwal (alert kalau sumber down)
+```bash
+crontab -e
+# cek tiap jam; alert ke Telegram admin kalau ada sumber 'error'
+0 * * * * cd /root/CosTeleBot && node tools/healthPing.js >> health.log 2>&1
+```
+Hanya status `error` yang memicu alert (`warn`/rate-limit diabaikan). Naikkan
+intervalnya kalau alert terasa berisik saat satu sumber lama down.

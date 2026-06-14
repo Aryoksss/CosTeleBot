@@ -12,7 +12,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cek sintaks semua file JS dulu — kalau ada error, deploy TIDAK dijalankan.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Syntax check semua file JS
+        run: |
+          set -e
+          fail=0
+          for f in $(git ls-files '*.js'); do
+            node --check "$f" || { echo "::error file=$f::Syntax error"; fail=1; }
+          done
+          [ "$fail" = "0" ] && echo "Semua JS lolos node --check ✅"
+          exit $fail
+
   deploy:
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - name: Deploy via SSH

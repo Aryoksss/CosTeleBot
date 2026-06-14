@@ -3511,7 +3511,24 @@ async function sendMainMenu(bot, chatId) {
   autoCleanOldMenu(bot, chatId, sentMsg.message_id);
 }
 
+function validateEnv() {
+  const fatal = [];
+  if (!process.env.BOT_TOKEN) fatal.push('BOT_TOKEN belum di-set — bot tidak bisa jalan.');
+
+  if (fatal.length) {
+    fatal.forEach(p => log.error(`[ENV] ${p}`));
+    log.error('[ENV] Cek file .env (lihat .env.example). Bot dihentikan.');
+    process.exit(1);
+  }
+
+  // Warning non-fatal (bot tetap jalan, tapi sebagian fitur mati)
+  if (!process.env.GROQ_API_KEY) log.warn('[ENV] GROQ_API_KEY kosong → smart-search & AI assistant nonaktif (fallback regex).');
+  if (!process.env.ADMIN_IDS) log.warn('[ENV] ADMIN_IDS kosong → memakai admin default hardcoded. Sebaiknya set ADMIN_IDS.');
+  if (!process.env.XAPIVERSE_KEY) log.warn('[ENV] XAPIVERSE_KEY kosong → fitur Terabox kemungkinan gagal.');
+}
+
 function startBot() {
+  validateEnv();
   const botOptions = { polling: true };
   if (CONFIG.LOCAL_API_URL) botOptions.baseApiUrl = CONFIG.LOCAL_API_URL;
   const bot = new TelegramBot(CONFIG.BOT_TOKEN, botOptions);
@@ -4288,22 +4305,13 @@ function startBot() {
       return;
     }
 
-    // ── Smart Search + AI Assistant untuk pesan bebas ──
+    // ── AI Assistant + Smart Search untuk pesan bebas ──
     // Sampai sini berarti: bukan command, bukan link terdeteksi, dan tidak ada
-    // state AWAITING_* aktif. Coba deteksi niat pencarian; kalau bukan pencarian,
-    // balas sebagai asisten interaktif yang tahu daftar command.
+    // state AWAITING_* aktif.
     if (!text.startsWith('http') && text.length <= 500) {
+      const aiOn = process.env.GROQ_CHAT_REPLY !== '0' && groq.hasKey();
       try {
-        const intent = await intentDetector.detectIntent(text);
-        if (intent.intent === 'search' && intent.query) {
-          log.info(`[SmartSearch] via=${intent.via} query="${intent.query}" pref=${intent.preferredSource}`);
-          bot.deleteMessage(chatId, msg.message_id).catch(() => { });
-          return doSmartSearchMenu(bot, chatId, intent.query, intent.preferredSource);
-        }
-
-        // Bukan pencarian → balas sebagai asisten (kalau diaktifkan + Groq tersedia).
-        // Nonaktifkan dengan env GROQ_CHAT_REPLY=0.
-        if (process.env.GROQ_CHAT_REPLY !== '0' && groq.hasKey()) {
+        if (aiOn) {
           const last = chatReplyCooldown.get(chatId) || 0;
           if (Date.now() - last < 1500) return; // anti-spam ringan per user
           chatReplyCooldown.set(chatId, Date.now());
@@ -4311,14 +4319,31 @@ function startBot() {
           bot.sendChatAction(chatId, 'typing').catch(() => { });
           // Sembunyikan command admin dari user biasa.
           const cmds = isAdmin(chatId) ? COMMANDS : COMMANDS.filter(c => !c.adminOnly);
-          const reply = await assistant.chatReply(text, cmds);
-          if (reply && reply.trim()) {
-            await bot.sendMessage(chatId, reply.trim()).catch(() => { });
+          const r = await assistant.assist(text, cmds);
+          if (r.reply) await bot.sendMessage(chatId, r.reply).catch(() => { });
+
+          log.info(`[Assistant] action=${r.action}${r.query ? ` query="${r.query}" src=${r.source}` : ''}`);
+          switch (r.action) {
+            case 'search': if (r.query) return doSmartSearchMenu(bot, chatId, r.query, r.source); break;
+            case 'anime': if (r.query) return doAnimeSearch(bot, chatId, r.query); break;
+            case 'gacha': return doCosplayteleGacha(bot, chatId, 'random');
+            case 'jav_gacha': return doJavGacha(bot, chatId, 'latest');
+            case 'browse': return doCosplayteleBrowse(bot, chatId, 'home', 1);
+            case 'menu': return sendMainMenu(bot, chatId);
+            // 'chat' → cukup balasan teks di atas
           }
           return;
         }
+
+        // Tanpa Groq → fallback ke deteksi regex (pencarian saja)
+        const intent = await intentDetector.detectIntent(text);
+        if (intent.intent === 'search' && intent.query) {
+          log.info(`[SmartSearch] via=${intent.via} query="${intent.query}" pref=${intent.preferredSource}`);
+          bot.deleteMessage(chatId, msg.message_id).catch(() => { });
+          return doSmartSearchMenu(bot, chatId, intent.query, intent.preferredSource);
+        }
       } catch (e) {
-        log.warn(`[SmartSearch/Assistant] error: ${e.message}`);
+        log.warn(`[Assistant/SmartSearch] error: ${e.message}`);
       }
     }
   });

@@ -46,4 +46,58 @@ async function chatReply(userText, commands = []) {
   });
 }
 
-module.exports = { chatReply };
+module.exports = { chatReply, assist };
+
+// ─── ACTION ROUTER ────────────────────────────────────────────────────────────
+// assist() = chatReply + kemampuan memilih SATU aksi untuk dijalankan bot.
+// Output JSON divalidasi; default ke 'chat' kalau tidak yakin.
+const ACTIONS = ['search', 'gacha', 'jav_gacha', 'browse', 'anime', 'menu', 'chat'];
+
+/**
+ * @returns {Promise<{action:string, query:string|null, source:string, reply:string}>}
+ */
+async function assist(userText, commands = []) {
+  const cmdList = commands.length
+    ? commands.map(c => `${c.command} — ${c.description}`).join('\n')
+    : '(tidak ada)';
+
+  const system = `${PERSONA}
+
+Selain mengobrol, kamu bisa MENJALANKAN SATU aksi untuk user. Balas HANYA JSON (tanpa teks lain) dengan skema:
+{ "action": "search" | "gacha" | "jav_gacha" | "browse" | "anime" | "menu" | "chat",
+  "query": string | null,
+  "source": "cosplay" | "r34" | "pinterest" | "jav" | "ero" | "anime" | "all" | null,
+  "reply": string }
+
+Panduan memilih action:
+- "search"   → user mau cari media spesifik. Isi "query" (kata kunci) + "source".
+- "anime"    → user mau cari/nonton anime. Isi "query" = judul anime.
+- "gacha"    → user minta cosplay random ("kasih dong", "surprise", "acak").
+- "jav_gacha"→ user minta JAV random.
+- "browse"   → user mau lihat-lihat cosplay terbaru.
+- "menu"     → user minta menu utama atau bingung mau apa.
+- "chat"     → sapaan / obrolan / pertanyaan umum. Cukup isi "reply".
+"reply" SELALU diisi kalimat ramah singkat (Bahasa Indonesia) yang menjelaskan aksimu / jawabanmu.
+
+DAFTAR COMMAND TERSEDIA:
+${cmdList}`;
+
+  const parsed = await groq.chatJSON({
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: String(userText).slice(0, 500) },
+    ],
+    temperature: 0.4,
+    maxTokens: 250,
+    timeoutMs: 12000,
+  });
+
+  const action = ACTIONS.includes(parsed && parsed.action) ? parsed.action : 'chat';
+  const validSrc = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'anime', 'all'];
+  return {
+    action,
+    query: typeof parsed.query === 'string' && parsed.query.trim() ? parsed.query.trim().slice(0, 150) : null,
+    source: validSrc.includes(parsed.source) ? parsed.source : 'all',
+    reply: typeof parsed.reply === 'string' ? parsed.reply.trim() : '',
+  };
+}
