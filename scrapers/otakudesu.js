@@ -10,15 +10,32 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 
 // Support multiple domains (CSV). Coba dari kiri ke kanan sampai ada yang respond.
+// .blog = layout KLASIK (punya section download multi-host) → diprioritaskan untuk
+// download. .fit/.la = layout modern (katalog lebih lengkap, tapi streaming-only).
 const DOMAINS = () => {
   const env = process.env.OTAKUDESU_DOMAINS || process.env.OTAKUDESU_DOMAIN || '';
   if (env) return env.split(',').map(d => d.trim()).filter(Boolean);
-  return ['https://otakudesu.fit', 'https://otakudesu.blog', 'https://otakudesu.cloud', 'https://otakudesu.la', 'https://otakudesu.ro'];
+  return ['https://otakudesu.blog', 'https://otakudesu.fit', 'https://otakudesu.la'];
 };
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 const http = axios.create({ timeout: 12000, headers: { 'User-Agent': UA } });
+
+/**
+ * Resolve redirector link.desustream.com (302) → URL host asli (gofile/mega/dll).
+ * Kalau bukan desustream, kembalikan apa adanya.
+ */
+async function resolveDesustream(url) {
+  if (!url || !/desustream\.com/i.test(url)) return url;
+  try {
+    const res = await http.get(url, { maxRedirects: 0, validateStatus: (s) => s >= 200 && s < 400 });
+    return res.headers['location'] || null;
+  } catch (e) {
+    if (e.response && e.response.headers && e.response.headers.location) return e.response.headers.location;
+    return null;
+  }
+}
 
 /**
  * Try GET request across multiple domains. Returns first successful response.
@@ -155,6 +172,8 @@ async function getEpisodes(seriesUrl) {
     if (!href.match(/episode[_\-/]/i)) return;
     // Skip if it's a series/anime link (not episode)
     if (href.includes('/series/') || href.includes('/anime/')) return;
+    // Skip pembatas/placeholder (mis. "...episode-1-900-dalam-proses", batch divider)
+    if (/pembatas|dalam-proses|dalam_proses/i.test(href)) return;
     // Extract episode number from text or URL
     const numMatch = text.match(/(?:Episode|Eps?)\s*(\d+)/i) || href.match(/episode[_-]?(\d+)/i);
     const num = numMatch ? parseInt(numMatch[1], 10) : 0;
@@ -215,6 +234,30 @@ async function getEpisodeDownload(episodeUrl) {
     });
     if (links.length) qualityLinks.push({ quality, links });
   });
+
+  // --- Classic links umumnya redirector link.desustream.com → resolve ke URL host asli. ---
+  // Strategi: ambil GoFile resolusi TERTINGGI sebagai gofileUrl (jalur paling andal),
+  // dan resolve link Mega per-kualitas supaya tombol Mega tetap berfungsi.
+  if (!gofileUrl && qualityLinks.length) {
+    let bestGofile = null, bestRes = -1;
+    for (const q of qualityLinks) {
+      const res = parseInt((String(q.quality).match(/(\d{3,4})/) || [])[1] || '0', 10);
+      const gf = q.links.find(l => /gofile/i.test(l.host));
+      if (gf && res >= bestRes) { bestRes = res; bestGofile = gf.url; }
+    }
+    if (bestGofile) {
+      const real = await resolveDesustream(bestGofile);
+      if (real && /gofile\.io/i.test(real)) gofileUrl = real;
+    }
+    // Resolve link Mega (paralel) untuk fallback tombol Mega.
+    await Promise.all(qualityLinks.map(async (q) => {
+      const mega = q.links.find(l => /mega/i.test(l.host));
+      if (mega) {
+        const real = await resolveDesustream(mega.url);
+        if (real && /mega\.(nz|co\.nz)/i.test(real)) mega.url = real;
+      }
+    }));
+  }
 
   return { gofileUrl, qualityLinks, otherLinks };
 }
