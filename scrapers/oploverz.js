@@ -20,94 +20,74 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 const http = axios.create({ timeout: 20000, headers: { 'User-Agent': UA } });
 
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * GET API dengan retry ringan untuk network error / 5xx. Return body JSON, atau throw.
+ */
+async function apiGet(path, params = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await http.get(`${API_BASE()}${path}`, { params, validateStatus: () => true });
+      if (res.status >= 200 && res.status < 300) return res.data;
+      if (res.status >= 500 && attempt < 3) { await sleep(attempt * 800); continue; }
+      throw new Error(`Oploverz API HTTP ${res.status}`);
+    } catch (e) {
+      lastErr = e;
+      if (attempt < 3) { await sleep(attempt * 800); continue; }
+    }
+  }
+  throw lastErr || new Error('Oploverz API tidak responsif');
+}
+
+/** Normalisasi objek series API → bentuk standar bot. */
+function normalizeSeries(s) {
+  return {
+    id: s.id,
+    title: s.title,
+    slug: s.slug,
+    poster: s.poster,
+    status: s.status,
+    genres: (s.genres || []).map(g => g.name),
+    totalEpisodes: s.totalEpisodes || 0,
+    duration: s.duration,
+    score: s.score,
+    source: 'oploverz',
+  };
+}
+
 /**
  * Search series by title (client-side filter karena API tidak punya search param).
  * Fetch halaman 1-5 (50 series terbaru) + filter lokal.
  * Untuk full search, bisa fetch semua 65 halaman tapi terlalu berat — cukup 5 halaman.
  * @returns {Array<{id, title, slug, poster, status, genres, totalEpisodes, source}>}
  */
-async function search(query, maxPages = 10) {
-  const q = query.toLowerCase().trim().replace(/[.\-:]/g, ' ').replace(/\s+/g, ' ');
-  const qWords = q.split(' ').filter(w => w.length >= 2);
-  const results = [];
-
-  // Fetch pages in parallel batches
-  const pages = Array.from({ length: maxPages }, (_, i) => i + 1);
-  const responses = await Promise.allSettled(
-    pages.map(p => http.get(`${API_BASE()}/series?page=${p}`))
-  );
-
-  let totalPages = maxPages;
-  for (const res of responses) {
-    if (res.status !== 'fulfilled') continue;
-    const { data } = res.value;
-    if (!data || !data.data) continue;
-    if (data.meta?.lastPage) totalPages = data.meta.lastPage;
-    for (const s of data.data) {
-      const titleLow = (s.title + ' ' + (s.japaneseTitle || '')).toLowerCase().replace(/[.\-:]/g, ' ');
-      // Match if ALL query words appear in title (fuzzy word match)
-      const allMatch = qWords.every(w => titleLow.includes(w));
-      if (allMatch) {
-        results.push({
-          id: s.id,
-          title: s.title,
-          slug: s.slug,
-          poster: s.poster,
-          status: s.status,
-          genres: (s.genres || []).map(g => g.name),
-          totalEpisodes: s.totalEpisodes || 0,
-          duration: s.duration,
-          score: s.score,
-          source: 'oploverz',
-        });
-      }
-    }
+/**
+ * Search series via parameter server-side `?q=` (akurat + cukup 1 request).
+ * Jauh lebih cepat & ringan daripada scan semua halaman + filter di client.
+ * @param {string} query
+ * @param {number} page  halaman hasil (default 1)
+ * @returns {Array<series>}
+ */
+async function search(query, page = 1) {
+  const q = String(query || '').trim();
+  if (q.length < 2) return [];
+  try {
+    const data = await apiGet('/series', { q, page });
+    const list = (data && data.data) || [];
+    return list.slice(0, 15).map(normalizeSeries);
+  } catch (e) {
+    console.error(`\x1b[31m[ERROR]\x1b[0m [Oploverz] search "${q}" gagal: ${e.message}`);
+    return [];
   }
-
-  // Deep search: if no results in first batch and there are more pages, fetch remaining
-  if (results.length === 0 && totalPages > maxPages) {
-    const deepPages = Array.from({ length: Math.min(totalPages - maxPages, 55) }, (_, i) => maxPages + i + 1);
-    // Fetch in batches of 10 to avoid overwhelming
-    for (let batch = 0; batch < deepPages.length; batch += 10) {
-      const chunk = deepPages.slice(batch, batch + 10);
-      const deepRes = await Promise.allSettled(
-        chunk.map(p => http.get(`${API_BASE()}/series?page=${p}`))
-      );
-      for (const res of deepRes) {
-        if (res.status !== 'fulfilled') continue;
-        const { data } = res.value;
-        if (!data || !data.data) continue;
-        for (const s of data.data) {
-          const titleLow = (s.title + ' ' + (s.japaneseTitle || '')).toLowerCase().replace(/[.\-:]/g, ' ');
-          const allMatch = qWords.every(w => titleLow.includes(w));
-          if (allMatch) {
-            results.push({
-              id: s.id,
-              title: s.title,
-              slug: s.slug,
-              poster: s.poster,
-              status: s.status,
-              genres: (s.genres || []).map(g => g.name),
-              totalEpisodes: s.totalEpisodes || 0,
-              duration: s.duration,
-              score: s.score,
-              source: 'oploverz',
-            });
-          }
-        }
-      }
-      if (results.length > 0) break; // Found something, stop deep search
-    }
-  }
-
-  return results.slice(0, 15);
 }
 
 /**
  * Get series detail.
  */
 async function getSeriesDetail(slug) {
-  const { data } = await http.get(`${API_BASE()}/series/${slug}`);
+  const data = await apiGet(`/series/${slug}`);
   return data?.data || null;
 }
 
@@ -118,7 +98,7 @@ async function getSeriesDetail(slug) {
 async function getEpisodes(slug, maxPages = 10) {
   const allEps = [];
   for (let page = 1; page <= maxPages; page++) {
-    const { data } = await http.get(`${API_BASE()}/series/${slug}/episodes?page=${page}`);
+    const data = await apiGet(`/series/${slug}/episodes`, { page });
     if (!data || !data.data || data.data.length === 0) break;
     allEps.push(...data.data);
     if (page >= (data.meta?.lastPage || 1)) break;
@@ -211,20 +191,9 @@ function getAllLinks(episode) {
  * @returns Normalized array with source='oploverz'
  */
 async function getLatest(page = 1) {
-  const { data } = await http.get(`${API_BASE()}/series?page=${page}`);
+  const data = await apiGet('/series', { page });
   if (!data || !data.data) return [];
-  return data.data.map(s => ({
-    id: s.id,
-    title: s.title,
-    slug: s.slug,
-    poster: s.poster,
-    status: s.status,
-    genres: (s.genres || []).map(g => g.name),
-    totalEpisodes: s.totalEpisodes || 0,
-    duration: s.duration,
-    score: s.score,
-    source: 'oploverz',
-  }));
+  return data.data.map(normalizeSeries);
 }
 
 /**
