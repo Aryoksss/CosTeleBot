@@ -881,9 +881,10 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     } else if (source === 'direct') {
       await status('⚙️ <b>Menyambungkan tautan aslinya...</b>');
       downloadLink = url;
-      // Gunakan nama akhir dari url jika memungkinkan
-      fileName = decodeURIComponent(url.split('/').pop().split('?')[0]) || 'archive.zip';
-      zipPath = `${tmpBase}_raw${path.extname(fileName)}`;
+      // Prioritaskan nama file dari caller (mis. SoraFolder kasih nama asli .rar);
+      // fallback ke nama dari URL. Penting untuk ekstensi arsip agar ekstraksi jalan.
+      fileName = opts.fileName || decodeURIComponent(url.split('/').pop().split('?')[0]) || 'archive.zip';
+      zipPath = `${tmpBase}_raw${path.extname(fileName) || '.bin'}`;
       // Gofile direct CDN butuh cookie dari session resolver (accountToken). Kalau caller kasih
       // cookie via opts.cookie, pakai; tanpa itu server balas HTML 12KB (login/error page).
       if (opts.cookie) cookie = opts.cookie;
@@ -5343,25 +5344,15 @@ function startBot() {
 
       if (links && links.sorafolder) {
         queueManager.addJob(chatId, `SoraFolder: ${post.title}`, async (jobId) => {
-          let m = await bot.sendMessage(chatId, '⏳ <b>Bypass SoraFolder:</b> Pekerja mulai meretas blokade 10 detik...', { parse_mode: 'HTML' }).catch(() => { });
-
-          let countdown = 12;
-          const timerInterval = setInterval(() => {
-            if (countdown > 0) {
-              if (m) bot.editMessageText(`⏳ <b>Bypass SoraFolder:</b> Melewati gerbang keamanan...\n<i>Menunggu paksa timer situs: <b>${countdown} detik</b></i>`, { chat_id: chatId, message_id: m.message_id, parse_mode: 'HTML' }).catch(() => { });
-              queueManager.updateJob(jobId, `⚙️ Menembus Proteksi 10D (${countdown}s tersisa)...`);
-              countdown -= 2;
-            }
-          }, 2000);
-
+          const m = await bot.sendMessage(chatId, '⏳ <b>Resolving SoraFolder...</b>', { parse_mode: 'HTML' }).catch(() => null);
           try {
-            const directSoraUrl = await sorafolderApi.getDirectLink(links.sorafolder);
-            clearInterval(timerInterval);
+            queueManager.updateJob(jobId, '⚙️ Resolving SoraFolder...');
+            // Pure-axios resolve (cepat). Link CDN berumur pendek → langsung download.
+            const { url: directSoraUrl, filename } = await sorafolderApi.getDirectLink(links.sorafolder);
             if (m) bot.deleteMessage(chatId, m.message_id).catch(() => { });
-            await processDownload(bot, chatId, directSoraUrl, links.password || null, 'direct', jobId);
+            await processDownload(bot, chatId, directSoraUrl, links.password || null, 'direct', jobId, { fileName: filename });
           } catch (e) {
-            clearInterval(timerInterval);
-            bot.sendMessage(chatId, `⚠️ <b>Gagal (Job #${jobId})!</b> ${e.message}`, { parse_mode: 'HTML' });
+            bot.sendMessage(chatId, `⚠️ <b>Gagal (Job #${jobId})!</b> ${escHtml(e.message)}`, { parse_mode: 'HTML' }).catch(() => { });
             if (m) bot.deleteMessage(chatId, m.message_id).catch(() => { });
           }
         }, bot);
