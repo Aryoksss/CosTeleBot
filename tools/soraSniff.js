@@ -29,14 +29,21 @@ const STATIC = /\.(css|js|png|jpe?g|gif|svg|woff2?|ico)(\?|$)|cloudflare|jquery|
     if (STATIC.test(u)) return;
     const body = req.postData();
     console.log(`[REQ] ${req.method()} ${u}${body ? ' | body: ' + body.slice(0, 300) : ''}`);
+    if (/file-down/i.test(u)) {
+      console.log('  [FULL HEADERS]', JSON.stringify(req.headers()));
+      console.log('  [FULL BODY]', body || '(none)');
+    }
   });
-  page.on('response', (res) => {
+  page.on('response', async (res) => {
     const u = res.url();
     if (STATIC.test(u)) return;
     const ct = res.headers()['content-type'] || '';
     const cl = res.headers()['content-length'] || '';
     if (/octet-stream|video|zip|rar|json|application/i.test(ct) || cl > 100000) {
       console.log(`[RES] ${res.status()} ${u} | ${ct} ${cl}`);
+    }
+    if (/file-down/i.test(u)) {
+      try { console.log('  [FILE-DOWN RESPONSE BODY]', (await res.text()).slice(0, 500)); } catch (_) {}
     }
   });
   page.on('download', (dl) => console.log(`[DL] download event url: ${dl.url()}`));
