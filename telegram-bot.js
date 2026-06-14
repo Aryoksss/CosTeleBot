@@ -184,6 +184,7 @@ const healthcheck = require('./utils/healthcheck');
 const backup = require('./utils/backup');
 const dashboard = require('./utils/dashboard');
 const browserReaper = require('./utils/browserReaper');
+const watcher = require('./utils/watcher');
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -3686,6 +3687,22 @@ function startBot() {
   // Jaring pengaman: bersihkan proses Chromium (Playwright) yang nyangkut.
   browserReaper.startBrowserReaper();
 
+  // Auto-notify post/episode baru ke admin (polling berkala).
+  watcher.startWatcher({
+    bot,
+    adminChatIds: Array.from(ADMIN_IDS),
+    scrapers: {
+      cosplaytele: cosplayteleScraper,
+      javtiful: javtifulScraper,
+      otakudesu: otakudesuScraper,
+    },
+    onOpen: (route, query, chatId) => {
+      if (route === 'anime') return doAnimeSearch(bot, chatId, query);
+      if (route === 'jav') return doJavBrowse(bot, chatId, query, 1, 'search');
+      if (route === 'cosplay') return doCosplayteleBrowse(bot, chatId, 'home', 1, query, 'search');
+    },
+  });
+
   // Start dashboard web kalau env DASHBOARD_USER+DASHBOARD_PASS di-set
   dashboard.startDashboard({
     botStats,
@@ -3937,6 +3954,35 @@ function startBot() {
     }, 4000);
   });
 
+
+  // /watch — status auto-notify watcher + cek manual sekarang (admin).
+  registerCommand({ name: 'watch', description: '🔔 Status auto-notify post baru (admin)', adminOnly: true, hasArg: true }, async (msg, arg) => {
+    const chatId = msg.chat.id;
+    const renderStatus = (st) => {
+      let t = `🔔 <b>Auto-Notify Watcher</b>\n\n`;
+      t += `Status: ${st.enabled ? '🟢 Aktif' : '🔴 Nonaktif'} · interval ${st.intervalMin} menit\n`;
+      t += `Sumber: ${st.sources.join(', ') || '-'}\n`;
+      t += st.running ? `\n⏳ <i>Sedang cek...</i>\n` : '';
+      t += `\n<b>Per sumber:</b>\n`;
+      for (const [k, v] of Object.entries(st.state)) {
+        const last = v.lastCheck ? new Date(v.lastCheck).toLocaleTimeString('id-ID') : 'belum';
+        const err = v.lastError ? ` ⚠️ ${escHtml(v.lastError.slice(0, 40))}` : '';
+        t += `• ${k}: ${v.seen} dipantau · cek ${last} · baru terakhir ${v.lastNew}${err}\n`;
+      }
+      return t;
+    };
+
+    if (arg && /^(now|cek|check)$/i.test(arg.trim())) {
+      const m = await bot.sendMessage(chatId, '⏳ <b>Cek manual...</b>', { parse_mode: 'HTML' });
+      const st = await watcher.forceCheck();
+      return bot.editMessageText(renderStatus(st), { chat_id: chatId, message_id: m.message_id, parse_mode: 'HTML' }).catch(() => { });
+    }
+
+    return bot.sendMessage(chatId, renderStatus(watcher.getStatus()), {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '🔄 Cek Sekarang', callback_data: 'watch_check_now' }]] },
+    });
+  });
 
   registerCommand({ name: 'stat', description: '💻 Statistik Server VPS (admin)', adminOnly: true, hasArg: false }, async (msg) => {
     const uptimeSec = Math.floor((Date.now() - botStats.startTime) / 1000);
@@ -4622,6 +4668,26 @@ function startBot() {
     if (action === 'menu_awal') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return sendMainMenu(bot, chatId);
+    }
+    // Watcher: tombol "Buka di Bot" dari notif auto-notify → route ke search.
+    if (action.startsWith('watch_open_')) {
+      const token = action.replace('watch_open_', '');
+      const info = watcher.consumeToken(token);
+      bot.answerCallbackQuery(query.id).catch(() => { });
+      if (!info) {
+        return bot.sendMessage(chatId, '⚠️ Notif ini sudah kedaluwarsa. Cari manual via menu.').catch(() => { });
+      }
+      if (info.route === 'anime') return doAnimeSearch(bot, chatId, info.query);
+      if (info.route === 'jav') return doJavBrowse(bot, chatId, info.query, 1, 'search');
+      if (info.route === 'cosplay') return doCosplayteleBrowse(bot, chatId, 'home', 1, info.query, 'search');
+      return;
+    }
+    // Watcher: tombol "Cek Sekarang" dari /watch (admin only).
+    if (action === 'watch_check_now') {
+      if (!isAdmin(chatId)) return bot.answerCallbackQuery(query.id, { text: '⛔ Admin only', show_alert: true });
+      bot.answerCallbackQuery(query.id, { text: '⏳ Mengecek...' }).catch(() => { });
+      await watcher.forceCheck();
+      return;
     }
     // Tasks refresh — re-render dashboard
     if (action === 'tasks_refresh') {

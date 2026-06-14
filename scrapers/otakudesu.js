@@ -262,4 +262,43 @@ async function getEpisodeDownload(episodeUrl) {
   return { gofileUrl, qualityLinks, otherLinks };
 }
 
-module.exports = { search, getEpisodes, getEpisodeDownload };
+/**
+ * Ambil daftar rilis episode terbaru dari homepage Otakudesu.
+ * Dipakai oleh watcher auto-notify (deteksi episode baru).
+ * @returns {Array<{title, episode, url, thumb, date, uid, source}>}
+ */
+async function getLatestReleases() {
+  const { data } = await fetchWithFallback((base) => `${base}/`);
+  const $ = cheerio.load(data);
+  const items = [];
+  const seen = new Set();
+
+  $('.venz ul li .detpost').each((_, el) => {
+    const $el = $(el);
+    const a = $el.find('.thumb a').first();
+    const url = a.attr('href');
+    if (!url || seen.has(url)) return;
+
+    const title = $el.find('.jdlflm').text().trim();
+    const episode = $el.find('.epz').text().replace(/\s+/g, ' ').trim(); // "Episode 10"
+    const date = $el.find('.newnime').text().trim();
+    const thumb = $el.find('img').first().attr('src') || null;
+    if (!title) return;
+
+    seen.add(url);
+    items.push({
+      title,
+      episode,
+      url,
+      thumb,
+      date,
+      // uid unik per (series + episode) → episode baru memicu notif walau series sama.
+      uid: `${url}#${episode}`,
+      source: 'otakudesu',
+    });
+  });
+
+  return items;
+}
+
+module.exports = { search, getEpisodes, getEpisodeDownload, getLatestReleases };
