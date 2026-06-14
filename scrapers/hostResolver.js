@@ -56,23 +56,65 @@ async function resolveBuzzheavier(url) {
 }
 
 /**
+ * Resolve Filedon (filedon.co) → presigned Cloudflare R2 URL (direct download).
+ *
+ * filedon.co adalah SPA Laravel/Inertia. Halaman /embed/<slug> menanam data awal
+ * di atribut `data-page` (JSON), dan props-nya berisi `url` = presigned R2 URL
+ * (X-Amz-Signature, expire 1 jam) yang bisa langsung di-stream. Tanpa CSRF/cookie/ad.
+ *
+ * @param {string} url - https://filedon.co/view/<slug> | /embed/<slug> | /d/<slug>
+ * @returns {{directUrl: string|null, filename: string|null}}
+ */
+async function resolveFiledon(url) {
+  const m = url.match(/filedon\.co\/(?:view|embed|d|f)\/([A-Za-z0-9_-]+)/i);
+  if (!m) return { directUrl: null, filename: null };
+  const slug = m[1];
+
+  const res = await axios.get(`https://filedon.co/embed/${slug}`, {
+    headers: { 'User-Agent': UA }, timeout: 20000, validateStatus: () => true,
+  });
+  if (res.status !== 200) return { directUrl: null, filename: null };
+
+  const dp = String(res.data).match(/data-page="([^"]+)"/);
+  if (!dp) return { directUrl: null, filename: null };
+
+  let data;
+  try {
+    const json = dp[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    data = JSON.parse(json);
+  } catch (_) {
+    return { directUrl: null, filename: null };
+  }
+
+  const p = data.props || {};
+  const directUrl = (typeof p.url === 'string' && /^https?:\/\//.test(p.url)) ? p.url : null;
+  const filename = (p.files && p.files.name) || null;
+  return { directUrl, filename };
+}
+
+/**
  * Resolve a host URL to a direct download link.
- * @param {string} host - 'BUZZ', 'GD', 'AKIRA', 'FILEDON'
+ * @param {string} host - 'BUZZ', 'FILEDON', 'GD', 'AKIRA'
  * @param {string} url - the host URL
- * @returns {{directUrl: string|null, method: string}}
+ * @returns {{directUrl: string|null, method: string, filename?: string|null}}
  */
 async function resolve(host, url) {
   const h = (host || '').toUpperCase();
 
   switch (h) {
-    case 'BUZZ':
+    case 'BUZZ': {
       const directUrl = await resolveBuzzheavier(url);
       return { directUrl, method: 'buzzheavier-hx-redirect' };
+    }
+
+    case 'FILEDON': {
+      const { directUrl, filename } = await resolveFiledon(url);
+      return { directUrl, filename, method: 'filedon-embed-presigned' };
+    }
 
     case 'GD':
     case 'AKIRA':
-    case 'FILEDON':
-      // Not yet implemented — return null so caller can skip or use Gofile fallback
+      // Belum diimplement — caller bisa skip / pakai host lain.
       return { directUrl: null, method: `${h.toLowerCase()}-not-implemented` };
 
     default:
@@ -80,4 +122,4 @@ async function resolve(host, url) {
   }
 }
 
-module.exports = { resolve, resolveBuzzheavier };
+module.exports = { resolve, resolveBuzzheavier, resolveFiledon };

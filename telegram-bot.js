@@ -3008,8 +3008,8 @@ async function doAnimeOploDownload(bot, chatId, linkIndex) {
 
   const title = `${series.title} Ep ${epNum} [${link.quality}]`;
 
-  if (link.host === 'BUZZ') {
-    // Resolve Buzzheavier → direct URL → stream download
+  if (['BUZZ', 'FILEDON'].includes(link.host)) {
+    // Resolve host → direct URL → stream download
     queueManager.addJob(chatId, title, async (jobId) => {
       let statusMsg = null;
       const status = async (txt) => {
@@ -3020,10 +3020,10 @@ async function doAnimeOploDownload(bot, chatId, linkIndex) {
       };
 
       try {
-        await status(`⏳ <b>Resolving Buzzheavier...</b>`);
-        const resolved = await hostResolver.resolve('BUZZ', link.url);
+        await status(`⏳ <b>Resolving ${escHtml(link.host)}...</b>`);
+        const resolved = await hostResolver.resolve(link.host, link.url);
         if (!resolved.directUrl) {
-          return status(`❌ Gagal resolve Buzzheavier link. Coba kualitas/host lain.`);
+          return status(`❌ Gagal resolve link ${escHtml(link.host)}. Coba kualitas/host lain.`);
         }
 
         await status(`⬇️ <b>Downloading ${escHtml(title)}...</b>`);
@@ -3047,7 +3047,7 @@ async function doAnimeOploDownload(bot, chatId, linkIndex) {
             });
             status(txt);
           });
-        }, null, { referer: 'https://buzzheavier.com/' });
+        }, null, link.host === 'BUZZ' ? { referer: 'https://buzzheavier.com/' } : {});
 
         await status(`📤 <b>Uploading ke Telegram...</b>`);
         await sendOne(bot, chatId, filePath, `🎌 ${title}`);
