@@ -756,7 +756,54 @@ async function extractArchive(archivePath, destDir, password = null) {
   }
 }
 
-async function sendOne(bot, chatId, filePath, explicitCaption = null) {
+// ─── VIDEO SPLIT (oversize > limit upload) ───────────────────────────────────
+let _ffmpegOk = null;
+function ffmpegAvailable() {
+  if (_ffmpegOk !== null) return _ffmpegOk;
+  try {
+    const { spawnSync } = require('child_process');
+    _ffmpegOk = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8' }).status === 0
+      && spawnSync('ffprobe', ['-version'], { encoding: 'utf8' }).status === 0;
+  } catch (_) { _ffmpegOk = false; }
+  return _ffmpegOk;
+}
+
+function ffprobeDuration(filePath) {
+  const { spawnSync } = require('child_process');
+  const r = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath], { encoding: 'utf8' });
+  if (r.status !== 0) return null;
+  const d = parseFloat(String(r.stdout).trim());
+  return isFinite(d) && d > 0 ? d : null;
+}
+
+/**
+ * Pecah video jadi beberapa part ≤ partMaxBytes pakai ffmpeg `-c copy` (tanpa re-encode).
+ * Split per-waktu (durasi/jumlahPart) → cepat & tanpa turun kualitas.
+ * @returns {string[]} daftar path part terurut
+ */
+function splitVideoBySize(filePath, partMaxBytes) {
+  const { spawnSync } = require('child_process');
+  const size = fs.statSync(filePath).size;
+  const dur = ffprobeDuration(filePath);
+  if (!dur) throw new Error('ffprobe gagal membaca durasi');
+  const parts = Math.max(2, Math.ceil(size / partMaxBytes));
+  const segTime = Math.ceil(dur / parts);
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath) || '.mp4';
+  const base = path.basename(filePath, ext);
+  const pattern = path.join(dir, `${base}.part%03d${ext}`);
+
+  const r = spawnSync('ffmpeg', ['-y', '-i', filePath, '-c', 'copy', '-map', '0', '-f', 'segment',
+    '-segment_time', String(segTime), '-reset_timestamps', '1', pattern], { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error('ffmpeg segment gagal: ' + String(r.stderr || '').slice(-180));
+
+  return fs.readdirSync(dir)
+    .filter(f => f.startsWith(`${base}.part`) && f.endsWith(ext))
+    .sort()
+    .map(f => path.join(dir, f));
+}
+
+async function sendOne(bot, chatId, filePath, explicitCaption = null, allowSplit = true) {
   const size = fs.statSync(filePath).size;
   const name = path.basename(filePath);
   const finalCaption = explicitCaption !== null ? explicitCaption : name;
@@ -764,10 +811,33 @@ async function sendOne(bot, chatId, filePath, explicitCaption = null) {
   if (size > CONFIG.VIDEO_MAX_BYTES) {
     const sizeMB = (size / 1048576).toFixed(1);
     const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1048576);
+
+    // Auto-split video oversize jadi beberapa part (butuh ffmpeg). Matikan via SPLIT_OVERSIZE=0.
+    if (allowSplit && isVideo(filePath) && process.env.SPLIT_OVERSIZE !== '0' && ffmpegAvailable()) {
+      try {
+        await bot.sendMessage(chatId, `✂️ <b>${escHtml(name)}</b> (${sizeMB} MB) &gt; limit ${limitMB} MB.\nMemecah jadi beberapa part...`, { parse_mode: 'HTML' }).catch(() => { });
+        const target = Math.floor(CONFIG.VIDEO_MAX_BYTES * 0.9); // margin agar part tak melewati limit
+        const parts = splitVideoBySize(filePath, target);
+        if (!parts.length) throw new Error('tidak ada part dihasilkan');
+        log.ok(`[sendOne] split ${name} → ${parts.length} part`);
+        for (let i = 0; i < parts.length; i++) {
+          const cap = `${finalCaption} (Part ${i + 1}/${parts.length})`;
+          await sendOne(bot, chatId, parts[i], cap, false); // false: jangan re-split part
+          try { fs.unlinkSync(parts[i]); } catch (_) { }
+          await sleep(CONFIG.SEND_DELAY);
+        }
+        return;
+      } catch (e) {
+        log.warn(`[sendOne] split gagal (${name}): ${e.message}`);
+        // jatuh ke pesan skip di bawah
+      }
+    }
+
     log.warn(`[sendOne] SKIP ${name} (${sizeMB} MB > limit ${limitMB} MB)`);
     try {
+      const note = (process.env.SPLIT_OVERSIZE === '0' || !ffmpegAvailable()) ? '' : ' dan gagal dipecah';
       await bot.sendMessage(chatId,
-        `⚠️ <b>${escHtml(name)}</b> ${sizeMB} MB melebihi limit upload ${limitMB} MB, file dilewati.`,
+        `⚠️ <b>${escHtml(name)}</b> ${sizeMB} MB melebihi limit upload ${limitMB} MB${note}, file dilewati.`,
         { parse_mode: 'HTML' });
     } catch (_) { }
     return;

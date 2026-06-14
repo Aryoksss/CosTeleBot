@@ -119,3 +119,11 @@ crontab -e
 ```
 Hanya status `error` yang memicu alert (`warn`/rate-limit diabaikan). Naikkan
 intervalnya kalau alert terasa berisik saat satu sumber lama down.
+
+### ffmpeg (untuk auto-split video oversize)
+Video yang melebihi limit upload Telegram (mis. >2 GB) otomatis dipecah jadi
+beberapa part pakai ffmpeg. Wajib install di VPS:
+```bash
+sudo apt install -y ffmpeg
+```
+Matikan fitur ini via env `SPLIT_OVERSIZE=0` kalau tidak mau (file oversize dilewati).
