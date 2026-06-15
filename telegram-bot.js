@@ -4027,40 +4027,38 @@ async function sendMainMenu(bot, chatId) {
     tip +
     `Atau pilih menu di bawah 👇`;
 
-  // Layout grouped per-kategori, baris dikelompokkan biar gampang dipindai:
-  //   Row 1: Cosplay (primary) — Browse + Gacha
-  //   Row 2: Video adult — R34 / JAV / EroThots
-  //   Row 3: Image / Patreon — Pinterest + Patreon Gacha
-  //   Row 4: Anime + Smart Search (AI)
-  //   Row 5: Terabox DL + Profile
-  //   Row 6: Antrean + Clear Chat
-  //   Row 7 (admin only): Dashboard / Notif / Health
+  // Layout: fitur AI di atas (tercepat), lalu cosplay (utama), anime/patreon,
+  // baris 18+ (JAV/Ero/XNXX/R34), util download, lalu profil/antrean/util.
   const keyboard = [
+    // Flagship: ketik bebas / smart search (AI)
+    [{ text: '🔎 Cari Apa Saja (AI)', callback_data: 'menu_search' }],
+    // Cosplay (primary)
     [
-      { text: '📚 Browse Cosplay', callback_data: 'menu_browse' },
-      { text: '🎲 Cosplay Gacha', callback_data: 'menu_gacha' },
+      { text: '📚 Cosplay', callback_data: 'menu_browse' },
+      { text: '🎲 Gacha', callback_data: 'menu_gacha' },
+      { text: '🍁 Patreon', callback_data: 'menu_kemono_reroll' },
     ],
-    [
-      { text: '🎬 Rule34', callback_data: 'menu_r34' },
-      { text: '🎥 Javtiful', callback_data: 'jav_menu' },
-      { text: '🔥 EroThots', callback_data: 'ero_menu' },
-    ],
-    [
-      { text: '🟦 XNXX', callback_data: 'xnxx_menu' },
-      { text: '📌 Pinterest', callback_data: 'pin_search_prompt' },
-      { text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' },
-    ],
+    // Anime + Pinterest
     [
       { text: '🎌 Anime', callback_data: 'anime_menu' },
-      { text: '🔎 Smart Search', callback_data: 'menu_search' },
+      { text: '📌 Pinterest', callback_data: 'pin_search_prompt' },
     ],
+    // 18+ sources
     [
-      { text: '📥 Terabox DL', callback_data: 'menu_terabox' },
-      { text: '👤 Profile', callback_data: 'menu_profile' },
+      { text: '🎥 JAV', callback_data: 'jav_menu' },
+      { text: '🔥 Ero', callback_data: 'ero_menu' },
+      { text: '🟦 XNXX', callback_data: 'xnxx_menu' },
+      { text: '🎬 R34', callback_data: 'menu_r34' },
     ],
+    // Download manual + profil
+    [
+      { text: '📥 Terabox', callback_data: 'menu_terabox' },
+      { text: '👤 Profil', callback_data: 'menu_profile' },
+    ],
+    // Util
     [
       { text: '🚦 Antrean', callback_data: 'tasks_refresh' },
-      { text: '🧹 Clear Chat', callback_data: 'menu_clear' },
+      { text: '🧹 Bersihkan', callback_data: 'menu_clear' },
     ],
   ];
 
