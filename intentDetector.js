@@ -44,6 +44,7 @@ const SOURCE_HINTS = {
   pinterest: /\b(pin(?:terest)?|pinboard)\b/i,
   jav: /\b(jav(?:tiful)?|japanese\s+adult|jav\s*video)\b/i,
   ero: /\b(erothots?|ero\s*thots?|onlyfans?\s*leaks?)\b/i,
+  xnxx: /\b(xnxx|x\s*nxx)\b/i,
   anime: /\b(anime|otakudesu|oploverz|streaming\s*anime|sub\s*indo|nonton\s*anime)\b/i,
 };
 
@@ -98,12 +99,13 @@ The bot supports these scraping sources:
 - "pinterest": Pinterest (image/video mix)
 - "jav": Javtiful (Japanese adult videos, JAV codes like MIDE-XXX, SSNI-XXX)
 - "ero": EroThots (OnlyFans leaks, adult webcam/amateur videos)
+- "xnxx": XNXX (general adult video tube, all categories)
 - "anime": Anime streaming (Otakudesu + Oploverz, sub Indo, episode download)
 - "all": search all sources at once
 
 Classify user message into intent. Return ONLY a JSON object, no prose, no markdown.
 Schema:
-{ "intent": "search" | "other", "query": "<extracted search query>" | null, "preferred_source": "cosplay" | "r34" | "pinterest" | "jav" | "ero" | "anime" | "all" | null }
+{ "intent": "search" | "other", "query": "<extracted search query>" | null, "preferred_source": "cosplay" | "r34" | "pinterest" | "jav" | "ero" | "xnxx" | "anime" | "all" | null }
 
 Rules:
 - If user wants to find/search something visual/media → intent="search"
@@ -116,6 +118,7 @@ Rules:
 - If user mentions "cosplay" as source context → preferred_source="cosplay"
 - If user mentions "jav", "javtiful", or JAV code format (e.g., MIDE-232, SSNI-001) → preferred_source="jav"
 - If user mentions "erothots", "onlyfans leak", or adult amateur content → preferred_source="ero"
+- If user mentions "xnxx" → preferred_source="xnxx"
 - If user mentions "anime", "nonton", "streaming", "sub indo", "episode", or anime titles → preferred_source="anime"
 - Non-search messages (greetings, questions unrelated to media, help requests) → intent="other"`;
 
@@ -163,8 +166,7 @@ async function detectIntentLLM(text) {
     if (!parsed || typeof parsed !== 'object') throw new Error('invalid shape');
     const intent = parsed.intent === 'search' ? 'search' : 'other';
     const query = intent === 'search' && typeof parsed.query === 'string' ? parsed.query.trim().slice(0, 150) : null;
-    const validSources = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'anime', 'all'];
-    const preferredSource = validSources.includes(parsed.preferred_source) ? parsed.preferred_source : null;
+    const validSources = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'xnxx', 'anime', 'all'];    const preferredSource = validSources.includes(parsed.preferred_source) ? parsed.preferred_source : null;
 
     const result = {
       intent,

@@ -167,6 +167,7 @@ const r34Scraper = require('./scrapers/rule34video');
 const pinterestScraper = require('./scrapers/pinterest');
 const javtifulScraper = require('./scrapers/javtiful');
 const erothotsScraper = require('./scrapers/erothots');
+const xnxxScraper = require('./scrapers/xnxx');
 const otakudesuScraper = require('./scrapers/otakudesu');
 const oploverzScraper = require('./scrapers/oploverz');
 const hostResolver = require('./scrapers/hostResolver');
@@ -420,6 +421,7 @@ const r34BrowseCache = new Map(); // chatId -> { posts: [], page, query }
 const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, prevBookmarks: [] }
 const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const eroBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
+const xnxxBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const animeBrowseCache = new Map(); // chatId -> { results, episodes, seriesIdx, oploLinks, oploEpNum }
 const aggregateCache = new Map(); // chatId -> { query, sources: { cosplay: [], r34: [], pinterest: [] } }
 
@@ -430,7 +432,7 @@ function touchState(chatId) {
 }
 // Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
 // Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
-for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, animeBrowseCache, aggregateCache]) {
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, xnxxBrowseCache, animeBrowseCache, aggregateCache]) {
   const origSet = m.set.bind(m);
   m.set = (key, value) => {
     touchState(key);
@@ -449,6 +451,7 @@ function sweepStaleStates() {
     pinBrowseCache.delete(chatId);
     javBrowseCache.delete(chatId);
     eroBrowseCache.delete(chatId);
+    xnxxBrowseCache.delete(chatId);
     aggregateCache.delete(chatId);
     stateTouchedAt.delete(chatId);
   }
@@ -2682,6 +2685,206 @@ async function doEroDownload(bot, chatId, item) {
   }, bot);
 }
 
+// ─── XNXX HANDLERS ───────────────────────────────────────────────────────────
+async function doXnxxBrowse(bot, chatId, query, page = 1, mode = 'search') {
+  const isBrowse = mode === 'browse';
+  log.info(`[User ${chatId}] XNXX ${mode} "${isBrowse ? '(latest)' : query}" page=${page}`);
+  const loadMsg = await bot.sendMessage(chatId, `🟦 <b>Memuat XNXX...</b>${isBrowse ? '' : `\n<i>Query: ${escHtml(query)}</i>`}`, { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+
+  try {
+    const { items, hasNext } = isBrowse
+      ? await xnxxScraper.scrapeBrowse(page)
+      : await xnxxScraper.scrapeSearch(query, page);
+    if (!items.length) {
+      return bot.editMessageText(`⚠️ Tidak ada video ${isBrowse ? 'di halaman ini' : `untuk <b>${escHtml(query)}</b>`}.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]] }
+      });
+    }
+
+    const shown = items.slice(0, 8);
+    xnxxBrowseCache.set(chatId, { items: shown, query, page, hasNext, mode });
+
+    let text = isBrowse
+      ? `🟦 <b>XNXX — Pilihan Terbaru</b> · Halaman ${page}\n\n`
+      : `🟦 <b>XNXX:</b> <i>${escHtml(query)}</i> · Halaman ${page}\n\n`;
+    shown.forEach((v, i) => {
+      const meta = [v.durationText, v.quality].filter(Boolean).join(' · ');
+      text += `${i + 1}. ${escHtml(v.title.slice(0, 72))}${meta ? ` · ${meta}` : ''}\n`;
+    });
+
+    const buttons = [];
+    for (let i = 0; i < shown.length; i += 2) {
+      const row = [{ text: `${i + 1}. 🎬 Detail`, callback_data: `xnxx_${i}` }];
+      if (i + 1 < shown.length) row.push({ text: `${i + 2}. 🎬 Detail`, callback_data: `xnxx_${i + 1}` });
+      buttons.push(row);
+    }
+    const navRow = [];
+    if (page > 1) navRow.push({ text: '◀ Prev', callback_data: `xnxxpage_${page - 1}` });
+    if (hasNext) navRow.push({ text: 'Next ▶', callback_data: `xnxxpage_${page + 1}` });
+    if (navRow.length) buttons.push(navRow);
+    buttons.push([{ text: '🎲 Gacha', callback_data: 'xnxx_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]);
+
+    await bot.editMessageText(text, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: buttons },
+    });
+  } catch (err) {
+    log.error(`[XNXX] browse error: ${err.message}`);
+    bot.editMessageText(`❌ Gagal: ${err.message}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+  }
+}
+
+async function doXnxxMenu(bot, chatId) {
+  const sentMsg = await bot.sendMessage(chatId, `🟦 <b>XNXX</b>\n\nPilih mode:`, {
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🔍 Search', callback_data: 'xnxx_search_prompt' }],
+        [{ text: '📋 Browse Terbaru', callback_data: 'xnxx_browse' }, { text: '🎲 Gacha', callback_data: 'xnxx_gacha' }],
+        [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+      ]
+    }
+  });
+  autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+}
+
+async function doXnxxGacha(bot, chatId) {
+  const loadMsg = await bot.sendMessage(chatId, '🎲 <b>Gacha XNXX...</b>', { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+  try {
+    const page = Math.floor(Math.random() * 15) + 1;
+    const { items } = await xnxxScraper.scrapeBrowse(page);
+    if (!items.length) {
+      return bot.editMessageText('😔 Gacha kosong, coba lagi.', {
+        chat_id: chatId, message_id: loadMsg.message_id,
+        reply_markup: { inline_keyboard: [[{ text: '🎲 Reroll', callback_data: 'xnxx_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] }
+      });
+    }
+    const unseen = items.filter(v => !historyTracker.hasSeen(chatId, 'xnxx', v.link));
+    const pool = unseen.length ? unseen : items;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    historyTracker.markSeen(chatId, 'xnxx', pick.link);
+    xnxxBrowseCache.set(chatId, { items: [pick], query: '', page, hasNext: false, mode: 'gacha' });
+    bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
+    return doXnxxDetail(bot, chatId, pick);
+  } catch (e) {
+    log.error(`[XNXX] gacha error: ${e.message}`);
+    bot.editMessageText(`❌ Gacha gagal: ${escHtml(e.message.slice(0, 150))}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+  }
+}
+
+async function doXnxxDetail(bot, chatId, item) {
+  const loadMsg = await bot.sendMessage(chatId, `🟦 <b>Memuat detail...</b>`, { parse_mode: 'HTML' });
+  try {
+    const detail = await xnxxScraper.scrapeDetail(item.link);
+    if (!detail || (!detail.hlsUrl && !detail.videoUrl)) {
+      return bot.editMessageText(`⚠️ Tidak ada source video yang dapat diekstrak.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Kembali', callback_data: 'xnxx_back_browse' }]] }
+      });
+    }
+
+    const idx = xnxxBrowseCache.get(chatId)?.items?.indexOf(item) ?? 0;
+    let text = `🎬 <b>${escHtml(detail.title)}</b>\n\n`;
+    const meta = [item.durationText, item.quality].filter(Boolean).join(' · ');
+    if (meta) text += `${meta}\n`;
+    text += `🔗 <a href="${item.link}">Halaman XNXX</a>\n`;
+    if (detail.hlsUrl) text += `\n<i>Diunduh kualitas terbaik via HLS. Video besar otomatis dipecah.</i>`;
+
+    const buttons = [
+      [{ text: `⬇️ Download${item.quality ? ` (${item.quality})` : ''}`, callback_data: `xnxxdl_${idx}` }],
+      [{ text: '🔙 Kembali ke Daftar', callback_data: 'xnxx_back_browse' }],
+      [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+    ];
+
+    if (detail.thumb) {
+      await bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
+      try {
+        await bot.sendPhoto(chatId, detail.thumb, { caption: text, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+      } catch (e) {
+        await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+      }
+    } else {
+      await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+    }
+
+    const cache = xnxxBrowseCache.get(chatId) || { items: [], query: '', page: 1 };
+    cache.detailCache = cache.detailCache || {};
+    cache.detailCache[item.id] = detail;
+    xnxxBrowseCache.set(chatId, cache);
+  } catch (e) {
+    log.error(`[XNXX] detail error: ${e.message}`);
+    bot.editMessageText(`❌ Gagal: ${e.message}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+  }
+}
+
+async function doXnxxDownload(bot, chatId, item) {
+  const cache = xnxxBrowseCache.get(chatId);
+  let detail = cache?.detailCache?.[item.id];
+  if (!detail) {
+    detail = await xnxxScraper.scrapeDetail(item.link);
+    if (!detail || (!detail.hlsUrl && !detail.videoUrl)) {
+      return bot.sendMessage(chatId, '❌ Gagal resolve video detail.');
+    }
+  }
+
+  // Dedup file_id Telegram.
+  const cacheKey = `xnxx:${item.id}`;
+  if (await trySendCachedFile(bot, chatId, cacheKey, `🎬 ${detail.title}`)) return;
+
+  queueManager.addJob(chatId, `XNXX: ${detail.title.slice(0, 40)}`, async (jobId) => {
+    const jobDir = path.join(CONFIG.TEMP_DIR, 'xnxx_' + jobId);
+    await fsp.mkdir(jobDir, { recursive: true });
+    const dest = path.join(jobDir, `${item.id}.mp4`);
+    const statusMsg = await bot.sendMessage(chatId, `🎬 <b>${escHtml(detail.title)}</b>\n<i>⏳ Memulai download...</i>`, { parse_mode: 'HTML' });
+    const startedAt = Date.now();
+    const throttle = createProgressThrottler(2500);
+
+    try {
+      // Prioritas HLS (kualitas penuh) via ffmpeg. Fallback mp4 progresif (360p) kalau ffmpeg absen.
+      if (detail.hlsUrl && ffmpegAvailable()) {
+        await bot.editMessageText(`🎬 <b>${escHtml(detail.title.slice(0, 80))}</b>\n<i>⏳ Mengunduh kualitas terbaik (HLS)...</i>`, {
+          chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+        }).catch(() => { });
+        await downloadHlsToMp4(detail.hlsUrl, dest, { referer: 'https://www.xnxx.com/' });
+      } else if (detail.videoUrl) {
+        await downloadStream(detail.videoUrl, dest, (pct, dl, tot) => {
+          throttle(() => {
+            const pText = renderProgressBar({ icon: '🎬', title: detail.title, done: dl, total: tot, unit: 'bytes', startedAt });
+            if (jobId) queueManager.updateJob(jobId, pText);
+            bot.editMessageText(pText, { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+          }, tot && dl === tot);
+        }, null, { expectMedia: true, referer: 'https://www.xnxx.com/', userAgent: 'Mozilla/5.0' });
+      } else {
+        throw new Error('Tidak ada source video (butuh ffmpeg untuk HLS).');
+      }
+
+      const fsize = fs.statSync(dest).size;
+      const sizeMB = (fsize / 1048576).toFixed(1);
+      botStats.downloadedBytes += fsize;
+      statsDb.addDownloadSize(chatId, fsize);
+
+      await bot.editMessageText(`📤 <b>${escHtml(detail.title.slice(0, 80))}</b>\n<i>⏳ Mengupload ${sizeMB} MB...</i>`, {
+        chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+      }).catch(() => { });
+
+      const caption = `🎬 ${detail.title} (${sizeMB} MB)`;
+      const sent = await sendOne(bot, chatId, dest, caption);
+      if (sent && sent.fileId) fileCache.set(cacheKey, sent.fileId, sent.type, detail.title.slice(0, 80));
+      bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
+      await rimraf(jobDir);
+    } catch (err) {
+      log.error(`[XNXX] download error: ${err.message}`);
+      bot.editMessageText(`❌ Download gagal: <code>${escHtml(err.message.slice(0, 200))}</code>`, {
+        chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+      }).catch(() => { });
+      await rimraf(jobDir);
+    }
+  }, bot);
+}
+
 // ─── ANIME (Otakudesu + Oploverz) ───────────────────────────────────────────
 
 /**
@@ -3394,6 +3597,7 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
   if (preferredSource === 'pinterest') return doPinSearch(bot, chatId, query);
   if (preferredSource === 'jav') return doJavBrowse(bot, chatId, query, 1);
   if (preferredSource === 'ero') return doEroBrowse(bot, chatId, query, 1);
+  if (preferredSource === 'xnxx') return doXnxxBrowse(bot, chatId, query, 1);
   if (preferredSource === 'anime') return doAnimeSearch(bot, chatId, query);
 
   // 'all' atau tidak ada preference → tanya user dulu
@@ -3706,6 +3910,7 @@ async function sendMainMenu(bot, chatId) {
       { text: '🔥 EroThots', callback_data: 'ero_menu' },
     ],
     [
+      { text: '🟦 XNXX', callback_data: 'xnxx_menu' },
       { text: '📌 Pinterest', callback_data: 'pin_search_prompt' },
       { text: '🍁 Patreon Gacha', callback_data: 'menu_kemono_reroll' },
     ],
@@ -3943,6 +4148,14 @@ function startBot() {
       doEroBrowse(bot, msg.chat.id, query, 1);
     } else {
       doEroMenu(bot, msg.chat.id);
+    }
+  });
+
+  registerCommand({ name: 'xnxx', description: '🟦 XNXX (Search/Browse/Gacha)' }, async (msg, query) => {
+    if (query) {
+      doXnxxBrowse(bot, msg.chat.id, query, 1);
+    } else {
+      doXnxxMenu(bot, msg.chat.id);
     }
   });
 
@@ -4481,6 +4694,14 @@ function startBot() {
       return;
     }
 
+    // If awaiting XNXX search query
+    if (state && state.step === 'AWAITING_XNXX_SEARCH') {
+      userStates.delete(chatId);
+      log.info(`[User ${chatId}] Pencarian XNXX: ${text}`);
+      doXnxxBrowse(bot, chatId, text, 1);
+      return;
+    }
+
     // If awaiting Anime search query
     if (state && state.step === 'AWAITING_ANIME_SEARCH') {
       userStates.delete(chatId);
@@ -5009,6 +5230,7 @@ function startBot() {
       if (src === 'pinterest') return doPinSearch(bot, chatId, q);
       if (src === 'jav') return doJavBrowse(bot, chatId, q, 1);
       if (src === 'ero') return doEroBrowse(bot, chatId, q, 1);
+      if (src === 'xnxx') return doXnxxBrowse(bot, chatId, q, 1);
       if (src === 'anime') return doAnimeSearch(bot, chatId, q);
       if (src === 'all') return doAggregateSearch(bot, chatId, q);
       return;
@@ -5222,6 +5444,57 @@ function startBot() {
       if (!cache || !cache.items[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /ero.');
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doEroDetail(bot, chatId, cache.items[idx]);
+    }
+
+    // ─── XNXX CALLBACKS ──────────────────────────────────────────────────────
+    if (action === 'xnxx_menu') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doXnxxMenu(bot, chatId);
+    }
+    if (action === 'xnxx_browse') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doXnxxBrowse(bot, chatId, null, 1, 'browse');
+    }
+    if (action === 'xnxx_gacha') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doXnxxGacha(bot, chatId);
+    }
+    if (action === 'xnxx_search_prompt') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      userStates.set(chatId, { step: 'AWAITING_XNXX_SEARCH' });
+      const sentMsg = await bot.sendMessage(chatId,
+        `🟦 <b>XNXX Search</b>\n\nKetik kata kunci (judul, kategori, nama):`,
+        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] } }
+      );
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action === 'xnxx_back_browse') {
+      const cache = xnxxBrowseCache.get(chatId);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      if (!cache || cache.mode === 'gacha') return doXnxxMenu(bot, chatId);
+      return doXnxxBrowse(bot, chatId, cache.query, cache.page, cache.mode || 'search');
+    }
+    if (action.startsWith('xnxxpage_')) {
+      const pg = parseInt(action.replace('xnxxpage_', ''), 10);
+      const cache = xnxxBrowseCache.get(chatId);
+      if (!cache) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /xnxx.');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doXnxxBrowse(bot, chatId, cache.query, pg, cache.mode || 'search');
+    }
+    if (action.startsWith('xnxxdl_')) {
+      const idx = parseInt(action.replace('xnxxdl_', ''), 10);
+      const cache = xnxxBrowseCache.get(chatId);
+      if (!cache || !cache.items[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /xnxx.');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doXnxxDownload(bot, chatId, cache.items[idx]);
+    }
+    if (action.startsWith('xnxx_') && /^xnxx_\d+$/.test(action)) {
+      const idx = parseInt(action.replace('xnxx_', ''), 10);
+      const cache = xnxxBrowseCache.get(chatId);
+      if (!cache || !cache.items[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /xnxx.');
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doXnxxDetail(bot, chatId, cache.items[idx]);
     }
 
     // ─── ANIME CALLBACKS ───────────────────────────────────────────────────────

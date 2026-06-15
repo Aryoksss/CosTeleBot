@@ -66,7 +66,7 @@ async function assist(userText, commands = []) {
 Selain mengobrol, kamu bisa MENJALANKAN SATU aksi untuk user. Balas HANYA JSON (tanpa teks lain) dengan skema:
 { "action": "search" | "gacha" | "jav_gacha" | "browse" | "anime" | "menu" | "chat",
   "query": string | null,
-  "source": "cosplay" | "r34" | "pinterest" | "jav" | "ero" | "anime" | "all" | null,
+  "source": "cosplay" | "r34" | "pinterest" | "jav" | "ero" | "xnxx" | "anime" | "all" | null,
   "reply": string }
 
 Panduan memilih action:
@@ -93,7 +93,7 @@ ${cmdList}`;
   });
 
   const action = ACTIONS.includes(parsed && parsed.action) ? parsed.action : 'chat';
-  const validSrc = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'anime', 'all'];
+  const validSrc = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'xnxx', 'anime', 'all'];
   return {
     action,
     query: typeof parsed.query === 'string' && parsed.query.trim() ? parsed.query.trim().slice(0, 150) : null,
