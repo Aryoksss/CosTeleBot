@@ -4184,12 +4184,12 @@ function quotaInfo(chatId) {
   return { tier, used, limit, unlimited, remaining: unlimited ? Infinity : Math.max(0, limit - used) };
 }
 
-// Paket premium (bayar crypto). tier + lama + harga (dalam CRYPTOPAY_ASSET).
+// Paket premium (bayar crypto). tier + lama (maks 30 hari) + harga (dalam CRYPTOPAY_ASSET).
 const PREMIUM_PLANS = [
   { tier: 'premium', days: 7, price: 3 },
   { tier: 'premium', days: 30, price: 8 },
-  { tier: 'vvip', days: 30, price: 20 },
-  { tier: 'vvip', days: 90, price: 50 },
+  { tier: 'vvip', days: 7, price: 12 },
+  { tier: 'vvip', days: 30, price: 35 },
 ];
 const pendingPremium = new Map(); // invoiceId -> { chatId, days, tier, createdAt }
 
