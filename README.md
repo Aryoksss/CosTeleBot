@@ -1,100 +1,125 @@
 # 🎭 CosTeleBot (Ultimate Multi-Source Scraper Bot)
 
-![Cosplay Scraper](https://img.shields.io/badge/Node.js-Telegram_Bot-blue)
-![Version](https://img.shields.io/badge/Version-2.0.0--Apex-success)
+![Node.js Telegram Bot](https://img.shields.io/badge/Node.js-Telegram_Bot-blue)
+![Version](https://img.shields.io/badge/Version-3.0.0--Nexus-success)
 ![Build](https://img.shields.io/badge/Build-Passing-brightgreen)
-![Sources](https://img.shields.io/badge/Sources-5_Engines-orange)
+![Sources](https://img.shields.io/badge/Sources-9_Engines-orange)
+![AI](https://img.shields.io/badge/AI-Groq_Llama_3.3-purple)
 
-**CosTeleBot** adalah *engine* Telegram Bot multi-fungsional tingkat lanjut (Advanced) yang dirancang untuk menelusuri, mengekstrak, dan mengirimkan arsip *High Quality Cosplay, Patreon Leaks, dan Animasi 3D* dari berbagai sumber secara otomatis. Ditulis dengan Node.js dan dioptimalkan untuk server/VPS *low-end* dengan efisiensi memori ekstrem.
+**CosTeleBot** adalah *engine* Telegram Bot multi-fungsi tingkat lanjut untuk menelusuri, mengekstrak, dan mengirimkan media (cosplay, anime, JAV, video dewasa, Patreon, Pinterest) dari banyak sumber secara otomatis. Ditulis dengan Node.js dan dioptimalkan untuk VPS *low-end* dengan efisiensi memori tinggi.
+
+Cukup **ketik apa yang kamu mau** — bot pakai AI untuk mengerti & menjalankannya sendiri (atau pilih dari menu interaktif).
 
 ---
 
-## 🔥 Fitur Utama (Features)
+## 🔥 Fitur Utama
+
+### 🤖 Asisten AI (Groq Llama 3.3)
+- **Free-text → aksi:** ketik "cari ganyu", "gacha cosplay", "MIDE-232", atau "anime one piece" → bot langsung jalanin command yang tepat.
+- **Smart intent detection:** 2 layer (regex instan + LLM fallback), normalisasi kode JAV otomatis, koreksi typo.
+- **Asisten percakapan:** menjawab pertanyaan cara pakai bot tanpa mengarang command (daftar command di-inject dari registry).
+- Aktif kalau `GROQ_API_KEY` di-set; tanpa itu fallback ke deteksi regex.
 
 ### 📚 Cosplaytele Engine
-🔹 **Interactive Browser:** Jelajahi ribuan *gallery* langsung dari chat Telegram dengan *pagination* pintar.  
-🔹 **Search Engine:** Pencarian karakter/cosplayer secara interaktif maupun langsung via `/search <query>`.  
-🔹 **Gacha Mode (Random SSR):** Tekan `/gacha` untuk bot menerjunkan dirinya ke halaman acak dan mengembalikan *Thumbnail SSR* kejutan!
+- Interactive browser dengan pagination, search karakter/cosplayer, dan **Gacha** (random SSR).
+- **More from cosplayer** pintar: name-match ke kategori, fallback ke pencarian nama.
+- Multi-host download: Gofile, SoraFolder, MediaFire, TeraBox.
+
+### 🎥 Javtiful (JAV)
+- Search by kode JAV / aktris / tag, **Gacha** (random/trending/cosplay), explore aktris & kategori.
+- Auto-split video > limit upload jadi beberapa part.
+
+### 🔥 EroThots & � XNXX
+- Search, **Browse terbaru**, dan **Gacha**.
+- XNXX: download kualitas penuh via **HLS + ffmpeg** (fallback MP4 progresif).
+
+### 🎬 Rule34Video
+- Browse katalog, search by tag, video gacha, preview thumbnail + resolusi.
+
+### 📌 Pinterest
+- Search image & video. Video HLS di-download via **ffmpeg** (fix masalah 403 resolusi).
+
+### 🎌 Anime Hub (Otakudesu + Oploverz + Kusonime)
+- Search lintas 3 sumber, gacha ongoing/batch, latest releases, browse by season/genre.
+- Resolver multi-host: Gofile, Mega, GDrive, Buzzheavier, Filedon.
 
 ### 🍁 Patreon Vault (Kemono.cr)
-🔹 **Kemono Scraper:** Menembus dinding Cloudflare menggunakan Playwright untuk mengekstrak konten kreator Patreon yang diarsipkan di `Kemono.cr`.  
-🔹 **Gacha Kreator Pool:** Sistem randomisasi dari kumpulan kreator eksklusif via `/maple`.  
-🔹 **Local Download Pipeline:** File didownload ke server lokal terlebih dahulu, lalu diunggah ke Telegram sebagai stream offline — mengatasi blokir CDN Cloudflare!  
-🔹 **Auto-Clear Reroll:** Saat Reroll, media gacha sebelumnya otomatis terhapus dari chat.
-
-### 🎬 Rule34Video Engine
-🔹 **Video Browser:** Jelajahi katalog video terbaru dengan navigasi halaman interaktif.  
-🔹 **Search by Tag:** Cari video berdasarkan tag/karakter spesifik via `/r34 <query>`.  
-🔹 **Video Gacha:** Mode acak untuk mendapat video kejutan dari seluruh database.  
-🔹 **Auto-Fallback Resolution:** Jika video 1080p melebihi batas 50MB Telegram, bot otomatis turun ke 720p → 480p → 360p hingga menemukan ukuran yang aman.  
-🔹 **Thumbnail Preview:** Lihat cover video dan detail resolusi sebelum memutuskan untuk mendownload.
+- Scraper Playwright (tembus Cloudflare), gacha kreator pool via `/maple`, download pipeline lokal.
 
 ### ⬇️ Multi-Source Downloader
-🔹 **Gofile Extractor:** Deteksi otomatis folder Gofile, mendukung pemilihan file spesifik dari daftar isi.  
-🔹 **MediaFire Downloader:** Mengekstrak tautan asli (termasuk yang di-*scramble* via Base64).  
-🔹 **SoraFolder Bypasser:** Playwright API menipu *timer limit* 10 detik SoraFolder untuk mengekstrak direct link.  
-🔹 **TeraBox / 4KHD Resolver:** Menembus antrean password TeraBox menggunakan xAPIverse.
+- **Gofile** (resolver Playwright + proxy WARP opsional), **MediaFire**, **SoraFolder** (decrypt AES), **TeraBox/4KHD** (xAPIverse + fallback gratis), **Mega**, **GDrive**.
+
+### 🎞️ Pengiriman Video Pintar
+- **Streaming langsung:** semua video dikirim sebagai `sendVideo` + `supports_streaming` + **faststart remux** (ffmpeg) → bisa diputar tanpa download penuh.
+- **Auto-split:** video > limit dipecah jadi part otomatis (ffmpeg `-c copy`).
+- **Dedup file_id:** file yang sama dikirim ulang dari server Telegram tanpa download/upload ulang (hemat bandwidth).
 
 ### 🚦 Queue Manager & Telemetry
-🔹 **Antrean Pintar (Queue System):** Mencegah kelebihan beban *server* akibat eksekusi massal pengguna. Secara bawaan membatasi maks 2 unduhan bersamaan dan perlindungan spam antrean *(maks 3 tugas per pengguna)*.  
-🔹 **Aktivitas RPG Hunter (`statsDb`):** Telemetri *database* mencatat setiap tetes poin *Experience (EXP)* dari Gacha dan Kuota Media yang diklaim oleh pengguna, dengan sistem pangkat berlapis.  
-🔹 **Dasbor Admin VPS:** Monitoring kondisi kesehatan Node.js dan RAM VPS murni dari Telegram untuk *Owner*.
+- **Antrean round-robin per-user** (fairness): default maks 6 unduhan bersamaan, 8 tugas per user (configurable via env).
+- **Telemetri RPG** (`statsDb`): EXP dari gacha + kuota media, sistem pangkat.
+- **Dasbor admin**: health check semua sumber, statistik VPS, web dashboard opsional.
+- **Auto-notify watcher**: kabari admin saat ada post/episode baru.
 
 ### 🛡️ Optimasi & Stabilitas
-🔹 **Sharp Compressor Engine:** Modul `sharp` merampingkan foto 4K raksasa demi mencegah error `PHOTO_INVALID_DIMENSIONS`.  
-🔹 **Native OS Extraction:** Menggunakan `7z` dan `unrar` native OS (bukan WASM) untuk efisiensi RAM maksimal.  
-🔹 **Media Chunker:** Kalkulasi otomatis payload 50MB Telegram, melindungi dari error `413 Request Entity Too Large`.  
-🔹 **Auto-Clean UX:** Riwayat menu dan pesan status selalu disapu bersih secara otomatis.  
-🔹 **Garbage Collector:** Mendukung `--expose-gc` untuk pembersihan memori manual di VPS low-end.
+- **Sharp compressor** untuk foto 4K, **native 7z/unrar** (bukan WASM), media chunker anti-413.
+- **Browser reaper**: bunuh proses Chromium zombie (jaga RAM).
+- **Startup env validation**, auto-clean UX, dukungan `--expose-gc`.
 
 ---
 
-## 🚀 Panduan Instalasi (Deployment Guide)
+## 🚀 Panduan Instalasi
 
 ### 1. Kebutuhan Sistem
-- [Node.js](https://nodejs.org/en/) >= v18.0
-- Package Manager (`npm`)
-- Server VPS Linux (Ubuntu/Debian direkomendasikan)
-- `p7zip-full` dan `unrar` (untuk ekstraksi arsip)
+- [Node.js](https://nodejs.org/en/) >= v18 (disarankan 20+)
+- VPS Linux (Ubuntu/Debian)
+- `p7zip-full` + `unrar` (ekstraksi arsip)
+- `ffmpeg` (split video, download HLS, faststart streaming)
 
-### 2. Cara Meng-install
+### 2. Instalasi
 ```bash
-# Clone Repositori
-git clone https://github.com/fiore-cmd/costelebot.git
-cd costelebot
+git clone https://github.com/Aryoksss/CosTeleBot.git
+cd CosTeleBot
 
-# Install seluruh Pustaka Dependensi
 npm install
 
-# Install tools native OS (VPS Linux)
-sudo apt install p7zip-full unrar -y
+# Tools native OS
+sudo apt install -y p7zip-full unrar ffmpeg
 
-# Install Browser Engine untuk Scraper (Gofile & Kemono)
-npx playwright install
+# Browser engine (dipakai Gofile & Kemono)
+npx playwright install chromium
 ```
 
-### 3. Setup Konfigurasi Kunci (Environment Variables)
-Buat file `.env` di root folder (sejajar dengan `package.json`):
+### 3. Konfigurasi `.env`
+Buat file `.env` di root (lihat `.env.example` untuk daftar lengkap):
 ```env
-BOT_TOKEN=8xxxxxxx:AAFz...                       # Token Telegram Bot
-XAPIVERSE_KEY=sk_882fd19...                      # Token Terabox Resolver 
+BOT_TOKEN=8xxxxxxx:AAFz...              # WAJIB — Token Telegram Bot
+XAPIVERSE_KEY=sk_882fd19...             # Terabox resolver
+ADMIN_IDS=6663343995                    # CSV ID admin
+GROQ_API_KEY=gsk_xxx                    # Opsional — aktifkan AI assistant & smart search
+# GOFILE_PROXY=socks5://127.0.0.1:40000 # Opsional — WARP proxy untuk Gofile
+# LOCAL_API_URL=http://127.0.0.1:8081   # Opsional — Local Bot API (upload s/d 2GB)
 ```
+
+Lihat `.env.example` untuk tuning antrean, watcher, dashboard, faststart, split, dll.
 
 ---
 
-## 🏃 Menjalankan Bot di VPS (PM2 Mode)
+## 🏃 Menjalankan di VPS (PM2)
 
 ```bash
-# Menyalakan untuk pertama kali (dengan GC support)
+# Pertama kali
+npx pm2 start ecosystem.config.js
+# atau manual:
 npx pm2 start telegram-bot.js --name "costelebot" --node-args="--expose-gc"
 
-# Monitoring Log
+# Monitoring
 npx pm2 logs costelebot
 
-# Restart setelah update code
-git pull origin main
-npx pm2 restart costelebot
+# Update manual
+git pull origin main && npx pm2 reload costelebot
 ```
+
+> 💡 **CI/CD:** push ke branch `main` otomatis ter-deploy ke VPS via GitHub Actions (cek syntax → SSH → `deploy.sh` → PM2 reload → notif Telegram). Lihat `DEPLOY.md`.
 
 ---
 
@@ -102,17 +127,27 @@ npx pm2 restart costelebot
 
 | Command | Deskripsi |
 |---------|-----------|
-| `/start` | Membuka Menu Utama interaktif |
+| `/start` | Buka Menu Utama interaktif |
 | `/browse` | Jelajahi postingan Cosplaytele terbaru |
-| `/search <query>` | Cari karakter/cosplayer di Cosplaytele |
-| `/gacha` | 🎲 Gacha Cosplay acak (Surprise Me!) |
-| `/maple` | 🍁 Gacha Patreon eksklusif dari Kemono.cr |
-| `/r34` | 🎬 Menu Rule34Video (Browse, Search, Gacha) |
-| `/r34 <tag>` | 🎬 Cari video Rule34 berdasarkan tag |
-| `/tasks` | 🚦 Pantau Dasbor Antrean Eksekusi Server |
-| `/stats` | 🔰 Lihat Profil Lisensi Hunter (Tingkat Pangkat & EXP) |
-| `/stat` | 💻 Lihat Telemetri VPS & Memory (Khusus ID Admin) |
-| `/clear` | 🧹 Hapus jejak 800 pesan terakhir di obrolan |
+| `/search <query>` | Cari karakter/cosplayer (pilih sumber) |
+| `/gacha` | 🎲 Gacha Cosplay random |
+| `/maple` | 🍁 Gacha Patreon (Kemono.cr) |
+| `/r34 [tag]` | 🎬 Rule34Video (Browse/Search/Gacha) |
+| `/jav [query]` | 🎥 Javtiful (Search/Gacha/Trending) |
+| `/ero [query]` | 🔥 EroThots (Search/Browse/Gacha) |
+| `/xnxx [query]` | 🟦 XNXX (Search/Browse/Gacha) |
+| `/pin <query>` | 📌 Pinterest (image/video) |
+| `/anime [judul]` | 🎌 Anime (Otakudesu + Oploverz + Kusonime) |
+| `/tasks` | 🚦 Pantau antrean eksekusi |
+| `/stats` | 🔰 Profil Hunter (pangkat & EXP) |
+| `/health` (`/ping`) | 🏥 Cek kesehatan bot + semua sumber |
+| `/backup` | 💾 Export data kamu (JSON) |
+| `/clear` | 🧹 Bersihkan riwayat chat |
+| `/stat` | 💻 Statistik VPS (admin) |
+| `/watch` | 🔔 Status auto-notify post baru (admin) |
+| `/notif` | 🔔 Push notification (admin) |
+
+> 💬 Atau cukup **ketik bebas** seperti `cari rem cosplay`, `gacha jav`, `MIDE-232`, `xnxx cosplay`, `anime frieren` — AI akan menjalankannya.
 
 ---
 
@@ -120,21 +155,35 @@ npx pm2 restart costelebot
 
 ```
 costelebot/
-├── telegram-bot.js           # Main bot controller
+├── telegram-bot.js           # Main controller (command registry, queue, send pipeline)
+├── assistant.js              # AI conversational + action router (Groq)
+├── intentDetector.js         # Deteksi intent free-text (regex + LLM)
+├── groqClient.js             # Client Groq terpusat (timeout, retry, circuit breaker)
+├── statsDb.js / history.js   # Telemetri user + anti-repeat gacha
+├── ecosystem.config.js       # Konfigurasi PM2
+├── deploy.sh                 # Script auto-deploy VPS
 ├── scrapers/
-│   ├── cosplaytele.js        # Scraper Cosplaytele
-│   ├── gofile.js             # Extractor Gofile
-│   ├── mediafire.js          # Downloader MediaFire
-│   ├── sorafolder.js         # Bypasser SoraFolder (Playwright)
-│   ├── kemono.js             # Scraper Kemono.cr (Playwright)
-│   └── rule34video.js        # Scraper Rule34Video
-├── statsDb.js                # Database Telemetri & Ranking User
-├── .env                      # Environment variables (JANGAN DI-PUSH!)
+│   ├── cosplaytele.js        # Cosplaytele
+│   ├── javtiful.js           # Javtiful (JAV)
+│   ├── erothots.js           # EroThots
+│   ├── xnxx.js               # XNXX
+│   ├── rule34video.js        # Rule34Video
+│   ├── pinterest.js          # Pinterest
+│   ├── kemono.js             # Kemono.cr (Playwright)
+│   ├── otakudesu.js / oploverz.js / kusonime.js   # Anime
+│   ├── gofile.js             # Gofile (Playwright)
+│   ├── mediafire.js / sorafolder.js / teraboxResolver.js
+│   ├── megaResolver.js / gdriveResolver.js / hostResolver.js
+├── utils/
+│   ├── fileCache.js          # Dedup file_id Telegram
+│   ├── browserReaper.js      # Pembersih Chromium zombie
+│   ├── healthcheck.js / watcher.js / dashboard.js / backup.js / progressUi.js
+├── .github/workflows/deploy.yml   # CI/CD auto-deploy
+├── .env                      # Environment (JANGAN DI-PUSH)
 ├── package.json
 └── README.md
 ```
 
 ---
 
-> *Developed with ❤️ by Fiore.*
-# CosTeleBot
+> *Multi-source media engine — dibangun untuk efisiensi VPS low-end.*
