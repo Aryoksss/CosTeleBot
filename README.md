@@ -4,7 +4,7 @@
 ![Version](https://img.shields.io/badge/Version-3.0.0--Nexus-success)
 ![Build](https://img.shields.io/badge/Build-Passing-brightgreen)
 ![Sources](https://img.shields.io/badge/Sources-9_Engines-orange)
-![AI](https://img.shields.io/badge/AI-Groq_Llama_3.3-purple)
+![AI](https://img.shields.io/badge/AI-Groq_+_DeepSeek-purple)
 
 **CosTeleBot** adalah *engine* Telegram Bot multi-fungsi tingkat lanjut untuk menelusuri, mengekstrak, dan mengirimkan media (cosplay, anime, JAV, video dewasa, Patreon, Pinterest) dari banyak sumber secara otomatis. Ditulis dengan Node.js dan dioptimalkan untuk VPS *low-end* dengan efisiensi memori tinggi.
 
@@ -14,11 +14,13 @@ Cukup **ketik apa yang kamu mau** — bot pakai AI untuk mengerti & menjalankann
 
 ## 🔥 Fitur Utama
 
-### 🤖 Asisten AI (Groq Llama 3.3)
-- **Free-text → aksi:** ketik "cari ganyu", "gacha cosplay", "MIDE-232", atau "anime one piece" → bot langsung jalanin command yang tepat.
-- **Smart intent detection:** 2 layer (regex instan + LLM fallback), normalisasi kode JAV otomatis, koreksi typo.
-- **Asisten percakapan:** menjawab pertanyaan cara pakai bot tanpa mengarang command (daftar command di-inject dari registry).
-- Aktif kalau `GROQ_API_KEY` di-set; tanpa itu fallback ke deteksi regex.
+### 🤖 Asisten AI (Groq + DeepSeek)
+- **Free-text → aksi:** ketik "cari ganyu", "gacha jav", "MIDE-232", "xnxx cosplay", atau "anime one piece" → bot langsung jalanin aksi yang tepat (search/gacha/browse/anime/menu).
+- **Multi-provider + fallback:** Groq (Llama 3.3 70B, primary, gratis) → **DeepSeek** (`deepseek-v4-flash`, fallback otomatis kalau Groq down/rate-limit). Circuit breaker per-provider.
+- **Memori percakapan:** ingat 2-3 pesan terakhir, jadi "tempel judul" lalu "cari di xnxx" (pesan terpisah) tetap nyambung.
+- **Smart intent detection:** 2 layer (regex instan + LLM). Regex sudah deteksi **kode JAV** ("MIDE-232") & **leading-source** ("pinterest gintama", "r34 tifa") secara offline.
+- **Routing pintar:** nama ambigu tanpa konteks → tawarkan semua sumber (bukan nebak); gacha per-sumber (cosplay/jav/ero/xnxx/kemono).
+- Aktif kalau `GROQ_API_KEY` **atau** `DEEPSEEK_API_KEY` di-set; tanpa keduanya fallback ke regex.
 
 ### 📚 Cosplaytele Engine
 - Interactive browser dengan pagination, search karakter/cosplayer, dan **Gacha** (random SSR).
@@ -29,9 +31,9 @@ Cukup **ketik apa yang kamu mau** — bot pakai AI untuk mengerti & menjalankann
 - Search by kode JAV / aktris / tag, **Gacha** (random/trending/cosplay), explore aktris & kategori.
 - Auto-split video > limit upload jadi beberapa part.
 
-### 🔥 EroThots & � XNXX
+### 🔥 EroThots &  XNXX
 - Search, **Browse terbaru**, dan **Gacha**.
-- XNXX: download kualitas penuh via **HLS + ffmpeg** (fallback MP4 progresif).
+- XNXX: download kualitas penuh via **HLS + ffmpeg** (fallback MP4 progresif). Detail kaya: **⭐ pornstar, 🏷️ tag, deskripsi** + tombol pornstar untuk lihat video lain dari artis itu.
 
 ### 🎬 Rule34Video
 - Browse katalog, search by tag, video gacha, preview thumbnail + resolusi.
@@ -96,6 +98,7 @@ BOT_TOKEN=8xxxxxxx:AAFz...              # WAJIB — Token Telegram Bot
 XAPIVERSE_KEY=sk_882fd19...             # Terabox resolver
 ADMIN_IDS=6663343995                    # CSV ID admin
 GROQ_API_KEY=gsk_xxx                    # Opsional — aktifkan AI assistant & smart search
+DEEPSEEK_API_KEY=sk-xxx                 # Opsional — fallback AI (deepseek-v4-flash)
 # GOFILE_PROXY=socks5://127.0.0.1:40000 # Opsional — WARP proxy untuk Gofile
 # LOCAL_API_URL=http://127.0.0.1:8081   # Opsional — Local Bot API (upload s/d 2GB)
 ```
@@ -158,7 +161,7 @@ costelebot/
 ├── telegram-bot.js           # Main controller (command registry, queue, send pipeline)
 ├── assistant.js              # AI conversational + action router (Groq)
 ├── intentDetector.js         # Deteksi intent free-text (regex + LLM)
-├── groqClient.js             # Client Groq terpusat (timeout, retry, circuit breaker)
+├── groqClient.js             # Client LLM multi-provider (Groq + DeepSeek fallback)
 ├── statsDb.js / history.js   # Telemetri user + anti-repeat gacha
 ├── ecosystem.config.js       # Konfigurasi PM2
 ├── deploy.sh                 # Script auto-deploy VPS
