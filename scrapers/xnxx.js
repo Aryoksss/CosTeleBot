@@ -120,7 +120,7 @@ async function scrapeSearch(query, page = 1) {
 }
 
 /**
- * Browse video pilihan terbaru. /todays-selection/<page> (1-indexed).
+ * Browse video pilihan terbaru. /todays-selection/<page> (1-indexed, ~4-5 halaman saja).
  * @returns {Promise<{items, hasNext}>}
  */
 async function scrapeBrowse(page = 1) {
@@ -136,6 +136,25 @@ async function scrapeBrowse(page = 1) {
     return { items, hasNext };
   } catch (e) {
     log.error(`[XNXX] browse error: ${e.message}`);
+    return { items: [], hasNext: false };
+  }
+}
+
+/**
+ * Top video (paginate dalam, cocok untuk gacha). /best/month/<page> (1-indexed).
+ * @returns {Promise<{items, hasNext}>}
+ */
+async function scrapeBest(page = 1) {
+  const p = Math.max(1, parseInt(page, 10) || 1);
+  const url = `${BASE_URL}/best/month/${p}`;
+  log.info(`[XNXX] best page=${p}`);
+  try {
+    const r = await client.get(url);
+    if (r.status !== 200) { log.warn(`[XNXX] best HTTP ${r.status}`); return { items: [], hasNext: false }; }
+    const items = parseListingHTML(r.data);
+    return { items, hasNext: items.length >= 20 };
+  } catch (e) {
+    log.error(`[XNXX] best error: ${e.message}`);
     return { items: [], hasNext: false };
   }
 }
@@ -184,6 +203,7 @@ async function probeSourceSize(url) {
 module.exports = {
   scrapeSearch,
   scrapeBrowse,
+  scrapeBest,
   scrapeDetail,
   probeSourceSize,
 };

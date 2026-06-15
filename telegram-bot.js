@@ -2787,9 +2787,12 @@ async function doXnxxMenu(bot, chatId) {
 async function doXnxxGacha(bot, chatId) {
   const loadMsg = await bot.sendMessage(chatId, '🎲 <b>Gacha XNXX...</b>', { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+  // /best/month tidak paginate (selalu top yang sama) → pakai keyword acak + page acak (search paginate dalam).
+  const KW = ['amateur', 'cosplay', 'teen', 'asian', 'japanese', 'pov', 'creampie', 'hentai', 'threesome', 'latina', 'milf', 'massage', 'public', 'anime'];
   try {
-    const page = Math.floor(Math.random() * 15) + 1;
-    const { items } = await xnxxScraper.scrapeBrowse(page);
+    const kw = KW[Math.floor(Math.random() * KW.length)];
+    const page = Math.floor(Math.random() * 12) + 1;
+    const { items } = await xnxxScraper.scrapeSearch(kw, page);
     if (!items.length) {
       return bot.editMessageText('😔 Gacha kosong, coba lagi.', {
         chat_id: chatId, message_id: loadMsg.message_id,
@@ -3618,6 +3621,29 @@ async function doAnimeKusoDownload(bot, chatId, qualityIdx, hostType) {
 }
 
 // ─── SMART / AGGREGATE SEARCH ────────────────────────────────────────────────
+/**
+ * Saat user minta cari di sumber tertentu TANPA query (mis. "carikan di xnxx"),
+ * buka prompt search sumber itu supaya user tinggal mengetik kata kuncinya.
+ */
+async function promptSearchForSource(bot, chatId, source) {
+  const map = {
+    xnxx: { step: 'AWAITING_XNXX_SEARCH', text: '🟦 <b>XNXX</b> — ketik kata kunci pencarian:' },
+    ero: { step: 'AWAITING_ERO_SEARCH', text: '🔥 <b>EroThots</b> — ketik kata kunci pencarian:' },
+    jav: { step: 'AWAITING_JAV_SEARCH', text: '🎥 <b>Javtiful</b> — ketik kode JAV / aktris / tag:' },
+    pinterest: { step: 'AWAITING_PIN_SEARCH', text: '📌 <b>Pinterest</b> — ketik kata kunci pencarian:' },
+    r34: { step: 'AWAITING_R34_SEARCH', text: '🎬 <b>Rule34</b> — ketik tag/kata kunci:' },
+    cosplay: { step: 'AWAITING_SEARCH_QUERY', text: '📚 <b>Cosplaytele</b> — ketik nama karakter/cosplayer:' },
+    anime: { step: 'AWAITING_ANIME_SEARCH', text: '🎌 <b>Anime</b> — ketik judul anime:' },
+  };
+  const cfg = map[source] || { step: 'AWAITING_SMART_SEARCH', text: '🔎 <b>Smart Search</b> — ketik apa yang mau dicari:' };
+  userStates.set(chatId, { step: cfg.step });
+  const sentMsg = await bot.sendMessage(chatId, `${cfg.text}`, {
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'menu_awal' }]] },
+  });
+  autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+}
+
 /**
  * Tampilkan menu "pilih sumber" untuk query yang di-detect dari pesan bebas user.
  * Kalau source sudah di-specify (misal "pinterest gintama"), langsung dispatch tanpa menu.
@@ -4842,8 +4868,11 @@ function startBot() {
 
           log.info(`[Assistant] action=${r.action}${r.query ? ` query="${r.query}" src=${r.source}` : ''}`);
           switch (r.action) {
-            case 'search': if (r.query) return doSmartSearchMenu(bot, chatId, r.query, r.source); break;
-            case 'anime': if (r.query) return doAnimeSearch(bot, chatId, r.query); break;
+            case 'search':
+              if (r.query) return doSmartSearchMenu(bot, chatId, r.query, r.source);
+              // Tanpa query tapi sumber jelas → buka prompt search sumber itu (user tinggal ketik).
+              return promptSearchForSource(bot, chatId, r.source);
+            case 'anime': if (r.query) return doAnimeSearch(bot, chatId, r.query); return promptSearchForSource(bot, chatId, 'anime');
             case 'gacha': return doCosplayteleGacha(bot, chatId, 'random');
             case 'jav_gacha': return doJavGacha(bot, chatId, 'latest');
             case 'browse': return doCosplayteleBrowse(bot, chatId, 'home', 1);
