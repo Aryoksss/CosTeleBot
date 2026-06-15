@@ -12,7 +12,7 @@
  *
  * Env:
  *   GROQ_API_KEY / GROQ_MODEL            (default model llama-3.3-70b-versatile)
- *   DEEPSEEK_API_KEY / DEEPSEEK_MODEL    (default model deepseek-chat)
+ *   DEEPSEEK_API_KEY / DEEPSEEK_MODEL    (default model deepseek-v4-flash)
  *   AI_PROVIDER_ORDER                    urutan provider, default "groq,deepseek"
  *
  * Catatan: butuh Node 18+ (global fetch + AbortController).
@@ -37,7 +37,7 @@ const PROVIDERS = {
     base: 'https://api.deepseek.com',
     keyEnv: 'DEEPSEEK_API_KEY',
     modelEnv: 'DEEPSEEK_MODEL',
-    defaultModel: 'deepseek-chat',
+    defaultModel: 'deepseek-v4-flash',
   },
 };
 
