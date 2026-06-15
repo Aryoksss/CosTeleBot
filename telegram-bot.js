@@ -4186,10 +4186,10 @@ function quotaInfo(chatId) {
 
 // Paket premium (bayar crypto). tier + lama + harga (dalam CRYPTOPAY_ASSET).
 const PREMIUM_PLANS = [
-  { tier: 'premium', days: 7, price: 1 },
-  { tier: 'premium', days: 30, price: 3 },
-  { tier: 'vvip', days: 30, price: 8 },
-  { tier: 'vvip', days: 90, price: 20 },
+  { tier: 'premium', days: 7, price: 3 },
+  { tier: 'premium', days: 30, price: 8 },
+  { tier: 'vvip', days: 30, price: 20 },
+  { tier: 'vvip', days: 90, price: 50 },
 ];
 const pendingPremium = new Map(); // invoiceId -> { chatId, days, tier, createdAt }
 
