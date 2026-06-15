@@ -1304,6 +1304,9 @@ async function sendPostDetail(bot, chatId, loadMsg, post, cacheIndex) {
   // Explore: browse by cosplayer / character / series
   if (links.cosplayerSlug) {
     dlButtons.push([{ text: `👤 More from ${(cosplayer || 'Cosplayer').slice(0, 25)}`, callback_data: `cptcos_${links.cosplayerSlug}` }]);
+  } else if (cosplayer) {
+    // Tidak ada kategori cosplayer (cosplayer hanya di judul) → fallback ke pencarian nama.
+    dlButtons.push([{ text: `🔎 More from ${cosplayer.slice(0, 25)}`, callback_data: `cptcossrch_${cacheIndex}` }]);
   }
   // Character + series tag buttons side-by-side
   const tagRow = [];
@@ -4644,6 +4647,17 @@ function startBot() {
       const mode = action.replace('cptgacha_', '');
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doCosplayteleGacha(bot, chatId, mode);
+    }
+    // Cosplaytele "More from <cosplayer>" via SEARCH (cosplayer tidak punya kategori sendiri)
+    if (action.startsWith('cptcossrch_')) {
+      const idx = action.replace('cptcossrch_', '');
+      const cache = browseCache.get(chatId);
+      const det = cache?.detailCache?.[idx];
+      const rawName = det?.meta?.cosplayer || '';
+      const name = rawName.replace(/\(.*?\)/g, '').trim(); // buang handle (@xxx) untuk query bersih
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      if (!name) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Buka lagi detail post-nya.');
+      return doCosplayteleBrowse(bot, chatId, 'home', 1, name, 'search', name);
     }
     // Cosplaytele browse by cosplayer slug (from detail button)
     if (action.startsWith('cptcos_')) {

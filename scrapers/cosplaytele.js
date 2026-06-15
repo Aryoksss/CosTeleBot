@@ -394,10 +394,32 @@ async function scrapePostDetail(postUrl) {
     });
     links.allCategories = [...catMap.values()];
 
-    // Deteksi cosplayer slug: category yang BUKAN kategori standar (standard = cosplay, video, nude, game, dll)
-    const STANDARD_CATS = new Set(['video-cosplayy', 'game', 'nude', 'cosplay-ero', 'cosplay', 'best-cosplayer']);
-    const cosplayerCat = links.allCategories.find(c => !STANDARD_CATS.has(c.slug));
-    if (cosplayerCat) links.cosplayerSlug = cosplayerCat.slug;
+    // Deteksi cosplayer slug: cosplaytele pakai /category/<cosplayer>/ untuk halaman cosplayer,
+    // TAPI genre juga kategori (Cosplay Nude, Cosplay Free Style, dll) → gampang false positive.
+    // Strategi: cocokkan nama kategori dengan nama cosplayer dari judul. Genre selalu diawali
+    // "Cosplay ..." sehingga gampang difilter.
+    const STANDARD_CATS = new Set([
+      'video-cosplayy', 'game', 'nude', 'cosplay-ero', 'cosplay', 'best-cosplayer',
+      'free-style', 'cosplay-nude', 'cosplay-free-style', 'uncensored', 'uncategorized',
+    ]);
+    const normName = (s) => String(s || '').toLowerCase().replace(/\(.*?\)/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+    const cosName = normName(links.meta && links.meta.cosplayer);
+
+    let cosplayerCat = null;
+    // 1) Match by name (paling akurat)
+    if (cosName) {
+      cosplayerCat = links.allCategories.find(c => {
+        if (STANDARD_CATS.has(c.slug)) return false;
+        const cn = normName(c.name);
+        return cn && (cn === cosName || cosName.includes(cn) || cn.includes(cosName));
+      });
+    }
+    // 2) Fallback: kategori non-standar yang namanya BUKAN genre (genre selalu diawali "Cosplay ")
+    if (!cosplayerCat) {
+      cosplayerCat = links.allCategories.find(c => !STANDARD_CATS.has(c.slug) && !/^cosplay\b/i.test(c.name));
+    }
+    // Kalau tetap tak ketemu → null (bot akan fallback ke pencarian nama cosplayer)
+    links.cosplayerSlug = cosplayerCat ? cosplayerCat.slug : null;
 
     const tagMap = new Map();
     $('a[rel*="tag"], a[href*="/tag/"]').each((_, el) => {
