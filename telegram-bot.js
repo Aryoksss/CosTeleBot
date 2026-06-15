@@ -804,6 +804,39 @@ function splitVideoBySize(filePath, partMaxBytes) {
     .map(f => path.join(dir, f));
 }
 
+/**
+ * Download video HLS (master m3u8) → MP4 via ffmpeg (-c copy, tanpa re-encode).
+ * Dipakai untuk Pinterest yang hanya menyediakan HLS. Non-blocking (spawn async).
+ * @returns {Promise<number>} ukuran file akhir (byte)
+ */
+function downloadHlsToMp4(masterUrl, destPath, { timeoutMs = 180000, referer = 'https://www.pinterest.com/' } = {}) {
+  return new Promise((resolve, reject) => {
+    const { spawn } = require('child_process');
+    const args = [
+      '-y',
+      '-headers', `Referer: ${referer}\r\nUser-Agent: Mozilla/5.0\r\n`,
+      '-i', masterUrl,
+      '-c', 'copy',
+      '-bsf:a', 'aac_adtstoasc',  // fix AAC ADTS→ASC saat mux ke mp4
+      '-movflags', '+faststart',
+      destPath,
+    ];
+    const p = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    p.stderr.on('data', d => { err += d.toString(); if (err.length > 8000) err = err.slice(-8000); });
+    const to = setTimeout(() => { try { p.kill('SIGKILL'); } catch (_) {} reject(new Error('ffmpeg HLS timeout')); }, timeoutMs);
+    p.on('error', e => { clearTimeout(to); reject(e); });
+    p.on('close', code => {
+      clearTimeout(to);
+      if (code === 0 && fs.existsSync(destPath) && fs.statSync(destPath).size > 0) {
+        resolve(fs.statSync(destPath).size);
+      } else {
+        reject(new Error('ffmpeg HLS gagal: ' + String(err).slice(-200)));
+      }
+    });
+  });
+}
+
 async function sendOne(bot, chatId, filePath, explicitCaption = null, allowSplit = true) {
   const size = fs.statSync(filePath).size;
   const name = path.basename(filePath);
@@ -1858,8 +1891,8 @@ async function doPinSendItem(bot, chatId, pin) {
         await rimraf(jobDir);
       }
     } else if (pin.type === 'video') {
-      // Video harus di-download dulu karena Telegram sendVideo by URL sering gagal untuk
-      // domain yang tidak whitelisted mereka.
+      // Pinterest video = HLS (m3u8). Download via ffmpeg (paling andal, semua resolusi),
+      // fallback ke MP4 progresif kalau ffmpeg tidak ada.
       const jobDir = path.join(CONFIG.TEMP_DIR, 'pin_' + Date.now());
       await fsp.mkdir(jobDir, { recursive: true });
       const dest = path.join(jobDir, `pin_${pin.id}.mp4`);
@@ -1868,31 +1901,20 @@ async function doPinSendItem(bot, chatId, pin) {
         chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
       }).catch(() => { });
 
-      await downloadStream(pin.videoUrl, dest, null, null, { expectMedia: true });
+      if (ffmpegAvailable()) {
+        await downloadHlsToMp4(pin.hlsUrl, dest, { referer: 'https://www.pinterest.com/' });
+      } else {
+        // Fallback tanpa ffmpeg: cari MP4 progresif yang valid (kalau ada).
+        const mp4 = await pinterestScraper.resolveVideoMp4(pin.hlsUrl);
+        if (!mp4) throw new Error('Video ini hanya tersedia format HLS — butuh ffmpeg di server.');
+        await downloadStream(mp4, dest, null, null, { expectMedia: true });
+      }
       const sz = fs.statSync(dest).size;
       statsDb.addDownloadSize(chatId, sz);
 
-      if (sz > CONFIG.VIDEO_MAX_BYTES) {
-        await rimraf(jobDir);
-        const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1024 / 1024);
-        return bot.editMessageText(
-          `⚠️ Video ${(sz / 1048576).toFixed(1)}MB melebihi limit ${limitMB}MB.\n` +
-          `<a href="${pin.pinUrl}">Buka di Pinterest</a>`,
-          { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML' }
-        );
-      }
-
-      try {
-        await bot.sendVideo(chatId, fs.createReadStream(dest), {
-          caption: `📌 <b>${caption}</b>\n<a href="${pin.pinUrl}">Buka di Pinterest</a>`,
-          parse_mode: 'HTML',
-          supports_streaming: true,
-        });
-        bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
-      } catch (e) {
-        log.warn(`[Pinterest] sendVideo gagal (${e.message}), fallback doc`);
-        await bot.sendDocument(chatId, fs.createReadStream(dest), { caption });
-      }
+      // sendOne otomatis split kalau melebihi limit upload.
+      await sendOne(bot, chatId, dest, `📌 ${pin.title.slice(0, 200)}`);
+      bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
       await rimraf(jobDir);
     }
   } catch (e) {

@@ -55,20 +55,36 @@ const httpClient = axios.create({
 });
 
 /**
- * Ubah HLS URL Pinterest ke MP4 direct. Tanpa ini Telegram sendVideo tidak bisa handle.
- * Pattern dari probe: /videos/iht/hls/xx/xx/xx/id.m3u8 → /videos/mc/720p/xx/xx/xx/id.mp4
- * Fallback: null kalau pattern tidak match (kita skip video pin tersebut).
+ * Fallback bila ffmpeg tidak tersedia: coba tebak MP4 progresif dari HLS path lalu
+ * verifikasi via HEAD. Return URL yang benar-benar 200, atau null kalau tak ada.
+ * Pinterest hanya punya MP4 progresif untuk SEBAGIAN video — sisanya HLS-only.
  */
-function hlsToMp4(hlsUrl) {
-  if (!hlsUrl || !hlsUrl.endsWith('.m3u8')) return null;
-  // Pattern confirmed working: /iht/hls/ → /mc/720p/ atau /iht/720p/
-  const candidates = [
-    hlsUrl.replace('/iht/hls/', '/mc/720p/').replace('.m3u8', '.mp4'),
-    hlsUrl.replace('/iht/hls/', '/iht/720p/').replace('.m3u8', '.mp4'),
-    // Fallback untuk URL yang tidak match pattern di atas (belum tentu jalan, tapi worth try)
-    hlsUrl.replace('/hls/', '/720p/').replace('.m3u8', '.mp4'),
-  ];
-  return candidates[0]; // Ambil kandidat pertama; HEAD verify akan kita lakukan di layer atas kalau perlu
+async function resolveVideoMp4(hlsUrl) {
+  if (!hlsUrl) return null;
+  const m = hlsUrl.match(/\/videos\/iht\/hls\/(.+)\.m3u8$/);
+  if (!m) return null;
+  const segPath = m[1]; // mis. 01/98/d5/0198...
+  const agent = getProxyAgent();
+  const hosts = ['https://v1.pinimg.com', 'https://v1-e.pinimg.com'];
+  const reses = ['720p', '480p', '360p', '240p'];
+  for (const host of hosts) {
+    for (const res of reses) {
+      const url = `${host}/videos/mc/${res}/${segPath}.mp4`;
+      try {
+        const r = await axios.get(url, {
+          responseType: 'stream', timeout: 10000, validateStatus: () => true,
+          headers: { 'User-Agent': UA, 'Referer': `${BASE_URL}/` },
+          ...(agent ? { httpsAgent: agent, httpAgent: agent } : {}),
+        });
+        r.data.destroy();
+        if (r.status === 200) {
+          log.info(`[Pinterest] progressive mp4 ${res} @ ${host}`);
+          return url;
+        }
+      } catch (_) { }
+    }
+  }
+  return null;
 }
 
 /**
@@ -95,16 +111,16 @@ function normalizePin(p) {
   }
 
   if (videoList) {
-    // Ambil resolusi tertinggi dari V_HLSV4 / V_HLSV3_MOBILE
+    // Ambil HLS master (resolusi tertinggi). Pinterest TIDAK menyediakan MP4 progresif
+    // yang konsisten (sering 403), jadi master m3u8 di-download via ffmpeg di sisi bot.
     const hls = videoList.V_HLSV4?.url || videoList.V_HLSV3_MOBILE?.url || null;
-    const mp4 = hlsToMp4(hls);
-    if (!mp4) return null; // skip pin yang URL pattern-nya tidak match
+    if (!hls || !hls.endsWith('.m3u8')) return null; // skip kalau bukan HLS yang dikenali
     return {
       id: p.id,
       title: title || '(no title)',
       thumb: thumb || videoList.V_HLSV4?.thumbnail || null,
       type: 'video',
-      videoUrl: mp4,
+      hlsUrl: hls,
       pinUrl: `${BASE_URL}/pin/${p.id}/`,
     };
   }
@@ -208,4 +224,5 @@ async function scrapeSearch(query, bookmark = null) {
 
 module.exports = {
   scrapeSearch,
+  resolveVideoMp4,
 };
