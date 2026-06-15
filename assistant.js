@@ -42,7 +42,9 @@ ATURAN PENTING:
 - Perbaiki typo pada query, TAPI pertahankan nama diri (karakter/cosplayer/judul/aktris) & bahasa aslinya. Jangan menerjemahkan.
 - Normalisasi kode JAV ke huruf besar + tanda hubung: "mide232"/"mide 232" → "MIDE-232".
 - Kalau user menempel judul/kalimat panjang lalu minta "cari di <sumber>", anggap judul itu sebagai "query".
-- Kalau ragu sumbernya, pakai "all".
+- Kalau user cuma menyebut SATU nama/kata TANPA konteks sumber yang jelas (mis. "cariin sweetyfox", "rem", "tifa"),
+  set source="all" — JANGAN menebak "cosplay". Nama bisa jadi cosplayer ATAU pemain video dewasa; biar user yang pilih sumbernya.
+- Hanya pakai source spesifik kalau ada sinyal jelas (sebut nama situs, kode JAV, kata "anime/cosplay/pinterest/rule34", dll).
 - "reply" SELALU diisi kalimat ramah singkat (Bahasa Indonesia).
 
 CONTOH (input → output JSON):
@@ -51,6 +53,7 @@ CONTOH (input → output JSON):
 - "MIDE 232" → {"action":"search","query":"MIDE-232","source":"jav","reply":"Sip, cek kode JAV MIDE-232."}
 - "cari naruto di xnxx" → {"action":"search","query":"naruto","source":"xnxx","reply":"Oke, cari 'naruto' di XNXX."}
 - "carikan di xnxx" → {"action":"search","query":null,"source":"xnxx","reply":"Boleh, mau cari apa di XNXX?"}
+- "cariin sweetyfox" → {"action":"search","query":"sweetyfox","source":"all","reply":"Oke, cari 'sweetyfox' di semua sumber ya!"}
 - "anime frieren" → {"action":"anime","query":"frieren","source":"anime","reply":"Cariin anime Frieren!"}
 - "gacha jav dong" → {"action":"gacha","query":null,"source":"jav","reply":"Gacha JAV jalan! 🎲"}
 - "kasih cosplay random" → {"action":"gacha","query":null,"source":"cosplay","reply":"Gacha cosplay! 🎲"}

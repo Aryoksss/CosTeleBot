@@ -160,29 +160,60 @@ async function scrapeBest(page = 1) {
 }
 
 /**
- * Detail 1 video: ekstrak HLS (kualitas penuh) + mp4 360p (fallback) dari html5player JS.
- * @returns {Promise<{title, thumb, videoUrl, hlsUrl, durationText}|null>}
+ * Detail 1 video: HLS (kualitas penuh) + mp4 360p (fallback) + metadata (pornstar, tag, deskripsi).
+ * @returns {Promise<{title, thumb, videoUrl, hlsUrl, durationText, quality, pornstars, tags, uploader, description}|null>}
  */
 async function scrapeDetail(detailUrl) {
   try {
     const r = await client.get(detailUrl);
     if (r.status !== 200) { log.warn(`[XNXX] detail HTTP ${r.status} ${detailUrl}`); return null; }
     const body = String(r.data);
+    const $ = cheerio.load(body);
 
     const pick = (re) => { const m = body.match(re); return m ? m[1] : null; };
     const hlsUrl = pick(/setVideoHLS\('([^']+)'\)/);
     const high = pick(/setVideoUrlHigh\('([^']+)'\)/);
     const low = pick(/setVideoUrlLow\('([^']+)'\)/);
     const videoUrl = high || low; // mp4 progresif (umumnya max 360p)
-    const title = decodeEntities(pick(/setVideoTitle\('([^']+)'\)/) || cheerio.load(body)('h1').first().text().trim() || 'Untitled');
+    const title = decodeEntities(pick(/setVideoTitle\('([^']+)'\)/) || $('h1').first().text().trim() || 'Untitled');
     const thumb = pick(/setThumbUrl\('([^']+)'\)/);
 
     if (!hlsUrl && !videoUrl) {
       log.warn(`[XNXX] detail: tidak ada source video di ${detailUrl}`);
-      return { title, thumb, videoUrl: null, hlsUrl: null, durationText: '' };
+      return { title, thumb, videoUrl: null, hlsUrl: null, durationText: '', quality: '', pornstars: [], tags: [], uploader: null, description: '' };
     }
-    log.info(`[XNXX] detail: "${title.slice(0, 60)}" hls=${hlsUrl ? 'y' : 'n'} mp4=${videoUrl ? 'y' : 'n'}`);
-    return { title, thumb, videoUrl, hlsUrl, durationText: '' };
+
+    // Pornstar / model (link /porn-maker/, /pornstar/, /model/)
+    const pornstars = [];
+    $('a[href^="/porn-maker/"], a[href^="/pornstar/"], a[href^="/model/"]').each((i, el) => {
+      const name = decodeEntities($(el).text().trim());
+      const slug = ($(el).attr('href') || '').replace(/^\/(porn-maker|pornstar|model)\//, '').replace(/\/$/, '');
+      if (name && name.length >= 2 && !pornstars.some(p => p.slug === slug)) {
+        pornstars.push({ name: name.slice(0, 40), slug });
+      }
+    });
+
+    // Tag (link .is-keyword di .video-tags)
+    const tags = [];
+    $('.video-tags a.is-keyword, .video-tags a[href^="/search/"]').each((i, el) => {
+      const t = decodeEntities($(el).text().trim());
+      if (t && t.length >= 2 && !tags.includes(t)) tags.push(t);
+    });
+
+    // Metadata: channel/uploader, durasi, kualitas, deskripsi
+    const metaTxt = $('.metadata').first().text().replace(/\s+/g, ' ').trim();
+    const qM = metaTxt.match(/(\d{3,4}p)/i);
+    const durM = metaTxt.match(/(\d+)\s*min/i) || metaTxt.match(/(\d+)\s*sec/i);
+    const uploader = (metaTxt.split(/\d+\s*(?:min|sec)/i)[0] || '').trim().slice(0, 50) || null;
+    const description = $('.metadata-row').first().text().replace(/\s+/g, ' ').trim().slice(0, 400);
+
+    log.info(`[XNXX] detail: "${title.slice(0, 50)}" stars=${pornstars.length} tags=${tags.length} hls=${hlsUrl ? 'y' : 'n'}`);
+    return {
+      title, thumb, videoUrl, hlsUrl,
+      durationText: durM ? durM[0].replace(/\s+/g, '') : '',
+      quality: qM ? qM[1] : '',
+      pornstars, tags: tags.slice(0, 12), uploader, description,
+    };
   } catch (e) {
     log.error(`[XNXX] detail error: ${e.message}`);
     return null;

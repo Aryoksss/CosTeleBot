@@ -2827,16 +2827,30 @@ async function doXnxxDetail(bot, chatId, item) {
 
     const idx = xnxxBrowseCache.get(chatId)?.items?.indexOf(item) ?? 0;
     let text = `🎬 <b>${escHtml(detail.title)}</b>\n\n`;
-    const meta = [item.durationText, item.quality].filter(Boolean).join(' · ');
+    const meta = [item.durationText || detail.durationText, detail.quality || item.quality].filter(Boolean).join(' · ');
     if (meta) text += `${meta}\n`;
-    text += `🔗 <a href="${item.link}">Halaman XNXX</a>\n`;
+    if (detail.pornstars && detail.pornstars.length) {
+      text += `⭐ ${detail.pornstars.map(p => escHtml(p.name)).join(', ')}\n`;
+    }
+    if (detail.tags && detail.tags.length) {
+      text += `🏷️ ${detail.tags.slice(0, 8).map(t => escHtml(t)).join(' · ')}\n`;
+    }
+    if (detail.description) {
+      text += `\n<i>${escHtml(detail.description.slice(0, 200))}${detail.description.length > 200 ? '…' : ''}</i>\n`;
+    }
+    text += `\n🔗 <a href="${item.link}">Halaman XNXX</a>`;
     if (detail.hlsUrl) text += `\n<i>Diunduh kualitas terbaik via HLS. Video besar otomatis dipecah.</i>`;
 
     const buttons = [
-      [{ text: `⬇️ Download${item.quality ? ` (${item.quality})` : ''}`, callback_data: `xnxxdl_${idx}` }],
-      [{ text: '🔙 Kembali ke Daftar', callback_data: 'xnxx_back_browse' }],
-      [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+      [{ text: `⬇️ Download${detail.quality || item.quality ? ` (${detail.quality || item.quality})` : ''}`, callback_data: `xnxxdl_${idx}` }],
     ];
+    // Tombol pornstar → cari video lain dari artis itu (maks 2).
+    if (detail.pornstars && detail.pornstars.length) {
+      const row = detail.pornstars.slice(0, 2).map(p => ({ text: `⭐ ${p.name.slice(0, 22)}`, callback_data: `xnxxps_${p.slug.slice(0, 50)}` }));
+      buttons.push(row);
+    }
+    buttons.push([{ text: '🔙 Kembali ke Daftar', callback_data: 'xnxx_back_browse' }]);
+    buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
 
     if (detail.thumb) {
       await bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
@@ -3673,7 +3687,7 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
       { text: '📌 Pinterest', callback_data: `ssrc_pinterest` },
       { text: '🎥 Javtiful', callback_data: `ssrc_jav` },
     ],
-    [{ text: '🔥 EroThots', callback_data: `ssrc_ero` }],
+    [{ text: '🔥 EroThots', callback_data: `ssrc_ero` }, { text: '🟦 XNXX', callback_data: `ssrc_xnxx` }],
     [{ text: '🎌 Anime (Otakudesu+Oploverz)', callback_data: `ssrc_anime` }],
     [{ text: '🌐 Cari di Semua Sumber', callback_data: `ssrc_all` }],
     [{ text: '❌ Batal', callback_data: 'menu_awal' }],
@@ -3695,16 +3709,17 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
 async function doAggregateSearch(bot, chatId, query) {
   log.info(`[Aggregate] user ${chatId} query="${query}"`);
   const loadMsg = await bot.sendMessage(chatId,
-    `🌐 <b>Mencari "${escHtml(query)}" di semua sumber...</b>\n<i>Paralel query ke 6 sumber...</i>`,
+    `🌐 <b>Mencari "${escHtml(query)}" di semua sumber...</b>\n<i>Paralel query ke 7 sumber...</i>`,
     { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
 
-  const [cptRes, r34Res, pinRes, javRes, eroRes, animeRes] = await Promise.allSettled([
+  const [cptRes, r34Res, pinRes, javRes, eroRes, xnxxRes, animeRes] = await Promise.allSettled([
     cosplayteleScraper.scrapeListing(1, 'home', query),
     r34Scraper.scrapeListing(1, query),
     pinterestScraper.scrapeSearch(query),
     javtifulScraper.scrapeSearch(query, 1),
     erothotsScraper.scrapeSearch(query, 1),
+    xnxxScraper.scrapeSearch(query, 1),
     (async () => {
       const [otaku, oplo, kuso] = await Promise.allSettled([
         otakudesuScraper.search(query),
@@ -3727,9 +3742,10 @@ async function doAggregateSearch(bot, chatId, query) {
   const pins = pinRes.status === 'fulfilled' ? pinRes.value.pins.slice(0, 3) : [];
   const jav = javRes.status === 'fulfilled' ? javRes.value.items.slice(0, 3) : [];
   const ero = eroRes.status === 'fulfilled' ? eroRes.value.items.slice(0, 3) : [];
+  const xnxx = xnxxRes.status === 'fulfilled' ? xnxxRes.value.items.slice(0, 3) : [];
   const anime = animeRes.status === 'fulfilled' ? animeRes.value.slice(0, 3) : [];
 
-  const totalFound = cpt.length + r34.length + pins.length + jav.length + ero.length + anime.length;
+  const totalFound = cpt.length + r34.length + pins.length + jav.length + ero.length + xnxx.length + anime.length;
   if (totalFound === 0) {
     return bot.editMessageText(
       `😔 <b>Tidak ada hasil</b> untuk "${escHtml(query)}" di semua sumber.`,
@@ -3740,12 +3756,13 @@ async function doAggregateSearch(bot, chatId, query) {
     );
   }
 
-  aggregateCache.set(chatId, { query, cpt, r34, pins, jav, ero, anime });
+  aggregateCache.set(chatId, { query, cpt, r34, pins, jav, ero, xnxx, anime });
   if (cpt.length) browseCache.set(chatId, { posts: cpt, page: 1, category: 'home', query, fromAggregate: true });
   if (r34.length) r34BrowseCache.set(chatId, { posts: r34, page: 1, query, fromAggregate: true });
   if (pins.length) pinBrowseCache.set(chatId, { pins, query, currentBookmark: null, nextBookmark: null, prevBookmarks: [], fromAggregate: true });
   if (jav.length) javBrowseCache.set(chatId, { items: jav, query, page: 1, hasNext: false, fromAggregate: true });
   if (ero.length) eroBrowseCache.set(chatId, { items: ero, query, page: 1, hasNext: false, fromAggregate: true });
+  if (xnxx.length) xnxxBrowseCache.set(chatId, { items: xnxx, query, page: 1, hasNext: false, fromAggregate: true });
   if (anime.length) animeBrowseCache.set(chatId, { results: anime });
 
   let text = `🌐 <b>Hasil untuk "${escHtml(query)}"</b>\n\n`;
@@ -3812,12 +3829,25 @@ async function doAggregateSearch(bot, chatId, query) {
     buttons.push(row);
   }
 
+  if (xnxx.length) {
+    text += `🟦 <b>XNXX</b>\n`;
+    xnxx.forEach((v, i) => {
+      const m = [v.durationText, v.quality].filter(Boolean).join(' ');
+      text += `  ${i + 1}. ${escHtml(v.title.slice(0, 55))}${m ? ` · ${m}` : ''}\n`;
+    });
+    text += '\n';
+    const row = [];
+    xnxx.forEach((v, i) => row.push({ text: `🟦${i + 1}`, callback_data: `xnxx_${i}` }));
+    buttons.push(row);
+  }
+
   const jumpRow = [];
   if (cpt.length) jumpRow.push({ text: '📚 Browse ▶', callback_data: `ssrc_cosplay` });
   if (r34.length) jumpRow.push({ text: '🎬 Browse ▶', callback_data: `ssrc_r34` });
   if (pins.length) jumpRow.push({ text: '📌 Browse ▶', callback_data: `ssrc_pinterest` });
   if (jav.length) jumpRow.push({ text: '🎥 Browse ▶', callback_data: `ssrc_jav` });
   if (ero.length) jumpRow.push({ text: '🔥 Browse ▶', callback_data: `ssrc_ero` });
+  if (xnxx.length) jumpRow.push({ text: '🟦 Browse ▶', callback_data: `ssrc_xnxx` });
   if (anime.length) jumpRow.push({ text: '🎌 Anime ▶', callback_data: `ssrc_anime` });
   if (jumpRow.length) buttons.push(jumpRow);
   buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
@@ -5566,6 +5596,14 @@ function startBot() {
       if (!cache || !cache.items[idx]) return bot.sendMessage(chatId, '⚠️ Sesi kadaluarsa. Ulangi /xnxx.');
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doXnxxDownload(bot, chatId, cache.items[idx]);
+    }
+    if (action.startsWith('xnxxps_')) {
+      // Cari video lain dari pornstar: slug → query nama (underscore→spasi, buang "official").
+      const slug = action.replace('xnxxps_', '');
+      const name = slug.replace(/_/g, ' ').replace(/\b(official|xxx)\b/gi, '').replace(/\s{2,}/g, ' ').trim();
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      if (!name) return bot.sendMessage(chatId, '⚠️ Nama artis tidak terbaca.');
+      return doXnxxBrowse(bot, chatId, name, 1, 'search');
     }
     if (action.startsWith('xnxx_') && /^xnxx_\d+$/.test(action)) {
       const idx = parseInt(action.replace('xnxx_', ''), 10);
