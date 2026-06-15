@@ -36,10 +36,21 @@ function buildSandbox() {
   return { base, host, readyHandlers };
 }
 
+function getProxyAgent() {
+  const raw = process.env.GOFILE_PROXY || process.env.HTTPS_PROXY || '';
+  if (!raw) return null;
+  try {
+    if (/^socks/i.test(raw)) { const { SocksProxyAgent } = require('socks-proxy-agent'); return new SocksProxyAgent(raw); }
+    const { HttpsProxyAgent } = require('https-proxy-agent'); return new HttpsProxyAgent(raw);
+  } catch (e) { console.log('proxy err', e.message); return null; }
+}
+
 async function main() {
-  const res = await axios.get('https://gofile.io/dist/js/wt.obf.js', {
-    headers: { 'User-Agent': UA, 'Referer': 'https://gofile.io/' }, timeout: 20000, validateStatus: () => true,
-  });
+  const agent = getProxyAgent();
+  console.log('proxy:', process.env.GOFILE_PROXY || process.env.HTTPS_PROXY || 'none');
+  const cfg = { headers: { 'User-Agent': UA, 'Referer': 'https://gofile.io/' }, timeout: 25000, validateStatus: () => true };
+  if (agent) { cfg.httpAgent = agent; cfg.httpsAgent = agent; }
+  const res = await axios.get('https://gofile.io/dist/js/wt.obf.js', cfg);
   console.log('fetch wt.obf.js:', res.status, 'len', String(res.data).length);
   if (res.status !== 200) return;
   const code = String(res.data);
