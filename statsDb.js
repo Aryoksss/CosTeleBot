@@ -122,6 +122,20 @@ function getDailyDownloads(chatId) {
     return u.dailyCount || 0;
 }
 
+// ─── BAHASA (i18n) ──────────────────────────────────────────────────────────
+/** Bahasa user: 'en' | 'id' (default 'id'). */
+function getLang(chatId) {
+    const u = statsData[chatId];
+    return (u && u.lang === 'en') ? 'en' : 'id';
+}
+/** Set bahasa user. */
+function setLang(chatId, lang) {
+    const u = getInitUser(chatId);
+    u.lang = (lang === 'en') ? 'en' : 'id';
+    scheduleSave();
+    return u.lang;
+}
+
 /** Tambah 1 hitungan download hari ini. Return jumlah baru. */
 function incDailyDownloads(chatId) {
     const u = getInitUser(chatId);
@@ -179,4 +193,6 @@ module.exports = {
     listPremium,
     getDailyDownloads,
     incDailyDownloads,
+    getLang,
+    setLang,
 };

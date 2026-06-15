@@ -2608,13 +2608,14 @@ async function doEroBrowse(bot, chatId, query, page = 1, mode = 'search') {
  * Menu EroThots: Search / Browse Terbaru / Gacha.
  */
 async function doEroMenu(bot, chatId) {
-  const sentMsg = await bot.sendMessage(chatId, `🔥 <b>EroThots</b>\n\nPilih mode:`, {
+  const en = statsDb.getLang(chatId) === 'en';
+  const sentMsg = await bot.sendMessage(chatId, `🔥 <b>EroThots</b>\n\n${en ? 'Choose mode:' : 'Pilih mode:'}`, {
     parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [
         [{ text: '🔍 Search', callback_data: 'ero_search_prompt' }],
-        [{ text: '📋 Browse Terbaru', callback_data: 'ero_browse' }, { text: '🎲 Gacha', callback_data: 'ero_gacha' }],
-        [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+        [{ text: en ? '📋 Latest' : '📋 Browse Terbaru', callback_data: 'ero_browse' }, { text: '🎲 Gacha', callback_data: 'ero_gacha' }],
+        [{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }],
       ]
     }
   });
@@ -2841,13 +2842,14 @@ async function doXnxxBrowse(bot, chatId, query, page = 1, mode = 'search') {
 }
 
 async function doXnxxMenu(bot, chatId) {
-  const sentMsg = await bot.sendMessage(chatId, `🟦 <b>XNXX</b>\n\nPilih mode:`, {
+  const en = statsDb.getLang(chatId) === 'en';
+  const sentMsg = await bot.sendMessage(chatId, `🟦 <b>XNXX</b>\n\n${en ? 'Choose mode:' : 'Pilih mode:'}`, {
     parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '🔍 Search', callback_data: 'xnxx_search_prompt' }],
-        [{ text: '📋 Browse Terbaru', callback_data: 'xnxx_browse' }, { text: '🎲 Gacha', callback_data: 'xnxx_gacha' }],
-        [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+        [{ text: en ? '🔍 Search' : '🔍 Search', callback_data: 'xnxx_search_prompt' }],
+        [{ text: en ? '📋 Latest' : '📋 Browse Terbaru', callback_data: 'xnxx_browse' }, { text: '🎲 Gacha', callback_data: 'xnxx_gacha' }],
+        [{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }],
       ]
     }
   });
@@ -4198,6 +4200,11 @@ function fmtDate(ts) {
   catch (_) { return '-'; }
 }
 
+/** Pilih string sesuai bahasa user. L(chatId, 'teks Indo', 'English text'). */
+function L(chatId, id, en) {
+  return statsDb.getLang(chatId) === 'en' ? en : id;
+}
+
 /** Aktifkan premium + notifikasi user (idempoten via pendingPremium). */
 function activatePremium(bot, chatId, days, tier, invoiceId) {
   const until = statsDb.setPremium(chatId, days, tier);
@@ -4211,27 +4218,28 @@ function activatePremium(bot, chatId, days, tier, invoiceId) {
 }
 
 async function doPremiumMenu(bot, chatId) {
+  const en = statsDb.getLang(chatId) === 'en';
   const q = quotaInfo(chatId);
   const until = statsDb.getPremiumUntil(chatId);
   let text = `💎 <b>CosTele Premium</b>\n\n`;
-  text += `Tier kamu: <b>${TIER_LABEL[q.tier] || q.tier}</b>`;
-  text += q.tier === 'free' || q.tier === 'admin' ? `\n` : ` (s/d ${fmtDate(until)})\n`;
-  text += `Kuota hari ini: <b>${q.unlimited ? '∞' : `${q.used}/${q.limit}`}</b>\n\n`;
-  text += `<b>Limit download / hari:</b>\n` +
+  text += `${en ? 'Your tier' : 'Tier kamu'}: <b>${TIER_LABEL[q.tier] || q.tier}</b>`;
+  text += q.tier === 'free' || q.tier === 'admin' ? `\n` : ` (${en ? 'until' : 's/d'} ${fmtDate(until)})\n`;
+  text += `${en ? "Today's quota" : 'Kuota hari ini'}: <b>${q.unlimited ? '∞' : `${q.used}/${q.limit}`}</b>\n\n`;
+  text += `<b>${en ? 'Daily download limit' : 'Limit download / hari'}:</b>\n` +
     `🆓 Free: ${TIER_LIMITS.free} · 💎 Premium: ${TIER_LIMITS.premium} · 👑 VVIP: ${TIER_LIMITS.vvip}\n` +
-    `Premium/VVIP juga dapat <b>prioritas antrean</b>.\n\n`;
+    `${en ? 'Premium/VVIP also get <b>queue priority</b>.' : 'Premium/VVIP juga dapat <b>prioritas antrean</b>.'}\n\n`;
 
   const buttons = [];
   if (cryptopay.isEnabled()) {
-    text += `Pilih paket (bayar via ${cryptopay.asset()}):`;
+    text += en ? `Pick a plan (pay via ${cryptopay.asset()}):` : `Pilih paket (bayar via ${cryptopay.asset()}):`;
     PREMIUM_PLANS.forEach(p => {
-      const lbl = `${TIER_LABEL[p.tier]} · ${p.days} hari · ${p.price} ${cryptopay.asset()}`;
+      const lbl = `${TIER_LABEL[p.tier]} · ${p.days} ${en ? 'days' : 'hari'} · ${p.price} ${cryptopay.asset()}`;
       buttons.push([{ text: lbl, callback_data: `buyprem_${p.tier}_${p.days}` }]);
     });
   } else {
-    text += `<i>Pembayaran otomatis belum aktif. Hubungi admin untuk aktivasi manual.</i>`;
+    text += en ? `<i>Auto payment not configured. Contact admin for manual activation.</i>` : `<i>Pembayaran otomatis belum aktif. Hubungi admin untuk aktivasi manual.</i>`;
   }
-  buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+  buttons.push([{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }]);
   const sentMsg = await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
   autoCleanOldMenu(bot, chatId, sentMsg.message_id);
 }
@@ -4289,57 +4297,52 @@ async function pollPremiumInvoices(bot) {
 
 async function sendMainMenu(bot, chatId) {
   const aiOn = groq.hasKey();
+  const en = statsDb.getLang(chatId) === 'en';
   const tip = aiOn
-    ? `💬 <b>Tip:</b> langsung ketik aja apa yang kamu mau —\n` +
-      `bot pakai AI buat ngerti & jalanin sendiri.\n` +
-      `Contoh: <code>cari ganyu</code> · <code>gacha cosplay</code> · <code>MIDE-232</code>\n\n`
-    : `💬 <b>Tip:</b> ketik kata kunci buat nyari langsung.\n` +
-      `Contoh: <code>cari ganyu</code> · <code>ganyu cosplay</code> · <code>MIDE-232</code>\n\n`;
+    ? (en
+      ? `💬 <b>Tip:</b> just type whatever you want —\nthe AI understands & runs it for you.\nE.g. <code>find ganyu</code> · <code>gacha cosplay</code> · <code>MIDE-232</code>\n\n`
+      : `💬 <b>Tip:</b> langsung ketik aja apa yang kamu mau —\nbot pakai AI buat ngerti & jalanin sendiri.\nContoh: <code>cari ganyu</code> · <code>gacha cosplay</code> · <code>MIDE-232</code>\n\n`)
+    : (en
+      ? `💬 <b>Tip:</b> type a keyword to search directly.\nE.g. <code>find ganyu</code> · <code>ganyu cosplay</code> · <code>MIDE-232</code>\n\n`
+      : `💬 <b>Tip:</b> ketik kata kunci buat nyari langsung.\nContoh: <code>cari ganyu</code> · <code>ganyu cosplay</code> · <code>MIDE-232</code>\n\n`);
   const q = quotaInfo(chatId);
-  const quotaStr = q.unlimited ? '∞ (unlimited)' : `${q.remaining}/${q.limit} tersisa`;
-  const statusLine = `${TIER_LABEL[q.tier] || q.tier} · 📥 Kuota hari ini: <b>${quotaStr}</b>\n\n`;
+  const quotaStr = q.unlimited ? '∞ (unlimited)' : `${q.remaining}/${q.limit} ${en ? 'left' : 'tersisa'}`;
+  const statusLine = `${TIER_LABEL[q.tier] || q.tier} · 📥 ${en ? "Today's quota" : 'Kuota hari ini'}: <b>${quotaStr}</b>\n\n`;
   const text =
     `👋 <b>CosTele Bot</b>\n` +
     `<i>Multi-source media scraper</i>\n\n` +
     statusLine +
     tip +
-    `Atau pilih menu di bawah 👇`;
+    (en ? `Or pick a menu below 👇` : `Atau pilih menu di bawah 👇`);
 
-  // Layout: fitur AI di atas (tercepat), lalu cosplay (utama), anime/patreon,
-  // baris 18+ (JAV/Ero/XNXX/R34), util download, lalu profil/antrean/util.
   const keyboard = [
-    // Flagship: ketik bebas / smart search (AI)
     [
-      { text: '🔎 Cari Apa Saja (AI)', callback_data: 'menu_search' },
+      { text: en ? '🔎 Search Anything (AI)' : '🔎 Cari Apa Saja (AI)', callback_data: 'menu_search' },
       { text: '🎲 Gacha!', callback_data: 'gacha_any' },
     ],
-    // Cosplay (primary) — submenu terpadu (Search/Browse/Gacha)
     [
       { text: '📚 Cosplaytele', callback_data: 'menu_cosplaytele' },
       { text: '🍁 Patreon', callback_data: 'menu_kemono_reroll' },
     ],
-    // Anime + Pinterest
     [
       { text: '🎌 Anime', callback_data: 'anime_menu' },
       { text: '📌 Pinterest', callback_data: 'pin_search_prompt' },
     ],
-    // 18+ sources
     [
       { text: '🎥 JAV', callback_data: 'jav_menu' },
       { text: '🔥 Ero', callback_data: 'ero_menu' },
       { text: '🟦 XNXX', callback_data: 'xnxx_menu' },
       { text: '🎬 R34', callback_data: 'menu_r34' },
     ],
-    // Download manual + profil + premium
     [
       { text: '📥 Terabox', callback_data: 'menu_terabox' },
-      { text: '👤 Profil', callback_data: 'menu_profile' },
+      { text: en ? '👤 Profile' : '👤 Profil', callback_data: 'menu_profile' },
       { text: '💎 Premium', callback_data: 'menu_premium' },
     ],
-    // Util
     [
-      { text: '🚦 Antrean', callback_data: 'tasks_refresh' },
-      { text: '🧹 Bersihkan', callback_data: 'menu_clear' },
+      { text: en ? '🚦 Queue' : '🚦 Antrean', callback_data: 'tasks_refresh' },
+      { text: en ? '🧹 Clear' : '🧹 Bersihkan', callback_data: 'menu_clear' },
+      { text: en ? '🌐 ID' : '🌐 EN', callback_data: en ? 'lang_id' : 'lang_en' },
     ],
   ];
 
@@ -5316,28 +5319,29 @@ function startBot() {
     // Submenu Cosplaytele terpadu: Search / Browse / Gacha (semua mode) dalam satu tempat.
     if (action === 'menu_cosplaytele') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const en = statsDb.getLang(chatId) === 'en';
       const sentMsg = await bot.sendMessage(chatId,
-        `📚 <b>Cosplaytele</b>\n\nPilih mode:`,
+        `📚 <b>Cosplaytele</b>\n\n${en ? 'Choose mode:' : 'Pilih mode:'}`,
         {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
               [{ text: '🔍 Search', callback_data: 'menu_search_cosplay' }],
-              [{ text: '📚 Browse Terbaru', callback_data: 'menu_browse' }],
+              [{ text: en ? '📚 Latest' : '📚 Browse Terbaru', callback_data: 'menu_browse' }],
               [
-                { text: '🎲 Gacha Random', callback_data: 'cptgacha_random' },
+                { text: en ? '🎲 Random Gacha' : '🎲 Gacha Random', callback_data: 'cptgacha_random' },
                 { text: '🔥 Trending 24h', callback_data: 'cptgacha_trending24' },
               ],
               [
-                { text: '🔥 3 Hari', callback_data: 'cptgacha_trending3d' },
-                { text: '🔥 7 Hari', callback_data: 'cptgacha_trending7d' },
+                { text: en ? '🔥 3 Days' : '🔥 3 Hari', callback_data: 'cptgacha_trending3d' },
+                { text: en ? '🔥 7 Days' : '🔥 7 Hari', callback_data: 'cptgacha_trending7d' },
               ],
               [
                 { text: '💋 Ero', callback_data: 'cptgacha_ero' },
                 { text: '🔞 Nude', callback_data: 'cptgacha_nude' },
                 { text: '🎬 Video', callback_data: 'cptgacha_video' },
               ],
-              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+              [{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }],
             ]
           }
         });
@@ -5388,6 +5392,13 @@ function startBot() {
       bot.answerCallbackQuery(query.id, { text: '🎲 Ngocok semua sumber...' }).catch(() => { });
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doRandomGacha(bot, chatId);
+    }
+    // ── Bahasa / Language ──
+    if (action === 'lang_en' || action === 'lang_id') {
+      statsDb.setLang(chatId, action === 'lang_en' ? 'en' : 'id');
+      bot.answerCallbackQuery(query.id, { text: action === 'lang_en' ? '🌐 English' : '🌐 Bahasa Indonesia' }).catch(() => { });
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return sendMainMenu(bot, chatId);
     }
     // ── Premium ──
     if (action === 'menu_premium') {
@@ -5592,17 +5603,11 @@ function startBot() {
     if (action === 'menu_search') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       userStates.set(chatId, { step: 'AWAITING_SMART_SEARCH' });
+      const en = statsDb.getLang(chatId) === 'en';
       const sentMsg = await bot.sendMessage(chatId,
-        `🔎 <b>Smart Search</b>\n\n` +
-        `Ketik apa yang kamu cari dengan bahasa natural.\n` +
-        `Bot akan otomatis deteksi source terbaik.\n\n` +
-        `<b>Contoh:</b>\n` +
-        `• <code>cari ganyu</code> — cari di semua sumber\n` +
-        `• <code>cosplay jeanne darc</code> — langsung Cosplaytele\n` +
-        `• <code>MIDE-232</code> — langsung Javtiful\n` +
-        `• <code>pinterest genshin</code> — langsung Pinterest\n` +
-        `• <code>onlyfans leaks</code> — langsung EroThots\n\n` +
-        `<i>💡 Atau pilih source langsung di bawah:</i>`,
+        en
+          ? `🔎 <b>Smart Search</b>\n\nType what you want in natural language.\nThe bot auto-detects the best source.\n\n<b>Examples:</b>\n• <code>find ganyu</code> — search all sources\n• <code>cosplay jeanne darc</code> — Cosplaytele\n• <code>MIDE-232</code> — Javtiful\n• <code>pinterest genshin</code> — Pinterest\n• <code>onlyfans leaks</code> — EroThots\n\n<i>💡 Or pick a source below:</i>`
+          : `🔎 <b>Smart Search</b>\n\nKetik apa yang kamu cari dengan bahasa natural.\nBot akan otomatis deteksi source terbaik.\n\n<b>Contoh:</b>\n• <code>cari ganyu</code> — cari di semua sumber\n• <code>cosplay jeanne darc</code> — langsung Cosplaytele\n• <code>MIDE-232</code> — langsung Javtiful\n• <code>pinterest genshin</code> — langsung Pinterest\n• <code>onlyfans leaks</code> — langsung EroThots\n\n<i>💡 Atau pilih source langsung di bawah:</i>`,
         {
           parse_mode: 'HTML',
           reply_markup: {
@@ -5776,19 +5781,20 @@ function startBot() {
     // ── Javtiful Callbacks ──
     if (action === 'jav_menu') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const en = statsDb.getLang(chatId) === 'en';
       const sentMsg = await bot.sendMessage(chatId,
-        `🎥 <b>Javtiful</b>\n\nPilih mode:`,
+        `🎥 <b>Javtiful</b>\n\n${en ? 'Choose mode:' : 'Pilih mode:'}`,
         {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
               [{ text: '🔍 Search', callback_data: 'jav_search_prompt' }],
               [
-                { text: '🎰 Gacha Random', callback_data: 'javgacha_latest' },
+                { text: en ? '🎰 Random Gacha' : '🎰 Gacha Random', callback_data: 'javgacha_latest' },
                 { text: '🔥 Trending', callback_data: 'javgacha_trending' },
               ],
-              [{ text: '👘 Gacha Cosplay', callback_data: 'javgacha_cosplay' }],
-              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+              [{ text: en ? '👘 Cosplay Gacha' : '👘 Gacha Cosplay', callback_data: 'javgacha_cosplay' }],
+              [{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }],
             ]
           }
         }
@@ -6006,21 +6012,22 @@ function startBot() {
     // ─── ANIME CALLBACKS ───────────────────────────────────────────────────────
     if (action === 'anime_menu') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const en = statsDb.getLang(chatId) === 'en';
       const sentMsg = await bot.sendMessage(chatId,
-        `🎌 <b>Anime Hub</b>\n<i>3 sumber: Otakudesu + Oploverz + Kusonime</i>\n\nPilih mode:`,
+        `🎌 <b>Anime Hub</b>\n<i>3 ${en ? 'sources' : 'sumber'}: Otakudesu + Oploverz + Kusonime</i>\n\n${en ? 'Choose mode:' : 'Pilih mode:'}`,
         {
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [
-              [{ text: '🔍 Search Anime', callback_data: 'anime_search_prompt' }],
+              [{ text: en ? '🔍 Search Anime' : '🔍 Search Anime', callback_data: 'anime_search_prompt' }],
               [
-                { text: '🎲 Gacha Ongoing', callback_data: 'anmgacha_ongoing' },
-                { text: '📦 Gacha Batch', callback_data: 'anmgacha_batch' },
+                { text: en ? '🎲 Gacha Ongoing' : '🎲 Gacha Ongoing', callback_data: 'anmgacha_ongoing' },
+                { text: en ? '📦 Gacha Batch' : '📦 Gacha Batch', callback_data: 'anmgacha_batch' },
               ],
-              [{ text: '🆕 Latest Releases', callback_data: 'anm_latest' }],
-              [{ text: '📅 Browse by Season', callback_data: 'anm_season_menu' }],
-              [{ text: '🏷️ Browse by Genre', callback_data: 'anm_genre_menu' }],
-              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+              [{ text: en ? '🆕 Latest Releases' : '🆕 Rilisan Terbaru', callback_data: 'anm_latest' }],
+              [{ text: en ? '📅 Browse by Season' : '📅 Per Musim', callback_data: 'anm_season_menu' }],
+              [{ text: en ? '🏷️ Browse by Genre' : '🏷️ Per Genre', callback_data: 'anm_genre_menu' }],
+              [{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }],
             ]
           }
         }
@@ -6229,28 +6236,29 @@ function startBot() {
         : (s.downloadBytes / (1024 * 1024)).toFixed(2) + ' MB';
 
       const uname = query.from.username ? `@${query.from.username}` : (query.from.first_name || 'Anonim');
+      const en = statsDb.getLang(chatId) === 'en';
 
       const q = quotaInfo(chatId);
       const premActive = statsDb.isPremium(chatId);
       const premLine = q.tier === 'admin'
         ? `🛡️ <b>Tier:</b> Admin (unlimited)\n`
         : premActive
-          ? `${TIER_LABEL[q.tier]} <b>aktif</b> s/d ${fmtDate(statsDb.getPremiumUntil(chatId))}\n`
+          ? `${TIER_LABEL[q.tier]} <b>${en ? 'active until' : 'aktif s/d'}</b> ${fmtDate(statsDb.getPremiumUntil(chatId))}\n`
           : `🆓 <b>Tier:</b> Free\n`;
-      const quotaLine = `📥 <b>Kuota hari ini:</b> ${q.unlimited ? '∞' : `${q.used}/${q.limit}`}\n`;
+      const quotaLine = `📥 <b>${en ? "Today's quota" : 'Kuota hari ini'}:</b> ${q.unlimited ? '∞' : `${q.used}/${q.limit}`}\n`;
 
       const txt = `🔰 <b>Profile</b>\n━━━━━━━━━━━━━━━━━━\n` +
-        `👤 <b>Identitas:</b> ${uname}\n` +
-        `🎯 <b>Peringkat:</b> ${rank}\n` +
+        `👤 <b>${en ? 'User' : 'Identitas'}:</b> ${uname}\n` +
+        `🎯 <b>${en ? 'Rank' : 'Peringkat'}:</b> ${rank}\n` +
         `✨ <b>EXP:</b> ${exp.toLocaleString('id-ID')} Pt\n` +
         premLine + quotaLine + `\n` +
-        `🎁 <b>Gacha Dimainkan:</b> ${s.gachaCasts} Kali\n` +
-        `📦 <b>Media Terkirim:</b> ${totalMediaGb} Data Super HD\n` +
-        `━━━━━━━━━━━━━━━━━━\n<i>Tingkatkan EXP untuk meraih Ranking Dewa!</i>`;
+        `🎁 <b>${en ? 'Gacha played' : 'Gacha Dimainkan'}:</b> ${s.gachaCasts}${en ? '' : ' Kali'}\n` +
+        `📦 <b>${en ? 'Media sent' : 'Media Terkirim'}:</b> ${totalMediaGb}\n` +
+        `━━━━━━━━━━━━━━━━━━\n<i>${en ? 'Raise your EXP to reach God rank!' : 'Tingkatkan EXP untuk meraih Ranking Dewa!'}</i>`;
 
       const profBtns = premActive
-        ? [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]]
-        : [[{ text: '💎 Upgrade Premium', callback_data: 'menu_premium' }], [{ text: '🔙 Menu', callback_data: 'menu_awal' }]];
+        ? [[{ text: en ? '🔙 Menu' : '🔙 Menu', callback_data: 'menu_awal' }]]
+        : [[{ text: en ? '💎 Upgrade Premium' : '💎 Upgrade Premium', callback_data: 'menu_premium' }], [{ text: '🔙 Menu', callback_data: 'menu_awal' }]];
       await bot.sendMessage(chatId, txt, { parse_mode: 'HTML', reply_markup: { inline_keyboard: profBtns } });
       return;
     }
@@ -6264,7 +6272,11 @@ function startBot() {
     }
 
     if (action === 'menu_terabox') {
-      const msg = await sendMenuWithThumb(bot, chatId, '📥 <b>Manual Terabox</b>\n\nSilakan COPY & PASTE link TeraBox / 4KHD langsung ke chat bot ini.', [[{ text: '🔙 Kembali', callback_data: 'menu_awal' }]]);
+      const en = statsDb.getLang(chatId) === 'en';
+      const msg = await sendMenuWithThumb(bot, chatId,
+        en ? '📥 <b>Manual Terabox</b>\n\nJust COPY & PASTE a TeraBox / 4KHD link into this chat.'
+          : '📥 <b>Manual Terabox</b>\n\nSilakan COPY & PASTE link TeraBox / 4KHD langsung ke chat bot ini.',
+        [[{ text: en ? '🔙 Back' : '🔙 Kembali', callback_data: 'menu_awal' }]]);
       autoCleanOldMenu(bot, chatId, msg.message_id);
       return;
     }
