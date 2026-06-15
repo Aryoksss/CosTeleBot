@@ -4011,7 +4011,7 @@ function validateEnv() {
   }
 
   // Warning non-fatal (bot tetap jalan, tapi sebagian fitur mati)
-  if (!process.env.GROQ_API_KEY) log.warn('[ENV] GROQ_API_KEY kosong → smart-search & AI assistant nonaktif (fallback regex).');
+  if (!process.env.GROQ_API_KEY && !process.env.DEEPSEEK_API_KEY) log.warn('[ENV] GROQ_API_KEY & DEEPSEEK_API_KEY kosong → smart-search & AI assistant nonaktif (fallback regex).');
   if (!process.env.ADMIN_IDS) log.warn('[ENV] ADMIN_IDS kosong → memakai admin default hardcoded. Sebaiknya set ADMIN_IDS.');
   if (!process.env.XAPIVERSE_KEY) log.warn('[ENV] XAPIVERSE_KEY kosong → fitur Terabox kemungkinan gagal.');
 }
@@ -4873,7 +4873,15 @@ function startBot() {
               // Tanpa query tapi sumber jelas → buka prompt search sumber itu (user tinggal ketik).
               return promptSearchForSource(bot, chatId, r.source);
             case 'anime': if (r.query) return doAnimeSearch(bot, chatId, r.query); return promptSearchForSource(bot, chatId, 'anime');
-            case 'gacha': return doCosplayteleGacha(bot, chatId, 'random');
+            case 'gacha':
+              if (r.source === 'jav') return doJavGacha(bot, chatId, 'latest');
+              if (r.source === 'ero') return doEroGacha(bot, chatId);
+              if (r.source === 'xnxx') return doXnxxGacha(bot, chatId);
+              if (r.source === 'kemono') {
+                const kurls = ['https://kemono.cr/patreon/user/3295915', 'https://kemono.cr/patreon/user/49965584'];
+                return doKemonoGacha(bot, chatId, kurls[Math.floor(Math.random() * kurls.length)]);
+              }
+              return doCosplayteleGacha(bot, chatId, 'random');
             case 'jav_gacha': return doJavGacha(bot, chatId, 'latest');
             case 'browse': return doCosplayteleBrowse(bot, chatId, 'home', 1);
             case 'menu': return sendMainMenu(bot, chatId);
