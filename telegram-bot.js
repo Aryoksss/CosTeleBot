@@ -3969,6 +3969,50 @@ async function sendMenuWithThumb(bot, chatId, text, keyboard) {
   return await bot.sendMessage(chatId, text, opts);
 }
 
+/**
+ * Bangun teks Dashboard bot (KPI performa) — dipakai /stat & tombol Dashboard.
+ * Beda dari Health: Health = reachability sumber; Dashboard = kinerja bot (RAM, antrean, user, AI).
+ */
+function buildDashboardText() {
+  const uptimeSec = Math.floor((Date.now() - botStats.startTime) / 1000);
+  const hrs = Math.floor(uptimeSec / 3600);
+  const mins = Math.floor((uptimeSec % 3600) / 60);
+  const ramMB = (process.memoryUsage().rss / 1048576).toFixed(1);
+  const totalMemMB = (os.totalmem() / 1048576).toFixed(0);
+  const freeMemMB = (os.freemem() / 1048576).toFixed(0);
+  const usedPct = (((os.totalmem() - os.freemem()) / os.totalmem()) * 100).toFixed(0);
+
+  const dl = botStats.downloadedBytes || 0;
+  const dlFmt = dl > 1073741824 ? (dl / 1073741824).toFixed(2) + ' GB' : (dl / 1048576).toFixed(2) + ' MB';
+
+  const active = queueManager.activeJobs.size;
+  const pending = Math.max(0, queueManager.totalPending() - active);
+
+  let users = 0;
+  try { users = Object.keys(JSON.parse(fs.readFileSync(path.join(__dirname, 'stats.json'), 'utf8'))).length; } catch (_) { }
+
+  const provs = [];
+  if (process.env.GROQ_API_KEY) provs.push('Groq');
+  if (process.env.DEEPSEEK_API_KEY) provs.push('DeepSeek');
+  const aiStatus = provs.length ? `${groq.isEnabled() ? '✅' : '⚠️ cooldown'} ${provs.join(' + ')}` : '❌ regex-only';
+
+  let fc = { entries: 0, totalHits: 0 };
+  try { fc = fileCache.stats(); } catch (_) { }
+
+  return `💻 <b>Dashboard Bot</b>\n━━━━━━━━━━━━━━━━━━\n` +
+    `⏳ Uptime: <b>${hrs}j ${mins}m</b>\n` +
+    `💾 RAM bot: <b>${ramMB} MB</b>\n` +
+    `🖥️ RAM VPS: sisa ${freeMemMB} / ${totalMemMB} MB (${usedPct}% kepakai)\n` +
+    `🤖 AI: ${aiStatus}\n` +
+    `━━━━━━━━━━━━━━━━━━\n` +
+    `📈 <b>Kinerja</b>\n` +
+    `🌐 Trafik disalurkan: <b>${dlFmt}</b>\n` +
+    `✅ Total job selesai: <b>${botStats.totalJobs || 0}</b>\n` +
+    `🚦 Antrean: <b>${active}</b> aktif · ${pending} menunggu\n` +
+    `♻️ Cache file_id: ${fc.entries} entri · ${fc.totalHits} hit (hemat re-upload)\n` +
+    `👥 Pengguna terdaftar: <b>${users}</b>\n━━━━━━━━━━━━━━━━━━`;
+}
+
 async function sendMainMenu(bot, chatId) {
   const aiOn = groq.hasKey();
   const tip = aiOn
@@ -4363,18 +4407,8 @@ function startBot() {
     });
   });
 
-  registerCommand({ name: 'stat', description: '💻 Statistik Server VPS (admin)', adminOnly: true, hasArg: false }, async (msg) => {
-    const uptimeSec = Math.floor((Date.now() - botStats.startTime) / 1000);
-    const hrs = Math.floor(uptimeSec / 3600);
-    const mins = Math.floor((uptimeSec % 3600) / 60);
-    const ramMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
-    const totalMemMB = (os.totalmem() / 1024 / 1024).toFixed(0);
-    const freeMemMB = (os.freemem() / 1024 / 1024).toFixed(0);
-
-    let dlFormatted = botStats.downloadedBytes > 1024 * 1024 * 1024 ? (botStats.downloadedBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : (botStats.downloadedBytes / (1024 * 1024)).toFixed(2) + ' MB';
-
-    const txt = `💻 <b>Statistik Server VPS Global</b>\n━━━━━━━━━━━━━━━━━━\n⏳ <b>Uptime:</b> ${hrs} Jam ${mins} Menit\n💾 <b>RAM Node.js:</b> ${ramMB} MB\n🖥️ <b>RAM VPS:</b> Sisa ${freeMemMB} MB / ${totalMemMB} MB\n\n📈 <b>Kinerja Bot:</b>\n🌐 Trafik Disalurkan: <b>${dlFormatted}</b>\n✅ Total Eksekusi Terkirim: <b>${botStats.totalJobs}</b> \n━━━━━━━━━━━━━━━━━━`;
-    const sentMsg = await bot.sendMessage(msg.chat.id, txt, { parse_mode: 'HTML' });
+  registerCommand({ name: 'stat', description: '💻 Dashboard bot (admin)', adminOnly: true, hasArg: false }, async (msg) => {
+    const sentMsg = await bot.sendMessage(msg.chat.id, buildDashboardText(), { parse_mode: 'HTML' });
     autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
   });
 
@@ -4460,8 +4494,7 @@ function startBot() {
 
     try {
       const results = await healthcheck.checkAllSources();
-      const sysInfo = healthcheck.getSystemInfo(botStats.startTime);
-      const report = healthcheck.formatHealthReport(results, sysInfo);
+      const report = healthcheck.formatHealthReport(results, null);
       await bot.editMessageText(report, {
         chat_id: msg.chat.id, message_id: loadMsg.message_id, parse_mode: 'HTML',
         disable_web_page_preview: true,
@@ -5160,8 +5193,7 @@ function startBot() {
           });
         }
         const results = await healthcheck.checkAllSources();
-        const sysInfo = healthcheck.getSystemInfo(botStats.startTime);
-        const report = healthcheck.formatHealthReport(results, sysInfo);
+        const report = healthcheck.formatHealthReport(results, null);
         await bot.editMessageText(report, {
           chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
           disable_web_page_preview: true,
@@ -5789,17 +5821,10 @@ function startBot() {
         return bot.answerCallbackQuery(query.id, { text: '⛔ Akses Ditolak: Anda bukan Admin Server!', show_alert: true });
       }
       bot.answerCallbackQuery(query.id).catch(() => { });
-
-      const uptimeSec = Math.floor((Date.now() - botStats.startTime) / 1000);
-      const hrs = Math.floor(uptimeSec / 3600);
-      const mins = Math.floor((uptimeSec % 3600) / 60);
-      const ramMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
-      const totalMemMB = (os.totalmem() / 1024 / 1024).toFixed(0);
-      const freeMemMB = (os.freemem() / 1024 / 1024).toFixed(0);
-      let dlFormatted = botStats.downloadedBytes > 1024 * 1024 * 1024 ? (botStats.downloadedBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : (botStats.downloadedBytes / (1024 * 1024)).toFixed(2) + ' MB';
-
-      const txt = `💻 <b>Statistik Server VPS Global</b>\n━━━━━━━━━━━━━━━━━━\n⏳ <b>Uptime:</b> ${hrs} Jam ${mins} Menit\n💾 <b>RAM Node.js:</b> ${ramMB} MB\n🖥️ <b>RAM VPS:</b> Sisa ${freeMemMB} MB / ${totalMemMB} MB\n\n📈 <b>Kinerja Bot:</b>\n🌐 Trafik Disalurkan: <b>${dlFormatted}</b>\n✅ Total Eksekusi Terkirim: <b>${botStats.totalJobs}</b> \n━━━━━━━━━━━━━━━━━━`;
-      await bot.sendMessage(chatId, txt, { parse_mode: 'HTML' });
+      await bot.sendMessage(chatId, buildDashboardText(), {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔄 Refresh', callback_data: 'menu_vps' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] },
+      });
       return;
     }
 

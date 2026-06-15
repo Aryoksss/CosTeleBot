@@ -59,6 +59,7 @@ async function checkAllSources() {
     checkUrl('Cosplaytele', 'https://cosplaytele.com/'),
     checkUrl('Javtiful', 'https://javtiful.com/'),
     checkUrl('EroThots', 'https://erothots.co/'),
+    checkUrl('XNXX', 'https://www.xnxx.com/'),
     checkUrl('Rule34Video', 'https://rule34video.com/'),
     checkUrl('Pinterest API', 'https://www.pinterest.com/'),
     checkUrl('Kemono', 'https://kemono.cr/'),
