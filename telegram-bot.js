@@ -4032,10 +4032,9 @@ async function sendMainMenu(bot, chatId) {
   const keyboard = [
     // Flagship: ketik bebas / smart search (AI)
     [{ text: '🔎 Cari Apa Saja (AI)', callback_data: 'menu_search' }],
-    // Cosplay (primary)
+    // Cosplay (primary) — submenu terpadu (Search/Browse/Gacha)
     [
-      { text: '📚 Cosplay', callback_data: 'menu_browse' },
-      { text: '🎲 Gacha', callback_data: 'menu_gacha' },
+      { text: '📚 Cosplaytele', callback_data: 'menu_cosplaytele' },
       { text: '🍁 Patreon', callback_data: 'menu_kemono_reroll' },
     ],
     // Anime + Pinterest
@@ -5025,7 +5024,38 @@ function startBot() {
     }
 
     // Menus
-    if (action === 'menu_cosplaytele' || action === 'menu_browse') {
+    // Submenu Cosplaytele terpadu: Search / Browse / Gacha (semua mode) dalam satu tempat.
+    if (action === 'menu_cosplaytele') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const sentMsg = await bot.sendMessage(chatId,
+        `📚 <b>Cosplaytele</b>\n\nPilih mode:`,
+        {
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔍 Search', callback_data: 'menu_search_cosplay' }],
+              [{ text: '📚 Browse Terbaru', callback_data: 'menu_browse' }],
+              [
+                { text: '🎲 Gacha Random', callback_data: 'cptgacha_random' },
+                { text: '🔥 Trending 24h', callback_data: 'cptgacha_trending24' },
+              ],
+              [
+                { text: '🔥 3 Hari', callback_data: 'cptgacha_trending3d' },
+                { text: '🔥 7 Hari', callback_data: 'cptgacha_trending7d' },
+              ],
+              [
+                { text: '💋 Ero', callback_data: 'cptgacha_ero' },
+                { text: '🔞 Nude', callback_data: 'cptgacha_nude' },
+                { text: '🎬 Video', callback_data: 'cptgacha_video' },
+              ],
+              [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+            ]
+          }
+        });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action === 'menu_browse') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doCosplayteleBrowse(bot, chatId);
     }
