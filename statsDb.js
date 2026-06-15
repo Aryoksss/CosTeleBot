@@ -62,12 +62,18 @@ function getInitUser(chatId) {
     return statsData[chatId];
 }
 
-// ─── PREMIUM ──────────────────────────────────────────────────────────────────
-/** Aktifkan/perpanjang premium sejumlah `days` hari (akumulatif dari sisa yang ada). */
-function setPremium(chatId, days) {
+// ─── PREMIUM / TIER + KUOTA HARIAN ─────────────────────────────────────────────
+function _todayKey() {
+    const d = new Date();
+    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+/** Aktifkan/perpanjang premium sejumlah `days` hari. tier: 'premium' | 'vvip'. */
+function setPremium(chatId, days, tier = 'premium') {
     const u = getInitUser(chatId);
     const base = Math.max(Date.now(), u.premiumUntil || 0);
     u.premiumUntil = base + (Number(days) || 0) * 86400000;
+    u.premiumTier = (tier === 'vvip') ? 'vvip' : 'premium';
     scheduleSave();
     return u.premiumUntil;
 }
@@ -76,13 +82,23 @@ function setPremium(chatId, days) {
 function revokePremium(chatId) {
     const u = getInitUser(chatId);
     u.premiumUntil = 0;
+    u.premiumTier = null;
     scheduleSave();
 }
 
-/** True kalau user sedang premium aktif. */
+/** True kalau user sedang premium/vvip aktif. */
 function isPremium(chatId) {
     const u = statsData[chatId];
     return !!(u && u.premiumUntil && u.premiumUntil > Date.now());
+}
+
+/** Tier aktif user: 'vvip' | 'premium' | 'free'. */
+function getTier(chatId) {
+    const u = statsData[chatId];
+    if (u && u.premiumUntil && u.premiumUntil > Date.now()) {
+        return u.premiumTier === 'vvip' ? 'vvip' : 'premium';
+    }
+    return 'free';
 }
 
 /** Timestamp kadaluarsa premium (0 kalau tidak ada). */
@@ -91,12 +107,29 @@ function getPremiumUntil(chatId) {
     return (u && u.premiumUntil) || 0;
 }
 
-/** Daftar semua user premium aktif → [{chatId, until}]. */
+/** Daftar semua user premium aktif → [{chatId, until, tier}]. */
 function listPremium() {
     const now = Date.now();
     return Object.entries(statsData)
         .filter(([, u]) => u.premiumUntil && u.premiumUntil > now)
-        .map(([chatId, u]) => ({ chatId, until: u.premiumUntil }));
+        .map(([chatId, u]) => ({ chatId, until: u.premiumUntil, tier: u.premiumTier === 'vvip' ? 'vvip' : 'premium' }));
+}
+
+/** Jumlah download hari ini (auto-reset kalau ganti hari). */
+function getDailyDownloads(chatId) {
+    const u = getInitUser(chatId);
+    if (u.dailyDate !== _todayKey()) return 0;
+    return u.dailyCount || 0;
+}
+
+/** Tambah 1 hitungan download hari ini. Return jumlah baru. */
+function incDailyDownloads(chatId) {
+    const u = getInitUser(chatId);
+    const today = _todayKey();
+    if (u.dailyDate !== today) { u.dailyDate = today; u.dailyCount = 0; }
+    u.dailyCount = (u.dailyCount || 0) + 1;
+    scheduleSave();
+    return u.dailyCount;
 }
 
 /**
@@ -141,6 +174,9 @@ module.exports = {
     setPremium,
     revokePremium,
     isPremium,
+    getTier,
     getPremiumUntil,
     listPremium,
+    getDailyDownloads,
+    incDailyDownloads,
 };
