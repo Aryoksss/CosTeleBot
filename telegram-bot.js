@@ -4735,6 +4735,18 @@ function startBot() {
     bot.sendMessage(chatId, `✅ Premium <b>${targetId}</b> dicabut.`, { parse_mode: 'HTML' });
   });
 
+  // /testpay [tier] [hari] — SIMULASI pembayaran sukses (admin, tanpa bayar beneran).
+  // Menjalankan jalur aktivasi yang sama persis dengan saat invoice lunas → buat ngetes
+  // tampilan "Premium aktif" + tier + kuota tanpa perlu crypto/faucet.
+  registerCommand({ name: 'testpay', description: '🧪 Simulasi bayar premium (admin)', adminOnly: true, hasArg: true }, async (msg, arg) => {
+    const chatId = msg.chat.id;
+    const parts = String(arg || '').trim().split(/\s+/);
+    const tier = /vvip/i.test(parts[0]) ? 'vvip' : (/premium/i.test(parts[0]) ? 'premium' : 'premium');
+    const days = parseInt(parts.find(p => /^\d+$/.test(p)), 10) || 1;
+    await bot.sendMessage(chatId, `🧪 <i>Simulasi pembayaran ${TIER_LABEL[tier]} ${days} hari...</i>`, { parse_mode: 'HTML' });
+    activatePremium(bot, chatId, days, tier, null); // jalur aktivasi yang sama dgn poller saat lunas
+  });
+
   registerCommand({ name: 'stats', description: '🔰 Lihat Profil', hasArg: false }, async (msg) => {
     const s = statsDb.getUserStats(msg.chat.id);
     const exp = Math.floor(s.downloadBytes / (1024 * 1024)) + (s.gachaCasts * 50); // 1 MB = 1 EXP, 1 Gacha = 50 EXP
