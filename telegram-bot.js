@@ -422,6 +422,7 @@ const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, 
 const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const eroBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const xnxxBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
+const aiHistory = new Map();       // chatId -> [{role:'user'|'assistant', content}] (memori AI, maks 6)
 const animeBrowseCache = new Map(); // chatId -> { results, episodes, seriesIdx, oploLinks, oploEpNum }
 const aggregateCache = new Map(); // chatId -> { query, sources: { cosplay: [], r34: [], pinterest: [] } }
 
@@ -432,7 +433,7 @@ function touchState(chatId) {
 }
 // Bungkus .set pada tiap Map supaya otomatis update timestamp tiap kali state user disentuh.
 // Lebih ringkas & anti-miss daripada menaruh touchState() di puluhan call-site.
-for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, xnxxBrowseCache, animeBrowseCache, aggregateCache]) {
+for (const m of [userStates, browseCache, menuTracker, kemonoTracker, r34BrowseCache, pinBrowseCache, javBrowseCache, eroBrowseCache, xnxxBrowseCache, aiHistory, animeBrowseCache, aggregateCache]) {
   const origSet = m.set.bind(m);
   m.set = (key, value) => {
     touchState(key);
@@ -453,6 +454,7 @@ function sweepStaleStates() {
     eroBrowseCache.delete(chatId);
     xnxxBrowseCache.delete(chatId);
     aggregateCache.delete(chatId);
+    aiHistory.delete(chatId);
     stateTouchedAt.delete(chatId);
   }
 }
@@ -4863,7 +4865,12 @@ function startBot() {
           bot.sendChatAction(chatId, 'typing').catch(() => { });
           // Sembunyikan command admin dari user biasa.
           const cmds = isAdmin(chatId) ? COMMANDS : COMMANDS.filter(c => !c.adminOnly);
-          const r = await assistant.assist(text, cmds);
+          const hist = aiHistory.get(chatId) || [];
+          const r = await assistant.assist(text, cmds, hist);
+          // Rekam turn untuk konteks lintas-pesan (simpan maks 6 entri).
+          hist.push({ role: 'user', content: text });
+          if (r.reply) hist.push({ role: 'assistant', content: r.reply });
+          aiHistory.set(chatId, hist.slice(-6));
           if (r.reply) await bot.sendMessage(chatId, r.reply).catch(() => { });
 
           log.info(`[Assistant] action=${r.action}${r.query ? ` query="${r.query}" src=${r.source}` : ''}`);

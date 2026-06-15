@@ -77,9 +77,14 @@ async function chatReply(userText, commands = []) {
 
 /**
  * Pilih satu aksi + balasan dari pesan bebas user.
+ * @param {string} userText
+ * @param {Array}  commands  daftar command dari registry
+ * @param {Array}  history   riwayat percakapan terakhir [{role:'user'|'assistant', content}]
+ *                           dipakai supaya konteks lintas-pesan nyambung (mis. tempel judul
+ *                           lalu "cari di xnxx").
  * @returns {Promise<{action:string, query:string|null, source:string, reply:string}>}
  */
-async function assist(userText, commands = []) {
+async function assist(userText, commands = [], history = []) {
   const cmdList = commands.length ? commands.map(c => `${c.command} — ${c.description}`).join('\n') : '(tidak ada)';
   const system = `${PERSONA}
 
@@ -88,16 +93,22 @@ Balas HANYA JSON (tanpa teks lain) dengan skema:
 
 ${CAPABILITIES}
 
+GUNAKAN KONTEKS PERCAKAPAN: kalau pesan terakhir user merujuk ke pesan sebelumnya
+(mis. user menempel judul/teks lalu berkata "cari di xnxx" / "yang ini di jav"),
+ambil judul/teks dari pesan sebelumnya sebagai "query".
+
 DAFTAR COMMAND TERSEDIA:
 ${cmdList}`;
 
-  const parsed = await groq.chatJSON({
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: String(userText).slice(0, 500) },
-    ],
-    temperature: 0.3, maxTokens: 250, timeoutMs: 12000,
-  });
+  // Sertakan maksimal 4 turn terakhir sebagai konteks.
+  const hist = Array.isArray(history) ? history.slice(-4).filter(h => h && h.role && h.content) : [];
+  const messages = [
+    { role: 'system', content: system },
+    ...hist.map(h => ({ role: h.role === 'assistant' ? 'assistant' : 'user', content: String(h.content).slice(0, 400) })),
+    { role: 'user', content: String(userText).slice(0, 500) },
+  ];
+
+  const parsed = await groq.chatJSON({ messages, temperature: 0.3, maxTokens: 250, timeoutMs: 12000 });
 
   let action = ACTIONS.includes(parsed && parsed.action) ? parsed.action : 'chat';
   if (action === 'jav_gacha') action = 'gacha'; // normalisasi alias lama

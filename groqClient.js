@@ -183,10 +183,23 @@ async function chat({ messages, model, temperature = 0, maxTokens = 300, json = 
   throw lastErr || new Error('Semua AI provider gagal');
 }
 
-/** Chat dengan output JSON. Parse ke object. Throw kalau bukan JSON valid. */
+/** Ekstrak object JSON dari output LLM (toleran: strip code-fence & prosa di sekitar). */
+function _extractJson(content) {
+  if (typeof content !== 'string') return content;
+  let s = content.trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  // Ambil blok { ... } pertama s/d terakhir kalau ada teks tambahan.
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) s = s.slice(start, end + 1);
+  return JSON.parse(s);
+}
+
+/** Chat dengan output JSON. Parse ke object (toleran). Throw kalau benar-benar bukan JSON. */
 async function chatJSON(opts) {
   const content = await chat({ ...opts, json: true });
-  return JSON.parse(content);
+  return _extractJson(content);
 }
 
 module.exports = { hasKey, isEnabled, chat, chatJSON };

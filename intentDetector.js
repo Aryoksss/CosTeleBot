@@ -28,14 +28,23 @@ const log = {
 
 // Trigger word → extract group 1 = query
 const TRIGGERS = [
-  /^(?:bot\s+)?(?:tolong\s+)?(?:cari(?:in|kan)?|nyari|carikan)\s+(.+)/i,
-  /^(?:saya\s+)?(?:pengen|mau|ingin)\s+(?:liat|lihat|cari|nyari|nemu|nonton|download|tonton)\s+(?:cosplay\s+|video\s+|pin\s+|pinterest\s+|anime\s+)?(.+)/i,
-  /^(?:saya\s+)?(?:mau|pengen|ingin)\s+(?:nonton|download|tonton)\s+(.+)/i,
-  /^(?:nonton|tonton|download)\s+(?:anime\s+)?(.+)/i,
+  /^(?:bot\s+)?(?:tolong\s+)?(?:cari(?:in|kan)?|nyari|carikan|search|find)\s+(.+)/i,
+  /^(?:saya\s+)?(?:pengen|mau|ingin|pgn|kepengen)\s+(?:liat|lihat|cari|nyari|nemu|nonton|download|tonton|donlot|unduh)\s+(?:cosplay\s+|video\s+|pin\s+|pinterest\s+|anime\s+)?(.+)/i,
+  /^(?:saya\s+)?(?:mau|pengen|ingin|pgn)\s+(?:nonton|download|tonton|donlot|unduh)\s+(.+)/i,
+  /^(?:nonton|tonton|download|donlot|unduh|streaming)\s+(?:anime\s+)?(.+)/i,
+  /^(?:ada\s+)(.+?)\s+(?:ga|gak|nggak|gk|engga)\??$/i,            // "ada nami cosplay ga?"
+  /^(?:kasih|kasi|berikan|beri)\s+(?:dong\s+|aku\s+|saya\s+)?(.+)/i, // "kasih nami cosplay"
   /^(?:search(?:\s+for)?|looking\s+for|find(?:\s+me)?|show\s+me)\s+(.+)/i,
   /^(?:i(?:\s+am|\'m)?)\s+looking\s+(?:for\s+)?(.+)/i,
   /^(?:can\s+you\s+(?:find|search)\s+(?:me\s+)?)(.+)/i,
 ];
+
+// Kode JAV: 2-6 huruf + (opsional pemisah) + 2-5 digit. Mis. "mide232", "ssni 001", "ABP-123".
+const JAV_CODE_RE = /^([a-z]{2,6})[\s-]?(\d{2,5})$/i;
+function normalizeJavCode(text) {
+  const m = String(text || '').trim().match(JAV_CODE_RE);
+  return m ? `${m[1].toUpperCase()}-${m[2]}` : null;
+}
 
 // Kata kunci eksplisit untuk preferredSource di query
 const SOURCE_HINTS = {
@@ -55,12 +64,23 @@ function detectSourceHint(text) {
   return null;
 }
 
+// Sumber di awal pesan (tanpa kata kerja), mis. "pinterest gintama", "r34 tifa", "xnxx cosplay".
+const LEADING_SOURCE = [
+  [/^(?:cosplaytele|cosplay)\b[\s:,-]*/i, 'cosplay'],
+  [/^(?:rule\s*34|rule34(?:video)?|r34)\b[\s:,-]*/i, 'r34'],
+  [/^(?:pin(?:terest)?)\b[\s:,-]*/i, 'pinterest'],
+  [/^(?:jav(?:tiful)?)\b[\s:,-]*/i, 'jav'],
+  [/^(?:erothots?|ero)\b[\s:,-]*/i, 'ero'],
+  [/^(?:xnxx)\b[\s:,-]*/i, 'xnxx'],
+  [/^(?:anime|otakudesu|oploverz|kusonime)\b[\s:,-]*/i, 'anime'],
+];
+
 function stripSourceHint(query) {
   for (const re of Object.values(SOURCE_HINTS)) {
     query = query.replace(re, '').trim();
   }
-  // Bersihkan filler words sisa (bahasa Indonesia + English)
-  query = query.replace(/\b(saya|aku|gue|gw|kamu|dong|deh|dulu|bang|bro|gaes|guys|please|pls|yang|ini|itu|mau|ingin|pengen|tolong|bot|nonton|tonton|download)\b/gi, '').trim();
+  // Bersihkan filler words + preposisi sisa (bahasa Indonesia + English)
+  query = query.replace(/\b(saya|aku|gue|gw|kamu|dong|deh|dulu|bang|bro|gaes|guys|please|pls|yang|ini|itu|mau|ingin|pengen|tolong|bot|nonton|tonton|download|di|ke|dari|pada|nya|sih|nih|ya|gih)\b/gi, '').trim();
   // Collapse multiple spaces
   return query.replace(/\s{2,}/g, ' ').trim();
 }
@@ -68,11 +88,24 @@ function stripSourceHint(query) {
 function detectIntentRegex(text) {
   const trimmed = text.trim();
 
+  // 0) Kode JAV mentah (mis. "MIDE-232") → langsung search ke Javtiful.
+  const jav = normalizeJavCode(trimmed);
+  if (jav) {
+    return { intent: 'search', query: jav, preferredSource: 'jav', via: 'regex' };
+  }
+
   for (const re of TRIGGERS) {
     const m = trimmed.match(re);
     if (m && m[1] && m[1].trim().length >= 2) {
       let query = m[1].trim();
-      const preferredSource = detectSourceHint(trimmed);
+      let preferredSource = detectSourceHint(trimmed);
+
+      // Kalau query berisi kode JAV (mis. "cari mide 232"), normalisasi + paksa source jav.
+      const javInQuery = normalizeJavCode(query);
+      if (javInQuery) {
+        return { intent: 'search', query: javInQuery, preferredSource: 'jav', via: 'regex' };
+      }
+
       query = stripSourceHint(query);
 
       // Guard: query terlalu pendek/panjang setelah filter
@@ -84,6 +117,21 @@ function detectIntentRegex(text) {
         preferredSource: preferredSource || 'all',
         via: 'regex',
       };
+    }
+  }
+
+  // Fallback: pola "<sumber> <query>" tanpa kata kerja (mis. "pinterest gintama", "r34 tifa").
+  for (const [re, src] of LEADING_SOURCE) {
+    if (re.test(trimmed)) {
+      let rest = trimmed.replace(re, '').trim();
+      const jav2 = normalizeJavCode(rest);
+      if (jav2) return { intent: 'search', query: jav2, preferredSource: 'jav', via: 'regex' };
+      rest = stripSourceHint(rest);
+      const words = rest.split(/\s+/).filter(Boolean);
+      // Gate anti-false-positive: query pendek (1-5 kata) & bukan kalimat tanya.
+      if (rest.length >= 2 && rest.length <= 60 && words.length <= 5 && !/^(apa|gimana|kenapa|kok|bisa|gak|nggak)\b/i.test(rest)) {
+        return { intent: 'search', query: rest, preferredSource: src, via: 'regex' };
+      }
     }
   }
 
