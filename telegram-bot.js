@@ -66,6 +66,41 @@ class DownloadQueue {
     return arr;
   }
 
+  /** Daftar job pending (belum jalan) milik 1 user → [{id, title}]. */
+  userPendingJobs(chatId) {
+    return (this.userQueues.get(chatId) || []).map(j => ({ id: j.id, title: j.title }));
+  }
+
+  /** Job aktif (sedang jalan) milik 1 user → [{id, title}]. */
+  userActiveJobs(chatId) {
+    return Array.from(this.activeJobs.values()).filter(j => j.chatId === chatId).map(j => ({ id: j.id, title: j.title }));
+  }
+
+  /** Daftar job milik 1 user: { active:[{id,title}], pending:[{id,title}] }. */
+  listUserJobs(chatId) {
+    const active = Array.from(this.activeJobs.values())
+      .filter(j => String(j.chatId) === String(chatId))
+      .map(j => ({ id: j.id, title: j.title }));
+    const pending = (this.userQueues.get(chatId) || []).map(j => ({ id: j.id, title: j.title }));
+    return { active, pending };
+  }
+
+  /**
+   * Batalkan job yang MASIH PENDING (belum jalan) milik user. Job yang sedang berjalan
+   * tidak bisa dibatalkan di tengah jalan. Return { ok, title } atau { ok:false, reason }.
+   */
+  cancelJob(chatId, jobId) {
+    const id = parseInt(jobId, 10);
+    if (this.activeJobs.has(id)) return { ok: false, reason: 'running' };
+    const q = this.userQueues.get(chatId);
+    if (!q) return { ok: false, reason: 'notfound' };
+    const idx = q.findIndex(j => j.id === id);
+    if (idx === -1) return { ok: false, reason: 'notfound' };
+    const [job] = q.splice(idx, 1);
+    if (q.length === 0) this.userQueues.delete(chatId);
+    return { ok: true, title: job.title };
+  }
+
   addJob(chatId, title, execFunc, bot) {
     if (this.userLoad(chatId) >= this.maxPerUser) {
       bot.sendMessage(chatId,
@@ -423,6 +458,7 @@ const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext
 const eroBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const xnxxBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const aiHistory = new Map();       // chatId -> [{role:'user'|'assistant', content}] (memori AI, maks 6)
+const retryActions = new Map();    // chatId -> fn() untuk tombol "🔁 Coba Lagi"
 const animeBrowseCache = new Map(); // chatId -> { results, episodes, seriesIdx, oploLinks, oploEpNum }
 const aggregateCache = new Map(); // chatId -> { query, sources: { cosplay: [], r34: [], pinterest: [] } }
 
@@ -455,6 +491,7 @@ function sweepStaleStates() {
     xnxxBrowseCache.delete(chatId);
     aggregateCache.delete(chatId);
     aiHistory.delete(chatId);
+    retryActions.delete(chatId);
     stateTouchedAt.delete(chatId);
   }
 }
@@ -2011,8 +2048,10 @@ async function doPinSendItem(bot, chatId, pin) {
     }
   } catch (e) {
     log.error(`[Pinterest] send error: ${e.message}`);
+    setRetry(chatId, () => doPinSendItem(bot, chatId, pin));
     bot.editMessageText(`❌ Gagal kirim: <code>${escHtml(e.message.slice(0, 200))}</code>`, {
       chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: retryKeyboardRows() },
     }).catch(() => { });
   }
 }
@@ -2477,8 +2516,10 @@ async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
       await rimraf(jobDir);
     } catch (err) {
       log.error(`[Javtiful] download error: ${err.message}`);
+      setRetry(chatId, () => doJavDownload(bot, chatId, item, sourceIdx));
       bot.editMessageText(`❌ Download gagal: <code>${escHtml(err.message.slice(0, 200))}</code>`, {
         chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: retryKeyboardRows() },
       }).catch(() => { });
       await rimraf(jobDir);
     }
@@ -2713,8 +2754,10 @@ async function doEroDownload(bot, chatId, item) {
       await rimraf(jobDir);
     } catch (err) {
       log.error(`[EroThots] download error: ${err.message}`);
+      setRetry(chatId, () => doEroDownload(bot, chatId, item));
       bot.editMessageText(`❌ Download gagal: <code>${escHtml(err.message.slice(0, 200))}</code>`, {
         chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: retryKeyboardRows() },
       }).catch(() => { });
       await rimraf(jobDir);
     }
@@ -2930,8 +2973,10 @@ async function doXnxxDownload(bot, chatId, item) {
       await rimraf(jobDir);
     } catch (err) {
       log.error(`[XNXX] download error: ${err.message}`);
+      setRetry(chatId, () => doXnxxDownload(bot, chatId, item));
       bot.editMessageText(`❌ Download gagal: <code>${escHtml(err.message.slice(0, 200))}</code>`, {
         chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: retryKeyboardRows() },
       }).catch(() => { });
       await rimraf(jobDir);
     }
@@ -4013,6 +4058,82 @@ function buildDashboardText() {
     `👥 Pengguna terdaftar: <b>${users}</b>\n━━━━━━━━━━━━━━━━━━`;
 }
 
+/**
+ * Bangun tampilan Antrean (text + keyboard) untuk seorang user, lengkap tombol Cancel
+ * per job pending miliknya. Dipakai /tasks & callback tasks_refresh.
+ */
+function buildTasksView(chatId) {
+  const activeArr = Array.from(queueManager.activeJobs.values());
+  const pending = queueManager.snapshotQueues();
+  const myActive = queueManager.userActiveJobs(chatId);
+  const myPending = queueManager.userPendingJobs(chatId);
+
+  let text = `🚦 <b>Dasbor Antrean</b>\n`;
+  text += `📊 Global: ${activeArr.length}/${queueManager.maxConcurrency} aktif · ${pending.reduce((s, p) => s + p.pending, 0)} antri\n\n`;
+
+  if (myActive.length) {
+    text += `<b>🫵 Job kamu (berjalan):</b>\n`;
+    myActive.forEach(j => { text += `▶️ #${j.id} · ${escHtml(j.title.slice(0, 50))}\n`; });
+    text += '\n';
+  }
+  if (myPending.length) {
+    text += `<b>🫵 Antrean kamu (menunggu):</b>\n`;
+    myPending.forEach(j => { text += `⏳ #${j.id} · ${escHtml(j.title.slice(0, 50))}\n`; });
+    text += '\n';
+  }
+
+  // Job user lain (ringkas, tanpa judul)
+  const otherActive = activeArr.length - myActive.length;
+  const otherPending = pending.reduce((s, p) => s + p.pending, 0) - myPending.length;
+  if (otherActive > 0 || otherPending > 0) {
+    text += `<i>User lain: ${otherActive} berjalan · ${otherPending} antri</i>\n`;
+  }
+  if (activeArr.length === 0 && pending.length === 0) text += `<i>Tidak ada job aktif.</i>`;
+
+  const rows = [];
+  // Tombol cancel per job pending milik user (maks 5 biar tidak kepanjangan).
+  myPending.slice(0, 5).forEach(j => {
+    rows.push([{ text: `❌ Batal #${j.id} · ${j.title.slice(0, 28)}`, callback_data: `qcancel_${j.id}` }]);
+  });
+  if (myPending.length > 1) rows.push([{ text: '❌ Batalkan semua antrean saya', callback_data: 'qcancel_all' }]);
+  rows.push([
+    { text: '🔄 Refresh', callback_data: 'tasks_refresh' },
+    { text: '🔙 Menu', callback_data: 'menu_awal' },
+  ]);
+
+  return { text, keyboard: { inline_keyboard: rows } };
+}
+
+/**
+ * Simpan aksi terakhir yang bisa diulang + bangun tombol "Coba Lagi".
+ */
+function setRetry(chatId, fn) { retryActions.set(chatId, fn); }
+function retryKeyboardRows() {
+  return [[{ text: '🔁 Coba Lagi', callback_data: 'retry_last' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]];
+}
+
+/**
+ * Gacha lintas-sumber: pilih sumber acak lalu jalankan gacha-nya. Surprise total.
+ */
+async function doRandomGacha(bot, chatId) {
+  const pool = ['cosplay', 'jav', 'ero', 'xnxx', 'kemono'];
+  const src = pool[Math.floor(Math.random() * pool.length)];
+  log.info(`[GachaAny] user ${chatId} → ${src}`);
+  try {
+    if (src === 'jav') return await doJavGacha(bot, chatId, 'latest');
+    if (src === 'ero') return await doEroGacha(bot, chatId);
+    if (src === 'xnxx') return await doXnxxGacha(bot, chatId);
+    if (src === 'kemono') {
+      const urls = ['https://kemono.cr/patreon/user/3295915', 'https://kemono.cr/patreon/user/49965584'];
+      return await doKemonoGacha(bot, chatId, urls[Math.floor(Math.random() * urls.length)]);
+    }
+    return await doCosplayteleGacha(bot, chatId, 'random');
+  } catch (e) {
+    log.error(`[GachaAny] error: ${e.message}`);
+    bot.sendMessage(chatId, `❌ Gacha gagal: ${escHtml(e.message.slice(0, 120))}`, { parse_mode: 'HTML' }).catch(() => { });
+  }
+}
+
 async function sendMainMenu(bot, chatId) {
   const aiOn = groq.hasKey();
   const tip = aiOn
@@ -4031,7 +4152,10 @@ async function sendMainMenu(bot, chatId) {
   // baris 18+ (JAV/Ero/XNXX/R34), util download, lalu profil/antrean/util.
   const keyboard = [
     // Flagship: ketik bebas / smart search (AI)
-    [{ text: '🔎 Cari Apa Saja (AI)', callback_data: 'menu_search' }],
+    [
+      { text: '🔎 Cari Apa Saja (AI)', callback_data: 'menu_search' },
+      { text: '🎲 Gacha!', callback_data: 'gacha_any' },
+    ],
     // Cosplay (primary) — submenu terpadu (Search/Browse/Gacha)
     [
       { text: '📚 Cosplaytele', callback_data: 'menu_cosplaytele' },
@@ -4440,45 +4564,8 @@ function startBot() {
 
   // /tasks — lihat status antrean queue manager
   registerCommand({ name: 'tasks', description: '🚦 Pantau Dasbor Antrean', hasArg: false }, async (msg) => {
-    const activeArr = Array.from(queueManager.activeJobs.values());
-    const pending = queueManager.snapshotQueues();
-
-    let text = `🚦 <b>Dasbor Antrean</b>\n`;
-    text += `📊 Global: ${activeArr.length}/${queueManager.maxConcurrency} aktif · ${pending.reduce((s, p) => s + p.pending, 0)} antri\n\n`;
-
-    if (activeArr.length > 0) {
-      text += `<b>Sedang berjalan:</b>\n`;
-      activeArr.forEach(j => {
-        const mine = j.chatId === msg.chat.id ? '🫵 ' : '';
-        text += `${mine}#${j.id} · ${escHtml(j.title.slice(0, 50))}\n`;
-        if (j.chatId === msg.chat.id && j.progress) {
-          text += `   <i>${escHtml(j.progress.slice(0, 100))}</i>\n`;
-        }
-      });
-      text += '\n';
-    }
-
-    if (pending.length > 0) {
-      text += `<b>Antrean per user:</b>\n`;
-      pending.forEach(p => {
-        const mine = p.chatId === msg.chat.id ? '🫵 ' : '';
-        text += `${mine}User ${String(p.chatId).slice(-4)}: ${p.pending} job\n`;
-      });
-    }
-
-    if (activeArr.length === 0 && pending.length === 0) {
-      text += `<i>Tidak ada job aktif.</i>`;
-    }
-
-    const sentMsg = await bot.sendMessage(msg.chat.id, text, {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [[
-          { text: '🔄 Refresh', callback_data: 'tasks_refresh' },
-          { text: '🔙 Menu', callback_data: 'menu_awal' },
-        ]]
-      }
-    });
+    const view = buildTasksView(msg.chat.id);
+    const sentMsg = await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: view.keyboard });
     autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
   });
 
@@ -5094,6 +5181,24 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doCosplayteleGacha(bot, chatId, mode);
     }
+    // Gacha lintas-sumber (surprise total)
+    if (action === 'gacha_any') {
+      bot.answerCallbackQuery(query.id, { text: '🎲 Ngocok semua sumber...' }).catch(() => { });
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doRandomGacha(bot, chatId);
+    }
+    // Coba lagi aksi terakhir yang gagal
+    if (action === 'retry_last') {
+      const fn = retryActions.get(chatId);
+      if (!fn) {
+        return bot.answerCallbackQuery(query.id, { text: '⚠️ Tidak ada yang bisa diulang.', show_alert: true }).catch(() => { });
+      }
+      bot.answerCallbackQuery(query.id, { text: '🔁 Mencoba lagi...' }).catch(() => { });
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      retryActions.delete(chatId);
+      try { return await fn(); } catch (e) { log.warn(`[retry] gagal: ${e.message}`); }
+      return;
+    }
     // Cosplaytele "More from <cosplayer>" via SEARCH (cosplayer tidak punya kategori sendiri)
     if (action.startsWith('cptcossrch_')) {
       const idx = action.replace('cptcossrch_', '');
@@ -5166,42 +5271,41 @@ function startBot() {
     }
     // Tasks refresh — re-render dashboard
     if (action === 'tasks_refresh') {
-      const activeArr = Array.from(queueManager.activeJobs.values());
-      const pending = queueManager.snapshotQueues();
-      let text = `🚦 <b>Dasbor Antrean</b>\n`;
-      text += `📊 Global: ${activeArr.length}/${queueManager.maxConcurrency} aktif · ${pending.reduce((s, p) => s + p.pending, 0)} antri\n\n`;
-      if (activeArr.length > 0) {
-        text += `<b>Sedang berjalan:</b>\n`;
-        activeArr.forEach(j => {
-          const mine = j.chatId === chatId ? '🫵 ' : '';
-          text += `${mine}#${j.id} · ${escHtml(j.title.slice(0, 50))}\n`;
-          if (j.chatId === chatId && j.progress) text += `   <i>${escHtml(j.progress.slice(0, 100))}</i>\n`;
-        });
-        text += '\n';
-      }
-      if (pending.length > 0) {
-        text += `<b>Antrean per user:</b>\n`;
-        pending.forEach(p => {
-          const mine = p.chatId === chatId ? '🫵 ' : '';
-          text += `${mine}User ${String(p.chatId).slice(-4)}: ${p.pending} job\n`;
-        });
-      }
-      if (activeArr.length === 0 && pending.length === 0) text += `<i>Tidak ada job aktif.</i>`;
-      const tasksKeyboard = {
-        inline_keyboard: [[
-          { text: '🔄 Refresh', callback_data: 'tasks_refresh' },
-          { text: '🔙 Menu', callback_data: 'menu_awal' },
-        ]]
-      };
-      // Menu utama dikirim sebagai foto (reze.jpg) → editMessageText tidak bisa
-      // mengedit caption foto. Kalau pesan asal foto, hapus & kirim pesan teks baru.
+      const view = buildTasksView(chatId);
       if (query.message.photo) {
         bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-        await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: tasksKeyboard }).catch(() => { });
+        await bot.sendMessage(chatId, view.text, { parse_mode: 'HTML', reply_markup: view.keyboard }).catch(() => { });
       } else {
-        await bot.editMessageText(text, {
+        await bot.editMessageText(view.text, {
           chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML',
-          reply_markup: tasksKeyboard
+          reply_markup: view.keyboard
+        }).catch(() => { });
+      }
+      return;
+    }
+    // Cancel satu job pending milik user
+    if (action.startsWith('qcancel_')) {
+      const arg = action.replace('qcancel_', '');
+      if (arg === 'all') {
+        const jobs = queueManager.userPendingJobs(chatId);
+        let n = 0;
+        for (const j of jobs) { if (queueManager.cancelJob(chatId, j.id).ok) n++; }
+        bot.answerCallbackQuery(query.id, { text: `❌ ${n} antrean dibatalkan` }).catch(() => { });
+      } else {
+        const r = queueManager.cancelJob(chatId, arg);
+        const msg = r.ok ? `❌ Dibatalkan: ${r.title.slice(0, 40)}`
+          : r.reason === 'running' ? '⚠️ Job sudah berjalan, tidak bisa dibatalkan.'
+            : '⚠️ Job tidak ditemukan (mungkin sudah selesai).';
+        bot.answerCallbackQuery(query.id, { text: msg, show_alert: r.reason === 'running' }).catch(() => { });
+      }
+      // Re-render antrean
+      const view = buildTasksView(chatId);
+      if (query.message.photo) {
+        bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+        await bot.sendMessage(chatId, view.text, { parse_mode: 'HTML', reply_markup: view.keyboard }).catch(() => { });
+      } else {
+        await bot.editMessageText(view.text, {
+          chat_id: chatId, message_id: query.message.message_id, parse_mode: 'HTML', reply_markup: view.keyboard
         }).catch(() => { });
       }
       return;
