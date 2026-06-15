@@ -32,7 +32,7 @@ const log = {
 const cfg = {
   enabled: (process.env.WATCHER_ENABLED ?? '1') === '1',
   intervalMin: Math.max(5, parseInt(process.env.WATCHER_INTERVAL_MIN || '15', 10)),
-  sources: (process.env.WATCHER_SOURCES || 'cosplaytele,javtiful,otakudesu')
+  sources: (process.env.WATCHER_SOURCES || 'javtiful,otakudesu')
     .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
   maxNotify: parseInt(process.env.WATCHER_MAX_NOTIFY || '5', 10),
   seenLimit: parseInt(process.env.WATCHER_SEEN_LIMIT || '300', 10),
