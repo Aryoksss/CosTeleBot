@@ -7,4 +7,5 @@ browser_profile_r34/
 stats.json
 history.json
 watcher.json
+file_id_cache.json
 *.tmp

@@ -185,6 +185,7 @@ const backup = require('./utils/backup');
 const dashboard = require('./utils/dashboard');
 const browserReaper = require('./utils/browserReaper');
 const watcher = require('./utils/watcher');
+const fileCache = require('./utils/fileCache');
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -879,24 +880,59 @@ async function sendOne(bot, chatId, filePath, explicitCaption = null, allowSplit
 
   if (isVideo(filePath) && size < CONFIG.VIDEO_MAX_BYTES) {
     try {
-      await bot.sendVideo(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+      const m = await bot.sendVideo(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+      const fid = m?.video?.file_id || m?.document?.file_id;
+      if (fid) return { fileId: fid, type: m?.video ? 'video' : 'document' };
     } catch (e) {
       log.warn(`Gagal sendVideo (${name}), fallback doc: ${e.message}`);
-      try { await bot.sendDocument(chatId, fs.createReadStream(filePath), { caption: finalCaption }); } catch (_) { }
+      try {
+        const m = await bot.sendDocument(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+        if (m?.document?.file_id) return { fileId: m.document.file_id, type: 'document' };
+      } catch (_) { }
     }
   } else if (isImage(filePath) && size < CONFIG.PHOTO_MAX_BYTES) {
     try {
       // Kirim sebagai foto dari stream
-      await bot.sendPhoto(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+      const m = await bot.sendPhoto(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+      const ph = m?.photo?.[m.photo.length - 1]?.file_id;
+      if (ph) return { fileId: ph, type: 'photo' };
     }
     catch (e) {
       try {
         log.warn(`Gagal sendPhoto (${name}), fallback document: ${e.message}`);
-        await bot.sendDocument(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+        const m = await bot.sendDocument(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+        if (m?.document?.file_id) return { fileId: m.document.file_id, type: 'document' };
       } catch (_) { }
     }
   } else {
-    try { await bot.sendDocument(chatId, fs.createReadStream(filePath), { caption: finalCaption }); } catch (_) { }
+    try {
+      const m = await bot.sendDocument(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+      if (m?.document?.file_id) return { fileId: m.document.file_id, type: 'document' };
+    } catch (_) { }
+  }
+  return null;
+}
+
+/**
+ * Coba kirim konten dari cache file_id Telegram (tanpa download). Return true kalau berhasil.
+ * Kalau file_id ternyata stale/invalid, entry dihapus dan return false (caller download ulang).
+ * @param {string} key       kunci cache, mis. `pin:123` / `jav:456:1080p`
+ * @param {string} caption   caption (plain text)
+ */
+async function trySendCachedFile(bot, chatId, key, caption) {
+  const entry = fileCache.get(key);
+  if (!entry || !entry.fileId) return false;
+  try {
+    if (entry.type === 'video') await bot.sendVideo(chatId, entry.fileId, { caption });
+    else if (entry.type === 'photo') await bot.sendPhoto(chatId, entry.fileId, { caption });
+    else await bot.sendDocument(chatId, entry.fileId, { caption });
+    fileCache.bump(key);
+    log.info(`[fileCache] HIT ${key} → kirim tanpa download`);
+    return true;
+  } catch (e) {
+    log.warn(`[fileCache] file_id stale (${key}): ${e.message} → hapus, download ulang`);
+    fileCache.remove(key);
+    return false;
   }
 }
 
@@ -1856,6 +1892,15 @@ async function doPinSearch(bot, chatId, query, bookmark = null) {
  * video di-download ke disk dulu lalu streaming upload agar reliable di VPS.
  */
 async function doPinSendItem(bot, chatId, pin) {
+  const cacheKey = `pin:${pin.id}`;
+  const plainCap = `📌 ${pin.title.slice(0, 200)}`;
+
+  // Dedup: kalau pin ini pernah dikirim, kirim ulang dari file_id Telegram (tanpa download).
+  if (await trySendCachedFile(bot, chatId, cacheKey, plainCap)) {
+    statsDb.addGacha(chatId);
+    return;
+  }
+
   const loadMsg = await bot.sendMessage(chatId, `📌 <b>Mengirim...</b>`, { parse_mode: 'HTML' });
 
   try {
@@ -1865,10 +1910,12 @@ async function doPinSendItem(bot, chatId, pin) {
     if (pin.type === 'image') {
       // Telegram bisa fetch URL image langsung — lebih cepat daripada download dulu
       try {
-        await bot.sendPhoto(chatId, pin.imageUrl, {
+        const m = await bot.sendPhoto(chatId, pin.imageUrl, {
           caption: `📌 <b>${caption}</b>\n<a href="${pin.pinUrl}">Buka di Pinterest</a>`,
           parse_mode: 'HTML',
         });
+        const fid = m?.photo?.[m.photo.length - 1]?.file_id;
+        if (fid) fileCache.set(cacheKey, fid, 'photo', pin.title.slice(0, 80));
         bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
         return;
       } catch (e) {
@@ -1882,10 +1929,12 @@ async function doPinSendItem(bot, chatId, pin) {
         const sz = fs.statSync(dest).size;
         statsDb.addDownloadSize(chatId, sz);
         try {
-          await bot.sendPhoto(chatId, fs.createReadStream(dest), {
+          const m = await bot.sendPhoto(chatId, fs.createReadStream(dest), {
             caption: `📌 <b>${caption}</b>\n<a href="${pin.pinUrl}">Buka di Pinterest</a>`,
             parse_mode: 'HTML',
           });
+          const fid = m?.photo?.[m.photo.length - 1]?.file_id;
+          if (fid) fileCache.set(cacheKey, fid, 'photo', pin.title.slice(0, 80));
         } catch (e2) {
           await bot.sendDocument(chatId, fs.createReadStream(dest), {
             caption: `📌 <b>${caption}</b>`, parse_mode: 'HTML',
@@ -1915,8 +1964,9 @@ async function doPinSendItem(bot, chatId, pin) {
       const sz = fs.statSync(dest).size;
       statsDb.addDownloadSize(chatId, sz);
 
-      // sendOne otomatis split kalau melebihi limit upload.
-      await sendOne(bot, chatId, dest, `📌 ${pin.title.slice(0, 200)}`);
+      // sendOne otomatis split kalau melebihi limit upload. Simpan file_id kalau dikirim utuh.
+      const sent = await sendOne(bot, chatId, dest, `📌 ${pin.title.slice(0, 200)}`);
+      if (sent && sent.fileId) fileCache.set(cacheKey, sent.fileId, sent.type, pin.title.slice(0, 80));
       bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
       await rimraf(jobDir);
     }
@@ -2335,6 +2385,11 @@ async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
     return bot.sendMessage(chatId, '❌ Source video tidak tersedia.');
   }
 
+  // Dedup: kalau video+source ini pernah dikirim, kirim ulang dari file_id (tanpa queue/download).
+  const cacheKey = `jav:${item.id}:${source.label}`;
+  const cachedCap = `🎥 ${detail.title} (${source.label})`;
+  if (await trySendCachedFile(bot, chatId, cacheKey, cachedCap)) return;
+
   queueManager.addJob(chatId, `Javtiful: ${detail.title.slice(0, 40)}`, async (jobId) => {
     const jobDir = path.join(CONFIG.TEMP_DIR, 'jav_' + jobId);
     await fsp.mkdir(jobDir, { recursive: true });
@@ -2377,7 +2432,8 @@ async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
       // sendOne menangani oversize otomatis: split via ffmpeg jadi beberapa part.
       // Caption plain-text (sendOne tidak set parse_mode HTML).
       const caption = `🎥 ${detail.title} (${source.label}, ${sizeMB} MB)`;
-      await sendOne(bot, chatId, dest, caption);
+      const sent = await sendOne(bot, chatId, dest, caption);
+      if (sent && sent.fileId) fileCache.set(cacheKey, sent.fileId, sent.type, detail.title.slice(0, 80));
       bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
       await rimraf(jobDir);
     } catch (err) {
