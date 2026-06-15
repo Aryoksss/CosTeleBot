@@ -4460,42 +4460,57 @@ function startBot() {
 
   /**
    * Bulk-delete message lewat endpoint Bot API `deleteMessages` (batch max 100).
-   * Lebih cepat + jauh lebih ramah rate-limit daripada loop deleteMessage per pesan.
-   * Silent-fail per batch (pesan yg tidak bisa dihapus akan diabaikan).
+   * Lebih cepat + ramah rate-limit daripada loop per pesan. Mencakup margin di ATAS
+   * fromId (status/balasan susulan) + `count` ID ke bawah. Fallback per-id di-await &
+   * di-pace supaya benar-benar terhapus (bukan ditembak lalu ditinggal).
+   *
+   * Catatan: Telegram melarang bot menghapus pesan > 48 jam (khususnya pesan user) —
+   * pesan setua itu akan tetap tertinggal (batasan platform, bukan bug).
    */
-  async function bulkWipeMessages(bot, chatId, fromId, count = 800) {
+  async function bulkWipeMessages(bot, chatId, fromId, count = 1500) {
+    const top = fromId + 20;                       // tangkap status + balasan yang lebih baru
+    const bottom = Math.max(1, fromId - count);
     const ids = [];
-    const start = Math.max(1, fromId - count);
-    for (let i = fromId; i > start; i--) ids.push(i);
+    for (let i = top; i >= bottom; i--) ids.push(i);
+
+    let deleted = 0;
     const chunks = [];
     for (let i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+
     for (const chunk of chunks) {
+      let batchOk = false;
       try {
         if (typeof bot.deleteMessages === 'function') {
           await bot.deleteMessages(chatId, chunk);
         } else {
-          // Fallback untuk versi lib lama
-          await bot._request('deleteMessages', {
-            form: { chat_id: chatId, message_ids: JSON.stringify(chunk) }
-          });
+          await bot._request('deleteMessages', { form: { chat_id: chatId, message_ids: JSON.stringify(chunk) } });
         }
+        batchOk = true;
+        deleted += chunk.length;
       } catch (e) {
-        // Fallback per-id bila server menolak batch (mis. pesan di luar 48 jam window).
+        // Batch gagal kalau ada 1 id yang tak bisa dihapus (>48 jam / sudah hilang).
+        // Fallback per-id (di-await + jeda kecil) agar yang bisa dihapus tetap kehapus.
         for (const id of chunk) {
-          bot.deleteMessage(chatId, id).catch(() => { });
+          try { await bot.deleteMessage(chatId, id); deleted++; }
+          catch (_) { /* id ini tak bisa dihapus, lanjut */ }
+          await sleep(25);
         }
       }
-      await sleep(120); // sedikit jeda antar batch agar ramah ke API
+      await sleep(batchOk ? 80 : 40);
     }
+    return deleted;
   }
 
-  registerCommand({ name: 'clear', description: '🧹 Bersihkan Seluruh Chat', hasArg: false, autoClean: false }, async (msg) => {
-    const sentMsg = await bot.sendMessage(msg.chat.id, '🧹 <i>Tornado Pembersih Aktif! Menghapus hampir seribu riwayat pesan terakhir secara mendalam...</i>', { parse_mode: 'HTML' });
-    await bulkWipeMessages(bot, msg.chat.id, msg.message_id, 1000);
-    // Hapus chat sapu bersihnya juga setelah beberapa detik
-    setTimeout(() => {
-      bot.deleteMessage(msg.chat.id, sentMsg.message_id).catch(() => { });
-    }, 4000);
+  registerCommand({ name: 'clear', description: '🧹 Bersihkan Seluruh Chat', autoClean: false }, async (msg, arg) => {
+    const depth = Math.min(10000, Math.max(200, parseInt(arg, 10) || 1500));
+    const sentMsg = await bot.sendMessage(msg.chat.id, `🧹 <i>Membersihkan riwayat chat (hingga ${depth} pesan terakhir)...</i>`, { parse_mode: 'HTML' });
+    const n = await bulkWipeMessages(bot, msg.chat.id, msg.message_id, depth);
+    // Info hasil singkat, lalu hapus juga pesan info ini.
+    const info = await bot.sendMessage(msg.chat.id,
+      `✅ <b>${n}</b> pesan dihapus.\n<i>Pesan > 48 jam tidak bisa dihapus bot (batasan Telegram).</i>`,
+      { parse_mode: 'HTML' }).catch(() => null);
+    bot.deleteMessage(msg.chat.id, sentMsg.message_id).catch(() => { });
+    if (info) setTimeout(() => bot.deleteMessage(msg.chat.id, info.message_id).catch(() => { }), 6000);
   });
 
 
