@@ -3593,12 +3593,17 @@ async function sendMenuWithThumb(bot, chatId, text, keyboard) {
 }
 
 async function sendMainMenu(bot, chatId) {
+  const aiOn = groq.hasKey();
+  const tip = aiOn
+    ? `💬 <b>Tip:</b> langsung ketik aja apa yang kamu mau —\n` +
+      `bot pakai AI buat ngerti & jalanin sendiri.\n` +
+      `Contoh: <code>cari ganyu</code> · <code>gacha cosplay</code> · <code>MIDE-232</code>\n\n`
+    : `💬 <b>Tip:</b> ketik kata kunci buat nyari langsung.\n` +
+      `Contoh: <code>cari ganyu</code> · <code>ganyu cosplay</code> · <code>MIDE-232</code>\n\n`;
   const text =
     `👋 <b>CosTele Bot</b>\n` +
     `<i>Multi-source media scraper</i>\n\n` +
-    `💬 <b>Tip:</b> langsung ketik aja apa yang kamu mau —\n` +
-    `bot pakai AI buat ngerti & jalanin sendiri.\n` +
-    `Contoh: <code>cari ganyu</code> · <code>gacha cosplay</code> · <code>MIDE-232</code>\n\n` +
+    tip +
     `Atau pilih menu di bawah 👇`;
 
   // Layout grouped per-kategori, baris dikelompokkan biar gampang dipindai:
