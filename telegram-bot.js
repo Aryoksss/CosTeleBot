@@ -809,6 +809,29 @@ function splitVideoBySize(filePath, partMaxBytes) {
 }
 
 /**
+ * Remux MP4 agar "faststart" (moov atom dipindah ke depan) supaya bisa di-stream/preview
+ * di Telegram tanpa download penuh. `-c copy` (tanpa re-encode) → cepat, kualitas sama.
+ * Return path file baru (atau null kalau gagal/ffmpeg absen). Caller wajib hapus file hasil.
+ */
+function faststartRemux(srcPath, timeoutMs = 120000) {
+  return new Promise((resolve) => {
+    if (!ffmpegAvailable()) return resolve(null);
+    const out = srcPath.replace(/(\.[^.]+)?$/, '') + '.fs.mp4';
+    const { spawn } = require('child_process');
+    const p = spawn('ffmpeg', ['-y', '-i', srcPath, '-c', 'copy', '-movflags', '+faststart', out], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    p.stderr.on('data', d => { err += d.toString(); if (err.length > 4000) err = err.slice(-4000); });
+    const to = setTimeout(() => { try { p.kill('SIGKILL'); } catch (_) {} resolve(null); }, timeoutMs);
+    p.on('error', () => { clearTimeout(to); resolve(null); });
+    p.on('close', code => {
+      clearTimeout(to);
+      if (code === 0 && fs.existsSync(out) && fs.statSync(out).size > 0) resolve(out);
+      else { try { fs.existsSync(out) && fs.unlinkSync(out); } catch (_) {} resolve(null); }
+    });
+  });
+}
+
+/**
  * Download video HLS (master m3u8) → MP4 via ffmpeg (-c copy, tanpa re-encode).
  * Dipakai untuk Pinterest yang hanya menyediakan HLS. Non-blocking (spawn async).
  * @returns {Promise<number>} ukuran file akhir (byte)
@@ -882,11 +905,22 @@ async function sendOne(bot, chatId, filePath, explicitCaption = null, allowSplit
   }
 
   if (isVideo(filePath) && size < CONFIG.VIDEO_MAX_BYTES) {
+    // Faststart remux supaya bisa di-stream/preview di Telegram tanpa download penuh.
+    // Default ON untuk file < FASTSTART_MAX_MB (remux file raksasa boros I/O). Matikan via FASTSTART=0.
+    let sendPath = filePath;
+    let fsTmp = null;
+    const fastMax = (parseInt(process.env.FASTSTART_MAX_MB || '500', 10)) * 1048576;
+    if (process.env.FASTSTART !== '0' && size <= fastMax) {
+      fsTmp = await faststartRemux(filePath);
+      if (fsTmp) sendPath = fsTmp;
+    }
     try {
-      const m = await bot.sendVideo(chatId, fs.createReadStream(filePath), { caption: finalCaption });
+      const m = await bot.sendVideo(chatId, fs.createReadStream(sendPath), { caption: finalCaption, supports_streaming: true });
       const fid = m?.video?.file_id || m?.document?.file_id;
+      if (fsTmp) { try { fs.unlinkSync(fsTmp); } catch (_) { } }
       if (fid) return { fileId: fid, type: m?.video ? 'video' : 'document' };
     } catch (e) {
+      if (fsTmp) { try { fs.unlinkSync(fsTmp); } catch (_) { } }
       log.warn(`Gagal sendVideo (${name}), fallback doc: ${e.message}`);
       try {
         const m = await bot.sendDocument(chatId, fs.createReadStream(filePath), { caption: finalCaption });
