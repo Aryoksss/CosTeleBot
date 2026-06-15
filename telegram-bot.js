@@ -33,6 +33,8 @@ class DownloadQueue {
     // Bottleneck nyata biasanya bandwidth + Telegram upload rate, bukan CPU.
     this.maxConcurrency = parseInt(process.env.QUEUE_CONCURRENCY || '6', 10);
     this.maxPerUser = parseInt(process.env.QUEUE_MAX_PER_USER || '8', 10);
+    this.premiumMaxPerUser = parseInt(process.env.QUEUE_MAX_PER_USER_PREMIUM || '20', 10);
+    this.isPremiumFn = null; // diisi dari startup: (chatId)=>statsDb.isPremium(chatId)
     // Pakai console.log langsung (bukan log.info) karena `log` belum didefinisikan saat constructor jalan.
     console.log(`\x1b[36m[Queue]\x1b[0m config: maxConcurrency=${this.maxConcurrency} maxPerUser=${this.maxPerUser}`);
   }
@@ -102,9 +104,10 @@ class DownloadQueue {
   }
 
   addJob(chatId, title, execFunc, bot) {
-    if (this.userLoad(chatId) >= this.maxPerUser) {
+    const limit = (this.isPremiumFn && this.isPremiumFn(chatId)) ? this.premiumMaxPerUser : this.maxPerUser;
+    if (this.userLoad(chatId) >= limit) {
       bot.sendMessage(chatId,
-        `⛔ <b>Antrean Penuh!</b> Anda hanya diizinkan menitipkan maksimal ${this.maxPerUser} tugas unduhan (termasuk yang sedang berjalan). Harap tunggu hingga yang lama selesai.`,
+        `⛔ <b>Antrean Penuh!</b> Maksimal ${limit} tugas unduhan sekaligus (termasuk yang berjalan). Tunggu yang lama selesai${this.isPremiumFn && this.isPremiumFn(chatId) ? '' : ', atau upgrade 💎 Premium untuk limit lebih tinggi'}.`,
         { parse_mode: 'HTML' }
       ).catch(() => { });
       return false;
@@ -130,17 +133,18 @@ class DownloadQueue {
   }
 
   /**
-   * Round-robin pick: user dengan queue non-empty + lastServed paling lama menang.
-   * User yang belum pernah dilayani (never in lastServed) dapat prioritas tertinggi.
+   * Round-robin pick: prioritaskan user premium, lalu yang paling lama tidak dilayani.
    */
   _pickNextUser() {
     let bestUser = null;
-    let bestTs = Infinity;
+    let bestKey = null; // [premiumRank(0=premium), lastServedTs]
     for (const [chatId, q] of this.userQueues.entries()) {
       if (q.length === 0) continue;
-      const ts = this.userLastServed.get(chatId) ?? 0; // never = 0
-      if (ts < bestTs) {
-        bestTs = ts;
+      const premium = this.isPremiumFn && this.isPremiumFn(chatId) ? 0 : 1;
+      const ts = this.userLastServed.get(chatId) ?? 0;
+      const key = [premium, ts];
+      if (bestKey === null || key[0] < bestKey[0] || (key[0] === bestKey[0] && key[1] < bestKey[1])) {
+        bestKey = key;
         bestUser = chatId;
       }
     }
@@ -222,6 +226,9 @@ const dashboard = require('./utils/dashboard');
 const browserReaper = require('./utils/browserReaper');
 const watcher = require('./utils/watcher');
 const fileCache = require('./utils/fileCache');
+const cryptopay = require('./utils/cryptopay');
+// Premium gating untuk queue (prioritas + limit lebih tinggi).
+queueManager.isPremiumFn = (chatId) => statsDb.isPremium(chatId);
 
 const MENU_THUMB_PATH = path.join(__dirname, 'reze.jpg');
 
@@ -4035,6 +4042,8 @@ function buildDashboardText() {
 
   let users = 0;
   try { users = Object.keys(JSON.parse(fs.readFileSync(path.join(__dirname, 'stats.json'), 'utf8'))).length; } catch (_) { }
+  let premiumCount = 0;
+  try { premiumCount = statsDb.listPremium().length; } catch (_) { }
 
   const provs = [];
   if (process.env.GROQ_API_KEY) provs.push('Groq');
@@ -4055,7 +4064,8 @@ function buildDashboardText() {
     `✅ Total job selesai: <b>${botStats.totalJobs || 0}</b>\n` +
     `🚦 Antrean: <b>${active}</b> aktif · ${pending} menunggu\n` +
     `♻️ Cache file_id: ${fc.entries} entri · ${fc.totalHits} hit (hemat re-upload)\n` +
-    `👥 Pengguna terdaftar: <b>${users}</b>\n━━━━━━━━━━━━━━━━━━`;
+    `👥 Pengguna terdaftar: <b>${users}</b>\n` +
+    `💎 Premium aktif: <b>${premiumCount}</b>\n━━━━━━━━━━━━━━━━━━`;
 }
 
 /**
@@ -4134,6 +4144,106 @@ async function doRandomGacha(bot, chatId) {
   }
 }
 
+// ─── PREMIUM (Crypto Pay) ────────────────────────────────────────────────────
+const PREMIUM_PLANS = [
+  { days: 7, price: 1 },
+  { days: 30, price: 3 },
+  { days: 90, price: 7 },
+];
+const pendingPremium = new Map(); // invoiceId -> { chatId, days, createdAt }
+
+function fmtDate(ts) {
+  try { return new Date(ts).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }); }
+  catch (_) { return '-'; }
+}
+
+/** Aktifkan premium + notifikasi user (idempoten via pendingPremium). */
+function activatePremium(bot, chatId, days, invoiceId) {
+  const until = statsDb.setPremium(chatId, days);
+  if (invoiceId) pendingPremium.delete(invoiceId);
+  bot.sendMessage(chatId,
+    `💎 <b>Premium aktif!</b>\nBerlaku sampai <b>${fmtDate(until)}</b>.\n\nNikmati: prioritas antrean + limit unduhan lebih tinggi. Makasih sudah dukung bot! 🙏`,
+    { parse_mode: 'HTML' }).catch(() => { });
+  log.ok(`[Premium] user ${chatId} +${days}d → ${fmtDate(until)}`);
+}
+
+async function doPremiumMenu(bot, chatId) {
+  const active = statsDb.isPremium(chatId);
+  const until = statsDb.getPremiumUntil(chatId);
+  let text = `💎 <b>CosTele Premium</b>\n\n`;
+  text += active
+    ? `Status: ✅ <b>AKTIF</b> sampai ${fmtDate(until)}\n\n`
+    : `Status: ❌ Belum premium\n\n`;
+  text += `<b>Keuntungan:</b>\n` +
+    `• 🚦 Prioritas antrean (didahulukan)\n` +
+    `• 📦 Limit unduhan paralel lebih tinggi (${queueManager.premiumMaxPerUser} vs ${queueManager.maxPerUser})\n\n`;
+
+  const buttons = [];
+  if (cryptopay.isEnabled()) {
+    text += `Pilih paket (bayar via crypto, ${cryptopay.asset()}):`;
+    PREMIUM_PLANS.forEach(p => {
+      buttons.push([{ text: `${p.days} hari · ${p.price} ${cryptopay.asset()}`, callback_data: `buyprem_${p.days}` }]);
+    });
+  } else {
+    text += `<i>Pembayaran otomatis belum aktif. Hubungi admin untuk aktivasi manual.</i>`;
+  }
+  buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+  const sentMsg = await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+  autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+}
+
+async function doBuyPremium(bot, chatId, days) {
+  const plan = PREMIUM_PLANS.find(p => p.days === days);
+  if (!plan) return bot.sendMessage(chatId, '⚠️ Paket tidak valid.').catch(() => { });
+  if (!cryptopay.isEnabled()) return bot.sendMessage(chatId, '⚠️ Pembayaran belum dikonfigurasi.').catch(() => { });
+
+  const loadMsg = await bot.sendMessage(chatId, '💳 <b>Membuat invoice...</b>', { parse_mode: 'HTML' });
+  try {
+    const inv = await cryptopay.createInvoice(plan.price, `CosTele Premium ${days} hari`, `${chatId}:${days}`);
+    const payUrl = inv.bot_invoice_url || inv.pay_url || inv.mini_app_invoice_url || inv.web_app_invoice_url;
+    pendingPremium.set(String(inv.invoice_id), { chatId, days, createdAt: Date.now() });
+
+    await bot.editMessageText(
+      `💎 <b>Premium ${days} hari</b> — ${plan.price} ${cryptopay.asset()}\n\n` +
+      `1. Tap <b>Bayar</b> → selesaikan di CryptoBot\n` +
+      `2. Premium aktif otomatis begitu lunas (atau tap "Cek").\n\n` +
+      `<i>Invoice berlaku 1 jam.</i>`,
+      {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: `💳 Bayar ${plan.price} ${cryptopay.asset()}`, url: payUrl }],
+            [{ text: '🔄 Cek Pembayaran', callback_data: `prempoll_${inv.invoice_id}_${days}` }],
+            [{ text: '🔙 Menu', callback_data: 'menu_awal' }],
+          ]
+        }
+      }
+    );
+  } catch (e) {
+    log.error(`[Premium] createInvoice gagal: ${e.message}`);
+    bot.editMessageText(`❌ Gagal membuat invoice: ${escHtml(e.message.slice(0, 150))}`, {
+      chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+    }).catch(() => { });
+  }
+}
+
+/** Poller: cek invoice pending → aktifkan kalau lunas, bersihkan kalau kadaluarsa. */
+async function pollPremiumInvoices(bot) {
+  if (!cryptopay.isEnabled() || pendingPremium.size === 0) return;
+  for (const [invoiceId, info] of [...pendingPremium.entries()]) {
+    try {
+      const inv = await cryptopay.getInvoice(invoiceId);
+      if (inv && inv.status === 'paid') {
+        activatePremium(bot, info.chatId, info.days, invoiceId);
+      } else if (!inv || inv.status === 'expired' || Date.now() - info.createdAt > 3700000) {
+        pendingPremium.delete(invoiceId); // bersihkan yang kadaluarsa
+      }
+    } catch (e) {
+      log.warn(`[Premium] poll #${invoiceId} error: ${e.message}`);
+    }
+  }
+}
+
 async function sendMainMenu(bot, chatId) {
   const aiOn = groq.hasKey();
   const tip = aiOn
@@ -4173,10 +4283,11 @@ async function sendMainMenu(bot, chatId) {
       { text: '🟦 XNXX', callback_data: 'xnxx_menu' },
       { text: '🎬 R34', callback_data: 'menu_r34' },
     ],
-    // Download manual + profil
+    // Download manual + profil + premium
     [
       { text: '📥 Terabox', callback_data: 'menu_terabox' },
       { text: '👤 Profil', callback_data: 'menu_profile' },
+      { text: '💎 Premium', callback_data: 'menu_premium' },
     ],
     // Util
     [
@@ -4222,6 +4333,15 @@ function startBot() {
 
   // Jaring pengaman: bersihkan proses Chromium (Playwright) yang nyangkut.
   browserReaper.startBrowserReaper();
+
+  // Premium: verifikasi token Crypto Pay + poller cek invoice tiap 15 detik.
+  if (cryptopay.isEnabled()) {
+    cryptopay.getMe().then(me => log.ok(`[CryptoPay] terhubung sebagai app "${me.name || me.app_id || 'ok'}"`))
+      .catch(e => log.warn(`[CryptoPay] token gagal diverifikasi: ${e.message}`));
+    setInterval(() => pollPremiumInvoices(bot).catch(() => { }), 15000);
+  } else {
+    log.info('[CryptoPay] CRYPTOPAY_TOKEN kosong → fitur premium berbayar nonaktif (pakai /grant manual).');
+  }
 
   // Auto-notify post/episode baru ke admin (polling berkala).
   watcher.startWatcher({
@@ -4546,6 +4666,26 @@ function startBot() {
   registerCommand({ name: 'stat', description: '💻 Dashboard bot (admin)', adminOnly: true, hasArg: false }, async (msg) => {
     const sentMsg = await bot.sendMessage(msg.chat.id, buildDashboardText(), { parse_mode: 'HTML' });
     autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
+  });
+
+  // /grant <userid> <hari> — aktifkan/perpanjang premium manual (admin).
+  registerCommand({ name: 'grant', description: '💎 Grant premium (admin)', adminOnly: true, hasArg: true }, async (msg, arg) => {
+    const chatId = msg.chat.id;
+    const m = String(arg || '').trim().match(/^(\d+)\s+(\d+)$/);
+    if (!m) return bot.sendMessage(chatId, 'Format: <code>/grant &lt;user_id&gt; &lt;hari&gt;</code>\nContoh: <code>/grant 6663343995 30</code>', { parse_mode: 'HTML' });
+    const targetId = m[1]; const days = parseInt(m[2], 10);
+    const until = statsDb.setPremium(targetId, days);
+    bot.sendMessage(chatId, `✅ Premium <b>${targetId}</b> +${days} hari → ${fmtDate(until)}`, { parse_mode: 'HTML' });
+    bot.sendMessage(targetId, `💎 <b>Premium aktif!</b> Berlaku sampai <b>${fmtDate(until)}</b>. Makasih! 🙏`, { parse_mode: 'HTML' }).catch(() => { });
+  });
+
+  // /revoke <userid> — cabut premium (admin).
+  registerCommand({ name: 'revoke', description: '💎 Cabut premium (admin)', adminOnly: true, hasArg: true }, async (msg, arg) => {
+    const chatId = msg.chat.id;
+    const targetId = String(arg || '').trim();
+    if (!/^\d+$/.test(targetId)) return bot.sendMessage(chatId, 'Format: <code>/revoke &lt;user_id&gt;</code>', { parse_mode: 'HTML' });
+    statsDb.revokePremium(targetId);
+    bot.sendMessage(chatId, `✅ Premium <b>${targetId}</b> dicabut.`, { parse_mode: 'HTML' });
   });
 
   registerCommand({ name: 'stats', description: '🔰 Lihat Profil', hasArg: false }, async (msg) => {
@@ -5202,10 +5342,34 @@ function startBot() {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return doRandomGacha(bot, chatId);
     }
+    // ── Premium ──
+    if (action === 'menu_premium') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doPremiumMenu(bot, chatId);
+    }
+    if (action.startsWith('buyprem_')) {
+      const days = parseInt(action.replace('buyprem_', ''), 10);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return doBuyPremium(bot, chatId, days);
+    }
+    if (action.startsWith('prempoll_')) {
+      const [, invoiceId, daysStr] = action.split('_');
+      const days = parseInt(daysStr, 10);
+      try {
+        const paid = await cryptopay.isPaid(invoiceId);
+        if (paid) {
+          bot.answerCallbackQuery(query.id, { text: '✅ Pembayaran diterima!' }).catch(() => { });
+          bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+          return activatePremium(bot, chatId, days, invoiceId);
+        }
+        return bot.answerCallbackQuery(query.id, { text: '⏳ Belum terbayar. Selesaikan dulu di CryptoBot, lalu cek lagi.', show_alert: true }).catch(() => { });
+      } catch (e) {
+        return bot.answerCallbackQuery(query.id, { text: `⚠️ ${e.message.slice(0, 80)}`, show_alert: true }).catch(() => { });
+      }
+    }
     // Coba lagi aksi terakhir yang gagal
     if (action === 'retry_last') {
-      const fn = retryActions.get(chatId);
-      if (!fn) {
+      const fn = retryActions.get(chatId);      if (!fn) {
         return bot.answerCallbackQuery(query.id, { text: '⚠️ Tidak ada yang bisa diulang.', show_alert: true }).catch(() => { });
       }
       bot.answerCallbackQuery(query.id, { text: '🔁 Mencoba lagi...' }).catch(() => { });
@@ -6019,15 +6183,24 @@ function startBot() {
 
       const uname = query.from.username ? `@${query.from.username}` : (query.from.first_name || 'Anonim');
 
+      const premActive = statsDb.isPremium(chatId);
+      const premLine = premActive
+        ? `💎 <b>Premium:</b> AKTIF s/d ${fmtDate(statsDb.getPremiumUntil(chatId))}\n`
+        : `💎 <b>Premium:</b> Belum aktif\n`;
+
       const txt = `🔰 <b>Profile</b>\n━━━━━━━━━━━━━━━━━━\n` +
         `👤 <b>Identitas:</b> ${uname}\n` +
         `🎯 <b>Peringkat:</b> ${rank}\n` +
-        `✨ <b>EXP:</b> ${exp.toLocaleString('id-ID')} Pt\n\n` +
+        `✨ <b>EXP:</b> ${exp.toLocaleString('id-ID')} Pt\n` +
+        premLine + `\n` +
         `🎁 <b>Gacha Dimainkan:</b> ${s.gachaCasts} Kali\n` +
         `📦 <b>Media Terkirim:</b> ${totalMediaGb} Data Super HD\n` +
         `━━━━━━━━━━━━━━━━━━\n<i>Tingkatkan EXP untuk meraih Ranking Dewa!</i>`;
 
-      await bot.sendMessage(chatId, txt, { parse_mode: 'HTML' });
+      const profBtns = premActive
+        ? [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]]
+        : [[{ text: '💎 Upgrade Premium', callback_data: 'menu_premium' }], [{ text: '🔙 Menu', callback_data: 'menu_awal' }]];
+      await bot.sendMessage(chatId, txt, { parse_mode: 'HTML', reply_markup: { inline_keyboard: profBtns } });
       return;
     }
 

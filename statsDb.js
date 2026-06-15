@@ -62,6 +62,43 @@ function getInitUser(chatId) {
     return statsData[chatId];
 }
 
+// ─── PREMIUM ──────────────────────────────────────────────────────────────────
+/** Aktifkan/perpanjang premium sejumlah `days` hari (akumulatif dari sisa yang ada). */
+function setPremium(chatId, days) {
+    const u = getInitUser(chatId);
+    const base = Math.max(Date.now(), u.premiumUntil || 0);
+    u.premiumUntil = base + (Number(days) || 0) * 86400000;
+    scheduleSave();
+    return u.premiumUntil;
+}
+
+/** Cabut premium. */
+function revokePremium(chatId) {
+    const u = getInitUser(chatId);
+    u.premiumUntil = 0;
+    scheduleSave();
+}
+
+/** True kalau user sedang premium aktif. */
+function isPremium(chatId) {
+    const u = statsData[chatId];
+    return !!(u && u.premiumUntil && u.premiumUntil > Date.now());
+}
+
+/** Timestamp kadaluarsa premium (0 kalau tidak ada). */
+function getPremiumUntil(chatId) {
+    const u = statsData[chatId];
+    return (u && u.premiumUntil) || 0;
+}
+
+/** Daftar semua user premium aktif → [{chatId, until}]. */
+function listPremium() {
+    const now = Date.now();
+    return Object.entries(statsData)
+        .filter(([, u]) => u.premiumUntil && u.premiumUntil > now)
+        .map(([chatId, u]) => ({ chatId, until: u.premiumUntil }));
+}
+
 /**
  * Catat tambahan tarikan gacha
  */
@@ -100,5 +137,10 @@ loadDB();
 module.exports = {
     addGacha,
     addDownloadSize,
-    getUserStats
+    getUserStats,
+    setPremium,
+    revokePremium,
+    isPremium,
+    getPremiumUntil,
+    listPremium,
 };
