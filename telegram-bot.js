@@ -891,7 +891,7 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
 
     if (source === 'gofile') {
       await status('⚙️ <b>Memproses isi link Gofile...</b>');
-      log.info(`[Process] Memeriksa isi Gofile (pure-axios resolver)...`);
+      log.info(`[Process] Memeriksa isi Gofile lewat Playwright...`);
       const gofileRes = await gofileApi.resolveGofile(url);
       if (!gofileRes || gofileRes.files.length === 0) {
         log.warn(`[Process] Resolving Gofile gagal / kosong: ${url}`);
@@ -941,8 +941,8 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       zipPath = `${tmpBase}_raw${path.extname(fileName)}`;
     } else if (source === 'gofile_direct') {
       // Link CDN Gofile langsung (store*.gofile.io/download/web/...) dengan accountToken
-      // dari resolve sebelumnya (dari callback dls_gofile_*). Bypass resolve ulang
-      // biar tidak double-hit API + tidak terkena rate-limit resolve.
+      // dari resolve sebelumnya (dari callback dls_gofile_*). Bypass resolve Playwright
+      // biar tidak double-launch browser + tidak terkena rate-limit resolve.
       await status('⚙️ <b>Menyambungkan tautan Gofile CDN...</b>');
       downloadLink = url;
       fileName = opts.fileName || decodeURIComponent(url.split('/').pop().split('?')[0]) || 'archive.rar';
@@ -4561,7 +4561,7 @@ function startBot() {
         log.info(`[Gofile] Menggunakan cache direct link untuk file: ${cachedFile.name}`);
         queueManager.addJob(chatId, `Gofile: ${cachedFile.name}`, async (jobId) => {
           // PENTING: forward cookie + accountToken session Gofile agar CDN tidak balik HTML error page.
-          // Untuk link CDN gofile.io, processDownload pakai Authorization: Bearer accountToken.
+          // Untuk link CDN gofile.io, processDownload akan pakai jalur Playwright + Authorization: Bearer.
           await processDownload(bot, chatId, cachedFile.link, null, 'gofile_direct', jobId, {
             cookie: state.cookie,
             accountToken: state.accountToken,
