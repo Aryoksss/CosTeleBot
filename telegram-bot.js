@@ -2051,7 +2051,7 @@ async function doJavDetail(bot, chatId, item) {
     if (metaLine.length) text += metaLine.join(' · ') + '\n';
 
     if (detail.actresses.length > 0) {
-      text += `� ${detail.actresses.map(a => escHtml(a.name)).join(', ')}\n`;
+      text += `👤 ${detail.actresses.map(a => escHtml(a.name)).join(', ')}\n`;
     }
     if (detail.categories.length > 0) {
       text += `🏷️ ${detail.categories.slice(0, 4).map(c => escHtml(c.name)).join(' · ')}\n`;
@@ -2060,11 +2060,14 @@ async function doJavDetail(bot, chatId, item) {
 
     const buttons = [];
 
-    // Download button
-    if (sizeMB && primarySize > CONFIG.VIDEO_MAX_BYTES) {
-      text += `\n\n⚠️ <b>Melebihi limit upload ${limitMB} MB.</b> Tidak bisa di-stream ke Telegram.\nDownload manual via link halaman di atas.`;
-    } else {
-      const primaryBtn = { text: `⬇️ Download ${detail.sources[0].label}${sizeMB ? ` (${sizeMB} MB)` : ''}`, callback_data: `javdl_${idx}_0` };
+    // Download button — selalu tampil. File oversize akan otomatis di-split jadi beberapa part via ffmpeg.
+    const oversize = sizeMB && primarySize > CONFIG.VIDEO_MAX_BYTES;
+    if (oversize) {
+      text += `\n\n✂️ <b>${sizeMB} MB &gt; limit ${limitMB} MB</b> — akan dikirim per-part otomatis.`;
+    }
+    {
+      const overTag = oversize ? ' ✂️' : '';
+      const primaryBtn = { text: `⬇️ Download ${detail.sources[0].label}${sizeMB ? ` (${sizeMB} MB)` : ''}${overTag}`, callback_data: `javdl_${idx}_0` };
       buttons.push([primaryBtn]);
       // Kalau ada multi-resolution (beberapa post JAV kadang 1080+720+480), tampilkan sebagai opsi
       if (detail.sources.length > 1) {
@@ -2338,34 +2341,19 @@ async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
       statsDb.addDownloadSize(chatId, fsize);
       log.ok(`[Javtiful] Download selesai: ${sizeMB} MB dalam ${elapsed}s`);
 
-      if (fsize > CONFIG.VIDEO_MAX_BYTES) {
-        await rimraf(jobDir);
-        const limitMB = Math.floor(CONFIG.VIDEO_MAX_BYTES / 1048576);
-        return bot.editMessageText(
-          `⚠️ File <b>${sizeMB} MB</b> melebihi limit ${limitMB} MB Telegram.\n<a href="${item.link}">Buka halaman Javtiful</a>`,
-          { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML' }
-        );
-      }
-
-      await bot.editMessageText(`📤 <b>${escHtml(detail.title.slice(0, 80))}</b>\n<i>⏳ Mengupload ${sizeMB} MB ke Telegram...</i>`, {
+      const overLimit = fsize > CONFIG.VIDEO_MAX_BYTES;
+      const uploadNote = overLimit
+        ? `<i>⏳ ${sizeMB} MB melebihi limit, memecah & mengupload per-part...</i>`
+        : `<i>⏳ Mengupload ${sizeMB} MB ke Telegram...</i>`;
+      await bot.editMessageText(`📤 <b>${escHtml(detail.title.slice(0, 80))}</b>\n${uploadNote}`, {
         chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
       }).catch(() => { });
 
-      try {
-        await bot.sendVideo(chatId, fs.createReadStream(dest), {
-          caption: `🎥 <b>${escHtml(detail.title)}</b> (${source.label}, ${sizeMB} MB)\n<a href="${item.link}">Source</a>`,
-          parse_mode: 'HTML',
-          supports_streaming: true,
-        });
-        bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
-      } catch (e) {
-        log.warn(`[Javtiful] sendVideo gagal (${e.message}), fallback sendDocument`);
-        await bot.sendDocument(chatId, fs.createReadStream(dest), {
-          caption: `🎥 <b>${escHtml(detail.title)}</b> (${source.label}, ${sizeMB} MB)`,
-          parse_mode: 'HTML',
-        });
-        bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
-      }
+      // sendOne menangani oversize otomatis: split via ffmpeg jadi beberapa part.
+      // Caption plain-text (sendOne tidak set parse_mode HTML).
+      const caption = `🎥 ${detail.title} (${source.label}, ${sizeMB} MB)`;
+      await sendOne(bot, chatId, dest, caption);
+      bot.deleteMessage(chatId, statusMsg.message_id).catch(() => { });
       await rimraf(jobDir);
     } catch (err) {
       log.error(`[Javtiful] download error: ${err.message}`);
