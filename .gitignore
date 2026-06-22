@@ -8,4 +8,5 @@ stats.json
 history.json
 watcher.json
 file_id_cache.json
+settings.json
 *.tmp

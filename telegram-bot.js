@@ -243,6 +243,7 @@ const watcher = require('./utils/watcher');
 const fileCache = require('./utils/fileCache');
 const cryptopay = require('./utils/cryptopay');
 const i18n = require('./utils/i18n');
+const settings = require('./utils/settings');
 // Premium gating untuk queue (prioritas + limit lebih tinggi).
 queueManager.isPremiumFn = (chatId) => statsDb.isPremium(chatId);
 // Kuota download harian per tier.
@@ -4166,18 +4167,16 @@ async function doRandomGacha(bot, chatId) {
 }
 
 // ─── PREMIUM (Crypto Pay) ────────────────────────────────────────────────────
-// Kuota download harian per tier (admin unlimited). Override via env.
-const TIER_LIMITS = {
-  free: parseInt(process.env.LIMIT_FREE || '3', 10),
-  premium: parseInt(process.env.LIMIT_PREMIUM || '15', 10),
-  vvip: parseInt(process.env.LIMIT_VVIP || '50', 10),
-};
+// Limit kuota & harga paket dibaca live dari settings.json (bisa diedit via dashboard).
+function TIER_LIMITS_LIVE() { return settings.getLimits(); }
 const TIER_LABEL = { free: '🆓 Free', premium: '💎 Premium', vvip: '👑 VVIP', admin: '🛡️ Admin' };
 
 function userTier(chatId) { return isAdmin(chatId) ? 'admin' : statsDb.getTier(chatId); }
 function dailyLimitOf(chatId) {
   const t = userTier(chatId);
-  return t === 'admin' ? Infinity : (TIER_LIMITS[t] ?? TIER_LIMITS.free);
+  if (t === 'admin') return Infinity;
+  const lim = TIER_LIMITS_LIVE();
+  return lim[t] ?? lim.free;
 }
 function quotaInfo(chatId) {
   const tier = userTier(chatId);
@@ -4187,13 +4186,8 @@ function quotaInfo(chatId) {
   return { tier, used, limit, unlimited, remaining: unlimited ? Infinity : Math.max(0, limit - used) };
 }
 
-// Paket premium (bayar crypto). tier + lama (maks 30 hari) + harga (dalam CRYPTOPAY_ASSET).
-const PREMIUM_PLANS = [
-  { tier: 'premium', days: 7, price: 3 },
-  { tier: 'premium', days: 30, price: 8 },
-  { tier: 'vvip', days: 7, price: 12 },
-  { tier: 'vvip', days: 30, price: 35 },
-];
+// Paket premium dibaca live dari settings.
+function premiumPlans() { return settings.getPlans(); }
 const pendingPremium = new Map(); // invoiceId -> { chatId, days, tier, createdAt }
 
 function fmtDate(ts) {
@@ -4210,7 +4204,7 @@ function L(chatId, id, en) {
 function activatePremium(bot, chatId, days, tier, invoiceId) {
   const until = statsDb.setPremium(chatId, days, tier);
   if (invoiceId) pendingPremium.delete(invoiceId);
-  const lim = TIER_LIMITS[tier] || TIER_LIMITS.premium;
+  const lim = TIER_LIMITS_LIVE()[tier] || TIER_LIMITS_LIVE().premium;
   bot.sendMessage(chatId,
     `${TIER_LABEL[tier] || '💎 Premium'} <b>aktif!</b>\nBerlaku sampai <b>${fmtDate(until)}</b>.\n\n` +
     `Kuota harian: <b>${lim} download</b> + prioritas antrean. Makasih sudah dukung bot! 🙏`,
@@ -4227,13 +4221,13 @@ async function doPremiumMenu(bot, chatId) {
   text += q.tier === 'free' || q.tier === 'admin' ? `\n` : ` (${en ? 'until' : 's/d'} ${fmtDate(until)})\n`;
   text += `${en ? "Today's quota" : 'Kuota hari ini'}: <b>${q.unlimited ? '∞' : `${q.used}/${q.limit}`}</b>\n\n`;
   text += `<b>${en ? 'Daily download limit' : 'Limit download / hari'}:</b>\n` +
-    `🆓 Free: ${TIER_LIMITS.free} · 💎 Premium: ${TIER_LIMITS.premium} · 👑 VVIP: ${TIER_LIMITS.vvip}\n` +
+    `🆓 Free: ${TIER_LIMITS_LIVE().free} · 💎 Premium: ${TIER_LIMITS_LIVE().premium} · 👑 VVIP: ${TIER_LIMITS_LIVE().vvip}\n` +
     `${en ? 'Premium/VVIP also get <b>queue priority</b>.' : 'Premium/VVIP juga dapat <b>prioritas antrean</b>.'}\n\n`;
 
   const buttons = [];
   if (cryptopay.isEnabled()) {
     text += en ? `Pick a plan (pay via ${cryptopay.asset()}):` : `Pilih paket (bayar via ${cryptopay.asset()}):`;
-    PREMIUM_PLANS.forEach(p => {
+    premiumPlans().forEach(p => {
       const lbl = `${TIER_LABEL[p.tier]} · ${p.days} ${en ? 'days' : 'hari'} · ${p.price} ${cryptopay.asset()}`;
       buttons.push([{ text: lbl, callback_data: `buyprem_${p.tier}_${p.days}` }]);
     });
@@ -4246,7 +4240,7 @@ async function doPremiumMenu(bot, chatId) {
 }
 
 async function doBuyPremium(bot, chatId, tier, days) {
-  const plan = PREMIUM_PLANS.find(p => p.tier === tier && p.days === days);
+  const plan = premiumPlans().find(p => p.tier === tier && p.days === days);
   if (!plan) return bot.sendMessage(chatId, '⚠️ Paket tidak valid.').catch(() => { });
   if (!cryptopay.isEnabled()) return bot.sendMessage(chatId, '⚠️ Pembayaran belum dikonfigurasi.').catch(() => { });
 
@@ -4400,7 +4394,8 @@ function startBot() {
   // Auto-notify post/episode baru ke admin (polling berkala).
   watcher.startWatcher({
     bot,
-    adminChatIds: Array.from(ADMIN_IDS),
+    // Admin + penerima notif tambahan yang diatur via dashboard web (settings.notifyExtra).
+    adminChatIds: Array.from(new Set([...ADMIN_IDS, ...settings.getNotifyExtra()].map(String))),
     scrapers: {
       cosplaytele: cosplayteleScraper,
       javtiful: javtifulScraper,
@@ -4417,11 +4412,18 @@ function startBot() {
   dashboard.startDashboard({
     botStats,
     queueManager,
+    statsDb,
+    settings,
     statsDbRead: () => {
       // Read stats.json langsung untuk get all users
       try {
         return JSON.parse(fs.readFileSync(path.join(__dirname, 'stats.json'), 'utf8'));
       } catch (_) { return {}; }
+    },
+    // Notif user saat di-grant premium dari dashboard web.
+    onGrant: (chatId, tier, days, until) => {
+      const label = tier === 'vvip' ? '👑 VVIP' : '💎 Premium';
+      bot.sendMessage(chatId, `${label} <b>aktif!</b> Berlaku sampai <b>${fmtDate(until)}</b>. Makasih! 🙏`, { parse_mode: 'HTML' }).catch(() => { });
     },
   });
 
@@ -4730,7 +4732,7 @@ function startBot() {
     const targetId = m[1]; const days = parseInt(m[2], 10); const tier = (m[3] || 'premium').toLowerCase();
     const until = statsDb.setPremium(targetId, days, tier);
     bot.sendMessage(chatId, `✅ ${TIER_LABEL[tier]} <b>${targetId}</b> +${days} hari → ${fmtDate(until)}`, { parse_mode: 'HTML' });
-    bot.sendMessage(targetId, `${TIER_LABEL[tier]} <b>aktif!</b> Berlaku sampai <b>${fmtDate(until)}</b> (kuota ${TIER_LIMITS[tier]}/hari). Makasih! 🙏`, { parse_mode: 'HTML' }).catch(() => { });
+    bot.sendMessage(targetId, `${TIER_LABEL[tier]} <b>aktif!</b> Berlaku sampai <b>${fmtDate(until)}</b> (kuota ${TIER_LIMITS_LIVE()[tier]}/hari). Makasih! 🙏`, { parse_mode: 'HTML' }).catch(() => { });
   });
 
   // /revoke <userid> — cabut premium (admin).
