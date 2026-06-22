@@ -169,64 +169,196 @@ function renderHtml(state) {
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%AD%3C/text%3E%3C/svg%3E">
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%AD%3C/text%3E%3C/svg%3E">
 <style>
+  :root {
+    --bg: #0a0e14; --bg2: #0d1117; --panel: #151b24; --panel2: #1b232e;
+    --border: #283241; --border2: #30363d; --text: #d4dde8; --muted: #8593a3;
+    --dim: #5c6675; --accent: #58a6ff; --accent2: #7ee787;
+    --green: #2ea043; --green2: #238636; --red: #da3633; --red2: #f85149;
+    --blue: #1f6feb; --amber: #e3b341; --purple: #a371f7;
+  }
+  * { box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-         background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
-  h1 { color: #58a6ff; margin-bottom: 20px; }
-  h2 { color: #79c0ff; border-bottom: 1px solid #30363d; padding-bottom: 6px; margin-top: 24px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 16px 0; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px; }
-  .card .label { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .card .value { font-size: 24px; font-weight: 600; color: #e6edf3; margin-top: 4px; }
-  .card .sub { color: #6e7681; font-size: 12px; margin-top: 4px; }
-  table { width: 100%; border-collapse: collapse; margin: 8px 0; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #21262d; font-size: 14px; }
-  th { color: #7ee787; font-weight: 600; background: #161b22; }
-  tr:hover { background: #161b22; }
-  .mono { font-family: 'SF Mono', Consolas, monospace; font-size: 12px; color: #a5d6ff; }
-  .bar { background: #21262d; border-radius: 4px; height: 6px; overflow: hidden; margin-top: 4px; }
-  .bar-fill { background: linear-gradient(90deg, #238636, #2ea043); height: 100%; }
-  .refresh-info { color: #6e7681; font-size: 12px; margin-top: 10px; }
-  .empty { color: #6e7681; font-style: italic; padding: 10px; }
-  .inp { background:#0d1117; border:1px solid #30363d; color:#e6edf3; border-radius:5px; padding:5px 8px; margin:2px; font-size:13px; }
-  button { background:#238636; border:0; color:#fff; border-radius:5px; padding:5px 10px; margin:2px; cursor:pointer; font-size:13px; }
-  button:hover { background:#2ea043; }
-  h3 { margin-top:18px; }
+         background: var(--bg); color: var(--text); margin: 0; font-size: 14px; line-height: 1.5; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2a3340; border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a4654; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  a { color: var(--accent); text-decoration: none; }
+
+  /* ── Topbar ── */
+  .topbar { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; gap: 14px;
+    padding: 12px 22px; background: rgba(13,17,23,.85); backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; color: #fff; }
+  .brand .logo { font-size: 22px; filter: drop-shadow(0 0 8px rgba(88,166,255,.5)); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; background: rgba(46,160,67,.15); color: var(--accent2); border: 1px solid rgba(46,160,67,.3); }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); box-shadow: 0 0 8px var(--accent2); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+  .pill.warn { background: rgba(218,54,51,.15); color: #ff7b72; border-color: rgba(218,54,51,.4); }
+  .pill.warn .dot { background: #ff7b72; box-shadow: 0 0 8px #ff7b72; }
+  .topbar .spacer { flex: 1; }
+  .topbar .meta { color: var(--muted); font-size: 12px; }
+  .switch { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
+  .switch input { display: none; }
+  .switch .track { width: 36px; height: 20px; border-radius: 999px; background: #30363d; position: relative; transition: .2s; }
+  .switch .track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: .2s; }
+  .switch input:checked + .track { background: var(--green); }
+  .switch input:checked + .track::after { transform: translateX(16px); }
+
+  /* ── Layout ── */
+  .layout { display: flex; align-items: flex-start; }
+  .nav { position: sticky; top: 57px; align-self: flex-start; width: 210px; padding: 18px 12px; flex-shrink: 0;
+    height: calc(100vh - 57px); overflow-y: auto; }
+  .nav a { display: flex; align-items: center; gap: 11px; padding: 10px 14px; border-radius: 9px;
+    color: var(--muted); font-weight: 500; margin-bottom: 3px; transition: .15s; }
+  .nav a:hover { background: var(--panel); color: var(--text); }
+  .nav a.active { background: linear-gradient(90deg, rgba(88,166,255,.18), rgba(88,166,255,.04)); color: #fff;
+    box-shadow: inset 3px 0 0 var(--accent); }
+  .nav a .ic { font-size: 16px; width: 20px; text-align: center; }
+  main { flex: 1; padding: 22px 28px 80px; max-width: 1200px; min-width: 0; }
+
+  h2 { color: #fff; font-size: 19px; margin: 0 0 16px; display: flex; align-items: center; gap: 9px; scroll-margin-top: 72px; }
+  h3 { color: var(--accent); font-size: 14px; margin: 22px 0 10px; text-transform: uppercase; letter-spacing: .6px; }
+  section { margin-bottom: 38px; }
+
+  /* ── Cards / grid ── */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 0 0 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+    transition: .15s; }
+  .card:hover { border-color: var(--border2); }
+  .stat { position: relative; overflow: hidden; }
+  .stat .ic { position: absolute; top: 12px; right: 14px; font-size: 26px; opacity: .25; }
+  .card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .7px; font-weight: 600; }
+  .card .value { font-size: 26px; font-weight: 700; color: #fff; margin-top: 6px; letter-spacing: -.5px; }
+  .card .sub { color: var(--dim); font-size: 12px; margin-top: 5px; }
+
+  /* ── Tables ── */
+  .tablewrap { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; background: var(--panel2); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr { transition: .1s; }
+  tbody tr:hover { background: rgba(88,166,255,.05); }
+  .mono { font-family: 'SF Mono', ui-monospace, Consolas, monospace; font-size: 12px; color: #9ecbff; }
+
+  .bar { background: #21262d; border-radius: 999px; height: 6px; overflow: hidden; margin-top: 8px; }
+  .bar-fill { background: linear-gradient(90deg, #2ea043, #56d364); height: 100%; border-radius: 999px; transition: width .4s; }
+  .empty { color: var(--dim); font-style: italic; padding: 16px; text-align: center; }
+
+  /* ── Inputs / buttons ── */
+  .inp { background: var(--bg2); border: 1px solid var(--border2); color: var(--text); border-radius: 8px;
+    padding: 8px 11px; margin: 2px; font-size: 13px; outline: none; transition: .15s; }
+  .inp:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,.15); }
+  textarea.inp { resize: vertical; font-family: inherit; }
+  button { background: var(--green2); border: 0; color: #fff; border-radius: 8px; padding: 8px 14px; margin: 2px;
+    cursor: pointer; font-size: 13px; font-weight: 600; transition: .15s; }
+  button:hover { background: var(--green); transform: translateY(-1px); }
+  button:active { transform: translateY(0); }
+  button.danger, button[style*="da3633"] { background: var(--red) !important; }
+  button.danger:hover { background: var(--red2) !important; }
+  button.blue { background: var(--blue); }
+  button.ghost { background: #2a3340; }
+  button.ghost:hover { background: #3a4654; }
+  .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .badge.vvip { background: rgba(163,113,247,.18); color: #d2a8ff; }
+  .badge.premium { background: rgba(88,166,255,.18); color: #9ecbff; }
+  .badge.free { background: #2a3340; color: var(--muted); }
+  .fieldrow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 10px; }
+
+  /* ── Toast ── */
+  #toast { position: fixed; bottom: 24px; right: 24px; z-index: 100; display: flex; flex-direction: column; gap: 8px; }
+  .toast { background: var(--panel2); border: 1px solid var(--border2); border-left: 4px solid var(--accent);
+    border-radius: 9px; padding: 12px 18px; color: var(--text); font-size: 13px; min-width: 220px; max-width: 360px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.5); animation: slidein .25s ease; }
+  .toast.ok { border-left-color: var(--green); }
+  .toast.err { border-left-color: var(--red2); }
+  @keyframes slidein { from { transform: translateX(40px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+  .logbox { background: var(--bg2); border-radius: 10px; padding: 14px; max-height: 420px; overflow: auto;
+    font-family: 'SF Mono', ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.7; }
+  .maint-banner { background: linear-gradient(90deg, rgba(218,54,51,.2), rgba(218,54,51,.05));
+    border: 1px solid rgba(218,54,51,.4); border-radius: 10px; padding: 12px 16px; margin-bottom: 18px; color: #ffd9a0; }
+
+  @media (max-width: 760px) {
+    .nav { position: static; width: 100%; height: auto; display: flex; gap: 6px; overflow-x: auto; padding: 10px;
+      border-bottom: 1px solid var(--border); }
+    .nav a { white-space: nowrap; padding: 8px 12px; margin: 0; }
+    .nav a.active { box-shadow: inset 0 -3px 0 var(--accent); }
+    .layout { flex-direction: column; }
+    main { padding: 16px; }
+  }
 </style>
 </head>
 <body>
-<h1>🎭 CosTeleBot Dashboard</h1>
-${state.maintenance ? '<div style="background:#7d3a00;border:1px solid #da3633;border-radius:6px;padding:10px 14px;margin-bottom:14px;color:#ffd9a0">🛠️ <b>MAINTENANCE MODE AKTIF</b> — user non-admin diblok.</div>' : ''}
+<div class="topbar">
+  <div class="brand"><span class="logo">🎭</span> CosTeleBot</div>
+  <span class="pill ${state.maintenance ? 'warn' : ''}"><span class="dot"></span>${state.maintenance ? 'Maintenance' : 'Online'}</span>
+  <span class="meta">⏳ ${fmtUptime(state.bot.uptime)}</span>
+  <div class="spacer"></div>
+  <span class="meta" id="clock"></span>
+  <label class="switch"><input type="checkbox" id="autoref" checked><span class="track"></span> Auto-refresh</label>
+</div>
 
+<div class="layout">
+  <aside class="nav">
+    <a href="#overview" class="navlink"><span class="ic">📊</span> Overview</a>
+    <a href="#control" class="navlink"><span class="ic">🎛️</span> Control</a>
+    <a href="#jobs" class="navlink"><span class="ic">🏃</span> Queue</a>
+    <a href="#users" class="navlink"><span class="ic">👥</span> Users</a>
+    <a href="#settings" class="navlink"><span class="ic">⚙️</span> Settings</a>
+    <a href="#logs" class="navlink"><span class="ic">📜</span> Logs</a>
+  </aside>
+  <main>
+
+${state.maintenance ? '<div class="maint-banner">🛠️ <b>MAINTENANCE MODE AKTIF</b> — semua user non-admin sedang diblok.</div>' : ''}
+
+<section id="overview">
+<h2>📊 Overview</h2>
 <div class="grid">
-  <div class="card">
+  <div class="card stat">
+    <span class="ic">⏱️</span>
     <div class="label">Bot Uptime</div>
     <div class="value">${fmtUptime(state.bot.uptime)}</div>
     <div class="sub">System: ${fmtUptime(state.system.systemUptime)}</div>
   </div>
-  <div class="card">
+  <div class="card stat">
+    <span class="ic">🧠</span>
     <div class="label">RAM Bot</div>
     <div class="value">${fmtBytes(state.system.ramBot)}</div>
     <div class="sub">VPS: ${fmtBytes(state.system.ramTotal - state.system.ramFree)} / ${fmtBytes(state.system.ramTotal)} (${ramPct}%)</div>
     <div class="bar"><div class="bar-fill" style="width: ${ramPct}%"></div></div>
   </div>
-  <div class="card">
+  <div class="card stat">
+    <span class="ic">📥</span>
     <div class="label">Total Downloaded</div>
     <div class="value">${fmtBytes(state.bot.downloadedBytes)}</div>
-    <div class="sub">${state.bot.totalJobs} jobs · ${state.bot.extractedFiles} files extracted</div>
+    <div class="sub">${state.bot.totalJobs} jobs · ${state.bot.extractedFiles} files</div>
   </div>
-  <div class="card">
+  <div class="card stat">
+    <span class="ic">🚦</span>
     <div class="label">Queue</div>
     <div class="value">${state.queue.activeCount} / ${state.queue.maxConcurrency}</div>
-    <div class="sub">${state.queue.pendingCount} pending · ${state.users.total} total users</div>
+    <div class="sub">${state.queue.pendingCount} pending</div>
   </div>
-  <div class="card">
+  <div class="card stat">
+    <span class="ic">👥</span>
+    <div class="label">Users</div>
+    <div class="value">${state.users.total}</div>
+    <div class="sub">💎 ${state.users.premiumCount} premium · 🚫 ${state.users.bannedCount} banned</div>
+  </div>
+  <div class="card stat">
+    <span class="ic">⚡</span>
     <div class="label">CPU</div>
     <div class="value">${state.system.cpuCount} cores</div>
     <div class="sub">Load 1m: ${state.system.loadAvg[0].toFixed(2)}</div>
   </div>
 </div>
+</section>
 
-<h2>�️ Control Center</h2>
+<section id="control">
+<h2>🎛️ Control Center</h2>
 <div class="grid">
   <div class="card">
     <div class="label">🛠️ Maintenance Mode</div>
@@ -284,9 +416,11 @@ ${state.maintenance ? '<div style="background:#7d3a00;border:1px solid #da3633;b
   </div>
 </div>
 
-<h2>�🏃 Active Jobs</h2>
+</section>
+<section id="jobs">
+<h2>🏃 Active Jobs</h2>
 ${state.queue.active.length === 0 ? '<div class="empty">No active jobs</div>' : `
-<table>
+<div class="tablewrap"><table>
   <thead><tr><th>#</th><th>User</th><th>Title</th><th>Progress</th></tr></thead>
   <tbody>
     ${state.queue.active.map(j => `
@@ -298,12 +432,12 @@ ${state.queue.active.length === 0 ? '<div class="empty">No active jobs</div>' : 
       </tr>
     `).join('')}
   </tbody>
-</table>
+</table></div>
 `}
 
 <h2>📋 Pending Queue (per user)</h2>
 ${state.queue.pendingPerUser.length === 0 ? '<div class="empty">Queue empty</div>' : `
-<table>
+<div class="tablewrap"><table>
   <thead><tr><th>User</th><th>Pending Jobs</th></tr></thead>
   <tbody>
     ${state.queue.pendingPerUser.map(p => `
@@ -313,12 +447,15 @@ ${state.queue.pendingPerUser.length === 0 ? '<div class="empty">Queue empty</div
       </tr>
     `).join('')}
   </tbody>
-</table>
+</table></div>
 `}
 
-<h2>👥 Users (by download size)</h2>
+</section>
+<section id="users">
+<h2>👥 Users <span class="sub" style="font-weight:400">(by download size)</span></h2>
+<div class="fieldrow" style="margin-bottom:12px"><input id="user_search" class="inp" placeholder="🔍 Cari chat ID / tier..." style="width:280px" oninput="userFilter()"></div>
 ${state.users.list.length === 0 ? '<div class="empty">No users tracked</div>' : `
-<table>
+<div class="tablewrap"><table>
   <thead><tr><th>Chat ID</th><th>Tier</th><th>Today</th><th>Gacha</th><th>Downloaded</th><th>Lang</th><th>Action</th></tr></thead>
   <tbody>
     ${state.users.list.map(u => `
@@ -341,9 +478,11 @@ ${state.users.list.length === 0 ? '<div class="empty">No users tracked</div>' : 
       </tr>
     `).join('')}
   </tbody>
-</table>
+</table></div>
 `}
 
+</section>
+<section id="settings">
 <h2>⚙️ Settings</h2>
 <div class="grid">
   <div class="card">
@@ -368,7 +507,7 @@ ${state.users.list.length === 0 ? '<div class="empty">No users tracked</div>' : 
 
 <h3 style="color:#79c0ff">💰 Plan Prices</h3>
 ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
-<table>
+<div class="tablewrap"><table>
   <thead><tr><th>Tier</th><th>Days</th><th>Price</th><th></th></tr></thead>
   <tbody>
     ${state.settings.plans.map(p => `
@@ -380,14 +519,14 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
       </tr>
     `).join('')}
   </tbody>
-</table>
+</table></div>
 `}
 
 <h3 style="color:#79c0ff">🔔 Watcher Recipients (notif post baru)</h3>
 <div class="card">
   <div class="sub">Admin selalu menerima semua source. Di bawah ini penerima tambahan — centang source yang mau dikirim ke tiap orang. (Notif deploy/health terpisah, admin saja.)</div>
   ${!state.watch ? '<div class="empty" style="margin-top:8px">watcher tidak aktif</div>' : `
-  <table style="margin-top:8px">
+  <div class="tablewrap"><table style="margin-top:8px">
     <thead><tr><th>Chat ID</th>${state.watch.sources.map(s => `<th>${s.icon} ${escape(s.label)}</th>`).join('')}<th></th></tr></thead>
     <tbody>
       ${Object.keys(state.watch.subs).length === 0 ? `<tr><td colspan="${state.watch.sources.length + 2}" class="empty">belum ada penerima tambahan</td></tr>` : Object.entries(state.watch.subs).map(([id, subs]) => {
@@ -399,7 +538,7 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
         </tr>`;
       }).join('')}
     </tbody>
-  </table>
+  </table></div>
   <div style="margin-top:10px">
     <input id="watch_id" placeholder="Chat ID baru" class="inp">
     <button onclick="watchAdd()">+ Tambah Penerima (semua source)</button>
@@ -407,20 +546,44 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
   `}
 </div>
 
+</section>
+<section id="logs">
 <h2>📜 Recent Logs</h2>
-<div class="card" style="max-height:280px;overflow:auto;font-family:'SF Mono',Consolas,monospace;font-size:12px;line-height:1.6">
-  <div id="logbox" class="sub">loading...</div>
+<div style="margin-bottom:10px">
+  <button class="ghost" onclick="logFilter('all',this)">All</button>
+  <button class="ghost" onclick="logFilter('info',this)">Info</button>
+  <button class="ghost" onclick="logFilter('ok',this)">OK</button>
+  <button class="ghost" onclick="logFilter('warn',this)">Warn</button>
+  <button class="ghost" onclick="logFilter('error',this)">Error</button>
 </div>
+<div class="logbox" id="logbox">loading...</div>
+</section>
 
-<div id="msg" class="refresh-info"></div>
-<div class="refresh-info">Auto-refresh 10s (pauses while typing) · <a href="/admin" style="color: #58a6ff;">manual</a></div>
+  </main>
+</div>
+<div id="toast"></div>
 
 <script>
+  // ── Toast feedback ──
+  function toast(msg, type) {
+    const box = document.getElementById('toast');
+    const el = document.createElement('div');
+    el.className = 'toast ' + (type || '');
+    el.textContent = msg;
+    box.appendChild(el);
+    setTimeout(() => { el.style.transition = 'opacity .3s'; el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 3200);
+  }
+  // Simpan posisi scroll supaya reload tidak melompat ke atas.
+  window.addEventListener('beforeunload', () => sessionStorage.setItem('sy', window.scrollY));
+  window.addEventListener('DOMContentLoaded', () => {
+    const sy = sessionStorage.getItem('sy'); if (sy) window.scrollTo(0, parseInt(sy));
+  });
+
   async function post(path, body) {
     const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const d = await r.json().catch(() => ({}));
-    document.getElementById('msg').textContent = d.ok ? '✅ ' + (d.message || 'OK') : '❌ ' + (d.error || 'failed');
-    if (d.ok) setTimeout(() => location.reload(), 700);
+    toast((d.ok ? '✅ ' : '❌ ') + (d.ok ? (d.message || 'OK') : (d.error || 'failed')), d.ok ? 'ok' : 'err');
+    if (d.ok) setTimeout(() => location.reload(), 800);
     return d;
   }
   function grant(uid, tier, days) { post('/admin/api/grant', { chatId: uid, tier, days }); }
@@ -428,8 +591,6 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
   function grantForm() { post('/admin/api/grant', { chatId: g_uid.value, tier: g_tier.value, days: parseInt(g_days.value) || 30 }); }
   function saveLimits() { post('/admin/api/limits', { free: lim_free.value, premium: lim_premium.value, vvip: lim_vvip.value }); }
   function savePrice(tier, days) { post('/admin/api/price', { tier, days, price: document.getElementById('price_' + tier + '_' + days).value }); }
-  function notifAdd() { post('/admin/api/notify', { add: notif_id.value }); }
-  function notifDel(id) { post('/admin/api/notify', { remove: id }); }
   function watchAdd() { if (watch_id.value.trim()) post('/admin/api/watch', { action: 'add', chatId: watch_id.value.trim() }); }
   function watchDel(id) { if (confirm('Hapus penerima ' + id + '?')) post('/admin/api/watch', { action: 'remove', chatId: id }); }
   function watchToggle(el) {
@@ -444,18 +605,25 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
   function clearQ() { if (confirm('Clear semua antrean pending?')) post('/admin/api/queue', { action: 'clear' }); }
   function clearCache() { if (confirm('Clear file-ID cache?')) post('/admin/api/cache', { action: 'clear' }); }
   function restart() { if (confirm('Restart bot sekarang? Job berjalan akan terputus.')) post('/admin/api/restart', {}); }
-  function dmUser(uid) { dm_uid.value = uid; dm_text.focus(); document.getElementById('dm_uid').scrollIntoView({ behavior: 'smooth' }); }
+  function dmUser(uid) { dm_uid.value = uid; document.querySelector('a[href="#control"]').click(); setTimeout(() => dm_text.focus(), 300); }
   function sendDM() {
-    const t = dm_text.value.trim(); if (!t) return;
+    const t = dm_text.value.trim(); if (!t) return toast('Pesan kosong', 'err');
     post('/admin/api/dm', { chatId: dm_uid.value, text: t });
   }
   function broadcast() {
-    const t = bc_text.value.trim(); if (!t) return;
+    const t = bc_text.value.trim(); if (!t) return toast('Pesan kosong', 'err');
     if (!confirm('Kirim broadcast ke ' + bc_tier.value + '?')) return;
     post('/admin/api/broadcast', { tier: bc_tier.value, text: t });
   }
+  // ── Users live filter ──
+  function userFilter() {
+    const q = (document.getElementById('user_search').value || '').toLowerCase();
+    document.querySelectorAll('#users tbody tr').forEach(tr => {
+      tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  }
   async function runHealth() {
-    document.getElementById('health_out').textContent = '⏳ checking...';
+    document.getElementById('health_out').innerHTML = '⏳ checking...';
     const r = await fetch('/admin/api/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     const d = await r.json().catch(() => ({}));
     if (d.ok && d.results) {
@@ -463,21 +631,43 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
         (x.status === 'ok' ? '✅' : x.status === 'warn' ? '⚠️' : '❌') + ' ' + x.name + ' · ' + x.latencyMs + 'ms').join('<br>');
     } else { document.getElementById('health_out').textContent = '❌ ' + (d.error || 'failed'); }
   }
+  // ── Logs ──
+  let logLevel = 'all';
+  function logFilter(lv, btn) { logLevel = lv; document.querySelectorAll('#logs .ghost').forEach(b => b.style.background = ''); if (btn) btn.style.background = '#1f6feb'; renderLogs(); }
+  let lastLogs = [];
+  function renderLogs() {
+    const col = { info: '#8593a3', ok: '#7ee787', warn: '#e3b341', error: '#f85149' };
+    const esc = s => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const filtered = lastLogs.filter(l => logLevel === 'all' || l.level === logLevel);
+    document.getElementById('logbox').innerHTML = filtered.slice(-150).reverse().map(l =>
+      '<span style="color:#5c6675">' + new Date(l.t).toLocaleTimeString() + '</span> ' +
+      '<span style="color:' + (col[l.level] || '#d4dde8') + '">[' + l.level + '] ' + esc(l.m) + '</span>'
+    ).join('<br>') || '<span class="sub">no logs</span>';
+  }
   async function loadLogs() {
     try {
       const r = await fetch('/admin/api/logs');
       const d = await r.json().catch(() => ({}));
-      if (d.logs) {
-        const col = { info: '#8b949e', ok: '#7ee787', warn: '#e3b341', error: '#f85149' };
-        document.getElementById('logbox').innerHTML = d.logs.slice(-120).reverse().map(l =>
-          '<span style="color:#6e7681">' + new Date(l.t).toLocaleTimeString() + '</span> ' +
-          '<span style="color:' + (col[l.level] || '#c9d1d9') + '">' + l.m.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])) + '</span>'
-        ).join('<br>');
-      }
+      if (d.logs) { lastLogs = d.logs; renderLogs(); }
     } catch (_) { }
   }
+  // ── Nav active highlight on scroll ──
+  const links = [...document.querySelectorAll('.navlink')];
+  const secs = links.map(a => document.querySelector(a.getAttribute('href')));
+  function onScroll() {
+    let idx = 0;
+    secs.forEach((s, i) => { if (s && s.getBoundingClientRect().top <= 120) idx = i; });
+    links.forEach((a, i) => a.classList.toggle('active', i === idx));
+  }
+  window.addEventListener('scroll', onScroll); onScroll();
+  // ── Clock + auto-refresh toggle ──
+  function tick() { document.getElementById('clock').textContent = new Date().toLocaleTimeString(); }
+  tick(); setInterval(tick, 1000);
   loadLogs(); setInterval(loadLogs, 5000);
-  setInterval(() => { if (!/INPUT|SELECT|BUTTON|TEXTAREA/.test(document.activeElement.tagName)) location.reload(); }, 10000);
+  setInterval(() => {
+    const ar = document.getElementById('autoref');
+    if (ar && ar.checked && !/INPUT|SELECT|BUTTON|TEXTAREA/.test(document.activeElement.tagName)) location.reload();
+  }, 10000);
 </script>
 </body>
 </html>`;
