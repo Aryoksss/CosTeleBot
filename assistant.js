@@ -9,10 +9,16 @@
 
 const groq = require('./groqClient');
 
-const PERSONA =
-`Kamu "CosTeleBot", asisten di dalam bot Telegram untuk MENCARI & MENGUNDUH media dari banyak sumber.
+/** Persona bot, dibangun sesuai bahasa user agar balasan benar-benar ikut bahasa. */
+function persona(lang) {
+  return lang === 'en'
+    ? `You are "CosTeleBot", an assistant inside a Telegram bot to SEARCH & DOWNLOAD media from many sources.
+Style: casual & friendly. REPLY ONLY IN ENGLISH. Keep it SHORT (max 2-3 sentences). 1-2 emoji ok.
+Write PLAIN TEXT (no Markdown/HTML). Never invent commands/features that don't exist.`
+    : `Kamu "CosTeleBot", asisten di dalam bot Telegram untuk MENCARI & MENGUNDUH media dari banyak sumber.
 Gaya: santai, akrab, Bahasa Indonesia, SINGKAT (maks 2-3 kalimat). Boleh 1-2 emoji.
 Tulis TEKS BIASA (tanpa Markdown/HTML). Jangan mengarang command/fitur yang tidak ada.`;
+}
 
 // Deskripsi lengkap kemampuan bot — supaya AI benar-benar paham seluruh konteks project.
 const CAPABILITIES =
@@ -45,7 +51,7 @@ ATURAN PENTING:
 - Kalau user cuma menyebut SATU nama/kata TANPA konteks sumber yang jelas (mis. "cariin sweetyfox", "rem", "tifa"),
   set source="all" — JANGAN menebak "cosplay". Nama bisa jadi cosplayer ATAU pemain video dewasa; biar user yang pilih sumbernya.
 - Hanya pakai source spesifik kalau ada sinyal jelas (sebut nama situs, kode JAV, kata "anime/cosplay/pinterest/rule34", dll).
-- "reply" SELALU diisi kalimat ramah singkat (Bahasa Indonesia).
+- "reply" SELALU diisi kalimat ramah singkat (ikuti bahasa yang diminta).
 
 CONTOH (input → output JSON):
 - "hai" → {"action":"chat","query":null,"source":null,"reply":"Hai! Mau cari apa hari ini? 😄"}
@@ -66,9 +72,10 @@ const VALID_SRC = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'xnxx', 'anime',
  * Balasan obrolan teks biasa (tanpa aksi). Dipakai untuk fallback ringan.
  * @returns {Promise<string>}
  */
-async function chatReply(userText, commands = []) {
+async function chatReply(userText, commands = [], lang = 'id') {
   const cmdList = commands.length ? commands.map(c => `${c.command} — ${c.description}`).join('\n') : '(tidak ada)';
-  const system = `${PERSONA}\n\n${CAPABILITIES}\n\nDAFTAR COMMAND:\n${cmdList}`;
+  const langName = lang === 'en' ? 'English' : 'Bahasa Indonesia';
+  const system = `${persona(lang)}\n\n${CAPABILITIES}\n\nDAFTAR COMMAND:\n${cmdList}\n\nLANGUAGE: Reply strictly in ${langName}.`;
   return groq.chat({
     messages: [
       { role: 'system', content: system },
@@ -90,9 +97,9 @@ async function chatReply(userText, commands = []) {
 async function assist(userText, commands = [], history = [], lang = 'id') {
   const cmdList = commands.length ? commands.map(c => `${c.command} — ${c.description}`).join('\n') : '(tidak ada)';
   const replyLang = lang === 'en' ? 'English' : 'Bahasa Indonesia';
-  const system = `${PERSONA}
+  const system = `${persona(lang)}
 
-PENTING: tulis field "reply" dalam ${replyLang}.
+PENTING: tulis field "reply" HANYA dalam ${replyLang}. Contoh-contoh di bawah memakai Bahasa Indonesia hanya sebagai ilustrasi struktur — terjemahkan gayanya ke ${replyLang}.
 
 Balas HANYA JSON (tanpa teks lain) dengan skema:
 { "action": "search"|"gacha"|"browse"|"anime"|"menu"|"chat", "query": string|null, "source": "cosplay"|"r34"|"pinterest"|"jav"|"ero"|"xnxx"|"anime"|"kemono"|"all"|null, "reply": string }
@@ -104,7 +111,9 @@ GUNAKAN KONTEKS PERCAKAPAN: kalau pesan terakhir user merujuk ke pesan sebelumny
 ambil judul/teks dari pesan sebelumnya sebagai "query".
 
 DAFTAR COMMAND TERSEDIA:
-${cmdList}`;
+${cmdList}
+
+LANGUAGE: field "reply" WAJIB dalam ${replyLang}.`;
 
   // Sertakan maksimal 4 turn terakhir sebagai konteks.
   const hist = Array.isArray(history) ? history.slice(-4).filter(h => h && h.role && h.content) : [];

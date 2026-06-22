@@ -13,6 +13,13 @@
 // Urutan PENTING: frasa panjang dulu, baru kata pendek.
 const DICT = [
   // Frasa / kalimat umum
+  ['Target Cloudflare terkunci', 'Cloudflare target locked'],
+  ['media secara luring ke server lokal', 'media offline to the local server'],
+  ['secara luring ke server lokal', 'offline to the local server'],
+  ['secara luring', 'offline'],
+  ['Mengekstrak berkas arsip', 'Extracting archive files'],
+  ['Mengekstrak arsip', 'Extracting archive'],
+  ['Mengekstrak', 'Extracting'],
   ['Tidak ada source video yang dapat diekstrak', 'No extractable video source'],
   ['Gagal resolve video detail', 'Failed to resolve video detail'],
   ['Source video tidak tersedia', 'Video source unavailable'],
