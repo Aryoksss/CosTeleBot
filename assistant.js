@@ -87,9 +87,12 @@ async function chatReply(userText, commands = []) {
  *                           lalu "cari di xnxx").
  * @returns {Promise<{action:string, query:string|null, source:string, reply:string}>}
  */
-async function assist(userText, commands = [], history = []) {
+async function assist(userText, commands = [], history = [], lang = 'id') {
   const cmdList = commands.length ? commands.map(c => `${c.command} — ${c.description}`).join('\n') : '(tidak ada)';
+  const replyLang = lang === 'en' ? 'English' : 'Bahasa Indonesia';
   const system = `${PERSONA}
+
+PENTING: tulis field "reply" dalam ${replyLang}.
 
 Balas HANYA JSON (tanpa teks lain) dengan skema:
 { "action": "search"|"gacha"|"browse"|"anime"|"menu"|"chat", "query": string|null, "source": "cosplay"|"r34"|"pinterest"|"jav"|"ero"|"xnxx"|"anime"|"kemono"|"all"|null, "reply": string }

@@ -242,6 +242,7 @@ const browserReaper = require('./utils/browserReaper');
 const watcher = require('./utils/watcher');
 const fileCache = require('./utils/fileCache');
 const cryptopay = require('./utils/cryptopay');
+const i18n = require('./utils/i18n');
 // Premium gating untuk queue (prioritas + limit lebih tinggi).
 queueManager.isPremiumFn = (chatId) => statsDb.isPremium(chatId);
 // Kuota download harian per tier.
@@ -4381,6 +4382,9 @@ function startBot() {
   const bot = new TelegramBot(CONFIG.BOT_TOKEN, botOptions);
   log.ok('Bot Telegram aktif ✅');
 
+  // i18n: auto-translate semua teks/caption/label keluar ke English untuk user yang pilih EN.
+  i18n.attach(bot, (chatId) => statsDb.getLang(chatId) === 'en');
+
   // Jaring pengaman: bersihkan proses Chromium (Playwright) yang nyangkut.
   browserReaper.startBrowserReaper();
 
@@ -5218,7 +5222,7 @@ function startBot() {
           // Sembunyikan command admin dari user biasa.
           const cmds = isAdmin(chatId) ? COMMANDS : COMMANDS.filter(c => !c.adminOnly);
           const hist = aiHistory.get(chatId) || [];
-          const r = await assistant.assist(text, cmds, hist);
+          const r = await assistant.assist(text, cmds, hist, statsDb.getLang(chatId));
           // Rekam turn untuk konteks lintas-pesan (simpan maks 6 entri).
           hist.push({ role: 'user', content: text });
           if (r.reply) hist.push({ role: 'assistant', content: r.reply });
