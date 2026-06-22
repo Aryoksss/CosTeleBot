@@ -113,8 +113,9 @@ function buildStateJson(deps) {
   if (deps.watcher && deps.settings) {
     try {
       const active = deps.watcher.getActiveSources();
-      const meta = deps.watcher.getSourcesMeta().filter(m => active.includes(m.key));
-      watch = { sources: meta, active, subs: deps.settings.getWatchSubs() };
+      const all = deps.watcher.getSourcesMeta();
+      const meta = all.filter(m => active.includes(m.key));
+      watch = { sources: meta, allSources: all, active, subs: deps.settings.getWatchSubs() };
     } catch (_) { }
   }
 
@@ -523,8 +524,16 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
 `}
 
 <h3 style="color:#79c0ff">🔔 Watcher Recipients (notif post baru)</h3>
+${!state.watch ? '' : `
+<div class="card" style="margin-bottom:14px">
+  <div class="label">📡 Source Aktif Dipantau</div>
+  <div class="sub" style="margin-top:4px">Pilih sumber mana yang dipantau watcher. Nyalakan lebih banyak buat dapat notif dari sumber lain (anime, jav, ero, xnxx, cosplay).</div>
+  <div class="fieldrow" style="gap:14px;margin-top:10px">
+    ${state.watch.allSources.map(s => `<label class="switch" style="color:var(--text)"><input type="checkbox" ${state.watch.active.includes(s.key) ? 'checked' : ''} onchange="srcToggle()" data-srckey="${escape(s.key)}"><span class="track"></span> ${s.icon} ${escape(s.label)}</label>`).join('')}
+  </div>
+</div>`}
 <div class="card">
-  <div class="sub">Admin selalu menerima semua source. Di bawah ini penerima tambahan — centang source yang mau dikirim ke tiap orang. (Notif deploy/health terpisah, admin saja.)</div>
+  <div class="sub">Admin selalu menerima semua source aktif. Di bawah ini penerima tambahan — centang source yang mau dikirim ke tiap orang. (Notif deploy/health terpisah, admin saja.)</div>
   ${!state.watch ? '<div class="empty" style="margin-top:8px">watcher tidak aktif</div>' : `
   <div class="tablewrap"><table style="margin-top:8px">
     <thead><tr><th>Chat ID</th>${state.watch.sources.map(s => `<th>${s.icon} ${escape(s.label)}</th>`).join('')}<th></th></tr></thead>
@@ -598,6 +607,11 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
     const boxes = document.querySelectorAll('input[data-wid="' + id + '"]');
     const sources = Array.from(boxes).filter(b => b.checked).map(b => b.getAttribute('data-src'));
     post('/admin/api/watch', { action: 'setsources', chatId: id, sources });
+  }
+  function srcToggle() {
+    const boxes = document.querySelectorAll('input[data-srckey]');
+    const sources = Array.from(boxes).filter(b => b.checked).map(b => b.getAttribute('data-srckey'));
+    post('/admin/api/watchsources', { sources });
   }
   function ban(uid, action) { if (confirm(action + ' ' + uid + '?')) post('/admin/api/ban', { chatId: uid, action }); }
   function maint(on) { if (confirm((on ? 'Aktifkan' : 'Matikan') + ' maintenance mode?')) post('/admin/api/maintenance', { on }); }
@@ -750,6 +764,13 @@ function startDashboard(deps) {
               return ok('source diupdate');
             }
             return fail('unknown watch action');
+          }
+          if (route === 'watchsources') {
+            if (!st) return fail('settings unavailable');
+            const arr = Array.isArray(data.sources) ? data.sources : [];
+            st.setWatchActiveSources(arr);
+            if (deps.watcher && deps.watcher.setActiveSources) deps.watcher.setActiveSources(arr);
+            return ok('source aktif: ' + (arr.length ? arr.join(', ') : 'default'));
           }
           if (route === 'ban') {
             if (!sdb || !/^\d+$/.test(String(data.chatId))) return fail('chatId invalid');

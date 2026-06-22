@@ -29,6 +29,7 @@ function defaults() {
     },
     notifyExtra: [], // [deprecated] dimigrasikan ke watchSubs saat load
     watchSubs: {},   // { "<chatId>": ["javtiful","otakudesu"] | ["all"] } — langganan watcher per-user
+    watchActiveSources: null, // null = pakai default env; array = override source yang dipoll
     maintenance: false, // kalau true, bot tolak user non-admin
   };
 }
@@ -130,6 +131,15 @@ function watchShouldNotify(chatId, sourceKey) {
   return subs.includes(sourceKey);
 }
 
+/** Source watcher yang aktif dipoll (override env). null = default env. */
+function getWatchActiveSources() { return load().watchActiveSources || null; }
+function setWatchActiveSources(arr) {
+  const s = load();
+  s.watchActiveSources = (Array.isArray(arr) && arr.length) ? arr.map(String) : null;
+  save();
+  return s.watchActiveSources;
+}
+
 function addNotify(chatId) {  const s = load();
   const id = String(chatId).trim();
   if (id && !s.notifyExtra.includes(id)) { s.notifyExtra.push(id); save(); }
@@ -141,4 +151,4 @@ function removeNotify(chatId) {
   save();
 }
 
-module.exports = { getAll, getPlans, getLimits, getNotifyExtra, getWatchSubs, setPlanPrice, setLimit, addNotify, removeNotify, getMaintenance, setMaintenance, addWatchRecipient, removeWatchRecipient, setWatchSources, watchShouldNotify };
+module.exports = { getAll, getPlans, getLimits, getNotifyExtra, getWatchSubs, setPlanPrice, setLimit, addNotify, removeNotify, getMaintenance, setMaintenance, addWatchRecipient, removeWatchRecipient, setWatchSources, watchShouldNotify, getWatchActiveSources, setWatchActiveSources };

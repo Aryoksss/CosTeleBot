@@ -42,6 +42,13 @@ let state = null;        // { [sourceKey]: { seen: string[], lastCheck, lastErro
 let timer = null;
 let running = false;
 let ctx = null;          // { bot, adminChatIds, scrapers, onOpen }
+let activeOverride = null; // override sumber aktif dari settings (via dashboard); null = pakai env cfg.sources
+
+/** Sumber yang sedang dipoll: override settings (kalau ada) > env. Hanya yang punya adapter. */
+function activeSources() {
+  const base = (activeOverride && activeOverride.length) ? activeOverride : cfg.sources;
+  return base.filter(k => ADAPTERS[k]);
+}
 
 // Token map untuk tombol "Buka di Bot" (in-memory, hilang saat restart — itu OK).
 const tokenMap = new Map();
@@ -138,6 +145,78 @@ const ADAPTERS = {
       }));
     },
   },
+  oploverz: {
+    icon: '🌊',
+    label: 'Oploverz',
+    route: 'anime',
+    async fetch(scrapers) {
+      if (!scrapers.oploverz) return [];
+      const list = await scrapers.oploverz.getLatest(1);
+      return (list || []).map(s => ({
+        uid: 'oplo:' + (s.slug || s.id),
+        title: s.title,
+        url: '',
+        thumb: s.poster || null,
+        meta: s.status ? `📺 ${s.status}` : '',
+        route: 'anime',
+        query: s.title,
+      }));
+    },
+  },
+  kusonime: {
+    icon: '🌸',
+    label: 'Kusonime',
+    route: 'anime',
+    async fetch(scrapers) {
+      if (!scrapers.kusonime) return [];
+      const list = await scrapers.kusonime.scrapeListing(1);
+      return (list || []).map(p => ({
+        uid: p.url,
+        title: p.title,
+        url: p.url,
+        thumb: p.poster || null,
+        meta: '',
+        route: 'anime',
+        query: p.title,
+      }));
+    },
+  },
+  erothots: {
+    icon: '🔥',
+    label: 'EroThots',
+    route: 'ero',
+    async fetch(scrapers) {
+      if (!scrapers.erothots) return [];
+      const { items } = await scrapers.erothots.scrapeBrowse(1);
+      return (items || []).map(it => ({
+        uid: it.link,
+        title: it.title,
+        url: it.link,
+        thumb: it.thumb || null,
+        meta: it.durationText ? `⏱️ ${it.durationText}` : '',
+        route: 'ero',
+        query: it.title,
+      }));
+    },
+  },
+  xnxx: {
+    icon: '🟦',
+    label: 'XNXX',
+    route: 'xnxx',
+    async fetch(scrapers) {
+      if (!scrapers.xnxx) return [];
+      const { items } = await scrapers.xnxx.scrapeBrowse(1);
+      return (items || []).map(it => ({
+        uid: it.link,
+        title: it.title,
+        url: it.link,
+        thumb: it.thumb || null,
+        meta: [it.durationText, it.quality].filter(Boolean).join(' · '),
+        route: 'xnxx',
+        query: it.title,
+      }));
+    },
+  },
 };
 
 // ─── NOTIFY ──────────────────────────────────────────────────────────────────
@@ -162,7 +241,7 @@ async function notifyAdmins(adapter, item, sourceKey) {
     `${adapter.icon} <b>${escHtml(adapter.label)}</b> — post baru!\n\n` +
     `<b>${escHtml(item.title)}</b>\n` +
     (item.meta ? `${escHtml(item.meta)}\n` : '') +
-    `\n<a href="${escHtml(item.url)}">🔗 Buka sumber</a>`;
+    (item.url ? `\n<a href="${escHtml(item.url)}">🔗 Buka sumber</a>` : '');
 
   const keyboard = {
     inline_keyboard: [[{ text: '🔎 Buka di Bot', callback_data: `watch_open_${token}` }]],
@@ -255,7 +334,7 @@ async function runCycle() {
   if (running) { log.warn('Siklus sebelumnya masih jalan, skip.'); return; }
   running = true;
   try {
-    for (const key of cfg.sources) {
+    for (const key of activeSources()) {
       await checkSource(key);
     }
   } catch (e) {
@@ -275,16 +354,19 @@ async function runCycle() {
  */
 function startWatcher(opts) {
   ctx = opts;
+  if (Array.isArray(opts.activeSources) && opts.activeSources.length) {
+    activeOverride = opts.activeSources.filter(k => ADAPTERS[k]);
+  }
 
   if (!cfg.enabled) { log.info('WATCHER_ENABLED!=1 → watcher nonaktif.'); return; }
   if (!ctx.adminChatIds || ctx.adminChatIds.length === 0) {
     log.warn('Tidak ada admin chat id → watcher nonaktif (notif tidak punya tujuan).');
     return;
   }
-  if (cfg.sources.length === 0) { log.warn('WATCHER_SOURCES kosong → nonaktif.'); return; }
+  if (activeSources().length === 0) { log.warn('Tidak ada sumber watcher aktif → nonaktif.'); return; }
 
   loadState();
-  log.info(`Aktif. Sumber: [${cfg.sources.join(', ')}] · tiap ${cfg.intervalMin} menit · admin: ${ctx.adminChatIds.length}.`);
+  log.info(`Aktif. Sumber: [${activeSources().join(', ')}] · tiap ${cfg.intervalMin} menit · admin: ${ctx.adminChatIds.length}.`);
 
   // Cek pertama setelah 20 detik (biar bot settle dulu), lalu interval.
   setTimeout(() => runCycle(), 20000);
@@ -297,12 +379,13 @@ function stopWatcher() {
 }
 
 function getStatus() {
+  const act = activeSources();
   return {
     enabled: cfg.enabled,
     intervalMin: cfg.intervalMin,
-    sources: cfg.sources,
+    sources: act,
     running,
-    state: state ? Object.fromEntries(cfg.sources.map(k => [k, {
+    state: state ? Object.fromEntries(act.map(k => [k, {
       seen: state[k]?.seen?.length || 0,
       lastCheck: state[k]?.lastCheck || 0,
       lastError: state[k]?.lastError || null,
@@ -321,9 +404,15 @@ function getSourcesMeta() {
   return Object.entries(ADAPTERS).map(([key, a]) => ({ key, label: a.label, icon: a.icon }));
 }
 
-/** Source yang aktif dipoll (subset dari yang di-enable env). */
+/** Source yang aktif dipoll saat ini (override settings > env). */
 function getActiveSources() {
-  return cfg.sources.slice();
+  return activeSources();
+}
+
+/** Set source aktif secara live (dari dashboard). arr null/[] → balik ke env default. */
+function setActiveSources(arr) {
+  activeOverride = (Array.isArray(arr) && arr.length) ? arr.filter(k => ADAPTERS[k]) : null;
+  return getActiveSources();
 }
 
 module.exports = {
@@ -334,5 +423,6 @@ module.exports = {
   consumeToken,
   getSourcesMeta,
   getActiveSources,
+  setActiveSources,
   _config: cfg,
 };

@@ -4447,15 +4447,23 @@ function startBot() {
     getRecipients: () => Array.from(new Set([...ADMIN_IDS, ...Object.keys(settings.getWatchSubs())].map(String))),
     // Filter per-user per-source: admin tanpa entry → semua source.
     shouldNotify: (chatId, sourceKey) => settings.watchShouldNotify(chatId, sourceKey),
+    // Source aktif: override dari dashboard (settings) kalau ada, else default env.
+    activeSources: settings.getWatchActiveSources(),
     scrapers: {
       cosplaytele: cosplayteleScraper,
       javtiful: javtifulScraper,
       otakudesu: otakudesuScraper,
+      oploverz: oploverzScraper,
+      kusonime: kusonimeScraper,
+      erothots: erothotsScraper,
+      xnxx: xnxxScraper,
     },
     onOpen: (route, query, chatId) => {
       if (route === 'anime') return doAnimeSearch(bot, chatId, query);
       if (route === 'jav') return doJavBrowse(bot, chatId, query, 1, 'search');
       if (route === 'cosplay') return doCosplayteleBrowse(bot, chatId, 'home', 1, query, 'search');
+      if (route === 'ero') return doEroBrowse(bot, chatId, query, 1);
+      if (route === 'xnxx') return doXnxxBrowse(bot, chatId, query, 1);
     },
   });
 
