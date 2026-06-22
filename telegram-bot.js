@@ -4441,8 +4441,12 @@ function startBot() {
   // Auto-notify post/episode baru ke admin (polling berkala).
   watcher.startWatcher({
     bot,
-    // Admin + penerima notif tambahan yang diatur via dashboard web (settings.notifyExtra).
-    adminChatIds: Array.from(new Set([...ADMIN_IDS, ...settings.getNotifyExtra()].map(String))),
+    // Penerima = admin + penerima watcher tambahan (watchSubs) yang diatur via dashboard.
+    adminChatIds: Array.from(new Set([...ADMIN_IDS, ...Object.keys(settings.getWatchSubs())].map(String))),
+    // Dievaluasi tiap siklus → tambah/hapus recipient dari dashboard langsung berlaku tanpa restart.
+    getRecipients: () => Array.from(new Set([...ADMIN_IDS, ...Object.keys(settings.getWatchSubs())].map(String))),
+    // Filter per-user per-source: admin tanpa entry → semua source.
+    shouldNotify: (chatId, sourceKey) => settings.watchShouldNotify(chatId, sourceKey),
     scrapers: {
       cosplaytele: cosplayteleScraper,
       javtiful: javtifulScraper,
@@ -4463,6 +4467,7 @@ function startBot() {
     settings,
     fileCache,
     healthcheck,
+    watcher,
     getLogs: () => recentLogs,
     statsDbRead: () => {
       // Read stats.json langsung untuk get all users

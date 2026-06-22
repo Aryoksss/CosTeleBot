@@ -109,6 +109,15 @@ function buildStateJson(deps) {
   const premiumCount = userList.filter(u => u.tier !== 'free').length;
   const bannedCount = userList.filter(u => u.banned).length;
 
+  let watch = null;
+  if (deps.watcher && deps.settings) {
+    try {
+      const active = deps.watcher.getActiveSources();
+      const meta = deps.watcher.getSourcesMeta().filter(m => active.includes(m.key));
+      watch = { sources: meta, active, subs: deps.settings.getWatchSubs() };
+    } catch (_) { }
+  }
+
   return {
     bot: {
       uptime: Math.floor((Date.now() - botStats.startTime) / 1000),
@@ -142,6 +151,7 @@ function buildStateJson(deps) {
     },
     cache: cacheStats,
     settings: cfg,
+    watch,
     maintenance: deps.settings ? deps.settings.getMaintenance() : false,
   };
 }
@@ -155,6 +165,9 @@ function renderHtml(state) {
 <head>
 <meta charset="UTF-8">
 <title>CosTeleBot Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%AD%3C/text%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%AD%3C/text%3E%3C/svg%3E">
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
          background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
@@ -370,16 +383,28 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
 </table>
 `}
 
-<h3 style="color:#79c0ff">🔔 Extra Notify Recipients</h3>
+<h3 style="color:#79c0ff">🔔 Watcher Recipients (notif post baru)</h3>
 <div class="card">
-  <div class="sub">Chat ID tambahan yang dapat notif deploy/health (selain admin).</div>
-  <div style="margin-top:8px">
-    ${(state.settings && state.settings.notifyExtra.length) ? state.settings.notifyExtra.map(id => `<span class="mono">${escape(id)}</span> <button onclick="notifDel('${escape(id)}')">✕</button> &nbsp;`).join('') : '<span class="empty">none</span>'}
+  <div class="sub">Admin selalu menerima semua source. Di bawah ini penerima tambahan — centang source yang mau dikirim ke tiap orang. (Notif deploy/health terpisah, admin saja.)</div>
+  ${!state.watch ? '<div class="empty" style="margin-top:8px">watcher tidak aktif</div>' : `
+  <table style="margin-top:8px">
+    <thead><tr><th>Chat ID</th>${state.watch.sources.map(s => `<th>${s.icon} ${escape(s.label)}</th>`).join('')}<th></th></tr></thead>
+    <tbody>
+      ${Object.keys(state.watch.subs).length === 0 ? `<tr><td colspan="${state.watch.sources.length + 2}" class="empty">belum ada penerima tambahan</td></tr>` : Object.entries(state.watch.subs).map(([id, subs]) => {
+        const all = subs.includes('all');
+        return `<tr>
+          <td class="mono">${escape(id)}</td>
+          ${state.watch.sources.map(s => `<td style="text-align:center"><input type="checkbox" data-wid="${escape(id)}" data-src="${escape(s.key)}" ${(all || subs.includes(s.key)) ? 'checked' : ''} onchange="watchToggle(this)"></td>`).join('')}
+          <td><button onclick="watchDel('${escape(id)}')" style="background:#da3633">✕</button></td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>
+  <div style="margin-top:10px">
+    <input id="watch_id" placeholder="Chat ID baru" class="inp">
+    <button onclick="watchAdd()">+ Tambah Penerima (semua source)</button>
   </div>
-  <div style="margin-top:8px">
-    <input id="notif_id" placeholder="Chat ID" class="inp">
-    <button onclick="notifAdd()">Add</button>
-  </div>
+  `}
 </div>
 
 <h2>📜 Recent Logs</h2>
@@ -405,6 +430,14 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
   function savePrice(tier, days) { post('/admin/api/price', { tier, days, price: document.getElementById('price_' + tier + '_' + days).value }); }
   function notifAdd() { post('/admin/api/notify', { add: notif_id.value }); }
   function notifDel(id) { post('/admin/api/notify', { remove: id }); }
+  function watchAdd() { if (watch_id.value.trim()) post('/admin/api/watch', { action: 'add', chatId: watch_id.value.trim() }); }
+  function watchDel(id) { if (confirm('Hapus penerima ' + id + '?')) post('/admin/api/watch', { action: 'remove', chatId: id }); }
+  function watchToggle(el) {
+    const id = el.getAttribute('data-wid');
+    const boxes = document.querySelectorAll('input[data-wid="' + id + '"]');
+    const sources = Array.from(boxes).filter(b => b.checked).map(b => b.getAttribute('data-src'));
+    post('/admin/api/watch', { action: 'setsources', chatId: id, sources });
+  }
   function ban(uid, action) { if (confirm(action + ' ' + uid + '?')) post('/admin/api/ban', { chatId: uid, action }); }
   function maint(on) { if (confirm((on ? 'Aktifkan' : 'Matikan') + ' maintenance mode?')) post('/admin/api/maintenance', { on }); }
   function setConc() { post('/admin/api/queue', { action: 'concurrency', value: q_conc.value }); }
@@ -461,6 +494,13 @@ function startDashboard(deps) {
   }
 
   const server = http.createServer((req, res) => {
+    // Favicon (sebelum auth) — SVG emoji, supaya tab browser ada ikonnya.
+    if (req.url === '/favicon.ico' || req.url === '/favicon.svg') {
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🎭</text></svg>`;
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'max-age=86400' });
+      res.end(svg);
+      return;
+    }
     if (!checkAuth(req)) return unauthorized(res);
 
     // ── POST actions (settings) ──
@@ -502,6 +542,24 @@ function startDashboard(deps) {
             if (data.add && /^\d+$/.test(String(data.add))) st.addNotify(String(data.add));
             if (data.remove) st.removeNotify(String(data.remove));
             return ok('notify updated');
+          }
+          if (route === 'watch') {
+            if (!st) return fail('settings unavailable');
+            if (data.action === 'add') {
+              if (!/^\d+$/.test(String(data.chatId))) return fail('chatId invalid');
+              st.addWatchRecipient(String(data.chatId));
+              return ok('penerima ditambah');
+            }
+            if (data.action === 'remove') {
+              st.removeWatchRecipient(String(data.chatId));
+              return ok('penerima dihapus');
+            }
+            if (data.action === 'setsources') {
+              if (!/^\d+$/.test(String(data.chatId))) return fail('chatId invalid');
+              st.setWatchSources(String(data.chatId), Array.isArray(data.sources) ? data.sources : []);
+              return ok('source diupdate');
+            }
+            return fail('unknown watch action');
           }
           if (route === 'ban') {
             if (!sdb || !/^\d+$/.test(String(data.chatId))) return fail('chatId invalid');

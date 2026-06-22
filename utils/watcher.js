@@ -75,6 +75,14 @@ function escHtml(s) {
   return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/** Daftar penerima saat ini (dievaluasi tiap kirim agar perubahan dashboard langsung berlaku). */
+function recipients() {
+  if (typeof ctx.getRecipients === 'function') {
+    try { return ctx.getRecipients() || []; } catch (_) { return ctx.adminChatIds || []; }
+  }
+  return ctx.adminChatIds || [];
+}
+
 // ─── SOURCE ADAPTERS ─────────────────────────────────────────────────────────
 // Tiap adapter mengembalikan array item ter-normalisasi:
 //   { uid, title, url, thumb, meta, route, query }
@@ -148,7 +156,7 @@ function consumeToken(token) {
   return tokenMap.get(token) || null;
 }
 
-async function notifyAdmins(adapter, item) {
+async function notifyAdmins(adapter, item, sourceKey) {
   const token = makeToken(item.route, item.query);
   const caption =
     `${adapter.icon} <b>${escHtml(adapter.label)}</b> — post baru!\n\n` +
@@ -160,7 +168,8 @@ async function notifyAdmins(adapter, item) {
     inline_keyboard: [[{ text: '🔎 Buka di Bot', callback_data: `watch_open_${token}` }]],
   };
 
-  for (const chatId of ctx.adminChatIds) {
+  for (const chatId of recipients()) {
+    if (ctx.shouldNotify && !ctx.shouldNotify(chatId, sourceKey)) continue;
     try {
       if (item.thumb) {
         await ctx.bot.sendPhoto(chatId, item.thumb, { caption, parse_mode: 'HTML', reply_markup: keyboard });
@@ -176,9 +185,10 @@ async function notifyAdmins(adapter, item) {
   }
 }
 
-async function notifySummary(adapter, extraCount) {
+async function notifySummary(adapter, extraCount, sourceKey) {
   const text = `${adapter.icon} <b>${escHtml(adapter.label)}</b>: +${extraCount} post baru lainnya (tidak ditampilkan agar tidak spam).`;
-  for (const chatId of ctx.adminChatIds) {
+  for (const chatId of recipients()) {
+    if (ctx.shouldNotify && !ctx.shouldNotify(chatId, sourceKey)) continue;
     ctx.bot.sendMessage(chatId, text, { parse_mode: 'HTML' }).catch(() => { });
   }
 }
@@ -232,11 +242,11 @@ async function checkSource(key) {
   log.ok(`${adapter.label}: ${fresh.length} post baru → notif admin.`);
   const toShow = fresh.slice(0, cfg.maxNotify);
   for (const item of toShow) {
-    await notifyAdmins(adapter, item);
+    await notifyAdmins(adapter, item, key);
     await new Promise(r => setTimeout(r, 400)); // jeda kecil antar-kirim
   }
   if (fresh.length > toShow.length) {
-    await notifySummary(adapter, fresh.length - toShow.length);
+    await notifySummary(adapter, fresh.length - toShow.length, key);
   }
   return { key, new: fresh.length };
 }
@@ -306,11 +316,23 @@ async function forceCheck() {
   return getStatus();
 }
 
+/** Meta semua source watcher (key, label, icon) untuk UI dashboard. */
+function getSourcesMeta() {
+  return Object.entries(ADAPTERS).map(([key, a]) => ({ key, label: a.label, icon: a.icon }));
+}
+
+/** Source yang aktif dipoll (subset dari yang di-enable env). */
+function getActiveSources() {
+  return cfg.sources.slice();
+}
+
 module.exports = {
   startWatcher,
   stopWatcher,
   getStatus,
   forceCheck,
   consumeToken,
+  getSourcesMeta,
+  getActiveSources,
   _config: cfg,
 };
