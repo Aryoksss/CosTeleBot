@@ -107,6 +107,28 @@ function getPremiumUntil(chatId) {
     return (u && u.premiumUntil) || 0;
 }
 
+// ─── BAN / MODERASI ──────────────────────────────────────────────────────────
+/** Blokir user (tidak bisa pakai bot). */
+function banUser(chatId) {
+    const u = getInitUser(chatId);
+    u.banned = true;
+    scheduleSave();
+}
+/** Cabut blokir user. */
+function unbanUser(chatId) {
+    const u = statsData[chatId];
+    if (u) { u.banned = false; scheduleSave(); }
+}
+/** True kalau user diblokir. */
+function isBanned(chatId) {
+    const u = statsData[chatId];
+    return !!(u && u.banned);
+}
+/** Semua chatId yang pernah tercatat (untuk broadcast). */
+function allChatIds() {
+    return Object.keys(statsData);
+}
+
 /** Daftar semua user premium aktif → [{chatId, until, tier}]. */
 function listPremium() {
     const now = Date.now();
@@ -195,4 +217,8 @@ module.exports = {
     incDailyDownloads,
     getLang,
     setLang,
+    banUser,
+    unbanUser,
+    isBanned,
+    allChatIds,
 };

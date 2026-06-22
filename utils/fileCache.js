@@ -100,6 +100,15 @@ function stats() {
   return { entries: keys.length, totalHits };
 }
 
+/** Kosongkan seluruh cache file_id. Return jumlah entry yang dihapus. */
+function clearAll() {
+  load();
+  const n = Object.keys(cache).length;
+  cache = {};
+  save();
+  return n;
+}
+
 function flushOnExit() {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   save();
@@ -108,4 +117,4 @@ process.on('beforeExit', flushOnExit);
 process.on('SIGINT', () => { flushOnExit(); process.exit(0); });
 process.on('SIGTERM', () => { flushOnExit(); process.exit(0); });
 
-module.exports = { get, set, bump, remove, stats };
+module.exports = { get, set, bump, remove, stats, clearAll };

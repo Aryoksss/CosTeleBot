@@ -100,9 +100,14 @@ function buildStateJson(deps) {
     premiumUntil: s.premiumUntil || 0,
     dailyCount: (s.dailyDate === new Date(now).getFullYear() + '-' + (new Date(now).getMonth() + 1) + '-' + new Date(now).getDate()) ? (s.dailyCount || 0) : 0,
     lang: s.lang === 'en' ? 'en' : 'id',
+    banned: !!s.banned,
   })).sort((a, b) => b.downloadBytes - a.downloadBytes);
 
   const cfg = deps.settings ? deps.settings.getAll() : null;
+  let cacheStats = null;
+  try { cacheStats = deps.fileCache ? deps.fileCache.stats() : null; } catch (_) { }
+  const premiumCount = userList.filter(u => u.tier !== 'free').length;
+  const bannedCount = userList.filter(u => u.banned).length;
 
   return {
     bot: {
@@ -131,9 +136,13 @@ function buildStateJson(deps) {
     },
     users: {
       total: userList.length,
-      list: userList.slice(0, 50),
+      premiumCount,
+      bannedCount,
+      list: userList.slice(0, 100),
     },
+    cache: cacheStats,
     settings: cfg,
+    maintenance: deps.settings ? deps.settings.getMaintenance() : false,
   };
 }
 
@@ -173,6 +182,7 @@ function renderHtml(state) {
 </head>
 <body>
 <h1>🎭 CosTeleBot Dashboard</h1>
+${state.maintenance ? '<div style="background:#7d3a00;border:1px solid #da3633;border-radius:6px;padding:10px 14px;margin-bottom:14px;color:#ffd9a0">🛠️ <b>MAINTENANCE MODE AKTIF</b> — user non-admin diblok.</div>' : ''}
 
 <div class="grid">
   <div class="card">
@@ -203,7 +213,65 @@ function renderHtml(state) {
   </div>
 </div>
 
-<h2>🏃 Active Jobs</h2>
+<h2>�️ Control Center</h2>
+<div class="grid">
+  <div class="card">
+    <div class="label">🛠️ Maintenance Mode</div>
+    <div style="margin-top:8px">
+      <div class="value" style="font-size:18px">${state.maintenance ? '🔴 ON' : '🟢 OFF'}</div>
+      <button onclick="maint(${state.maintenance ? 'false' : 'true'})" style="margin-top:6px;background:${state.maintenance ? '#6e7681' : '#da3633'}">${state.maintenance ? 'Turn OFF' : 'Turn ON'}</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="label">⚙️ Queue Concurrency</div>
+    <div style="margin-top:8px">
+      <input id="q_conc" value="${state.queue.maxConcurrency}" class="inp" style="width:60px">
+      <button onclick="setConc()">Set</button>
+      <button onclick="clearQ()" style="background:#da3633">Clear Pending (${state.queue.pendingCount})</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="label">🗂️ File-ID Cache</div>
+    <div style="margin-top:8px">
+      <div class="value" style="font-size:18px">${state.cache ? state.cache.entries : 0} <span class="sub">entries · ${state.cache ? state.cache.totalHits : 0} hits</span></div>
+      <button onclick="clearCache()" style="margin-top:6px;background:#da3633">Clear Cache</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="label">🏥 Health & Process</div>
+    <div style="margin-top:8px">
+      <button onclick="runHealth()">Run Healthcheck</button>
+      <button onclick="restart()" style="background:#da3633">Restart Bot</button>
+    </div>
+    <div id="health_out" class="sub" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="label">📢 Broadcast (HTML ok)</div>
+    <div style="margin-top:8px">
+      <select id="bc_tier" class="inp">
+        <option value="all">Semua user</option>
+        <option value="premium">Premium saja</option>
+        <option value="vvip">VVIP saja</option>
+        <option value="free">Free saja</option>
+      </select>
+      <textarea id="bc_text" class="inp" style="width:96%;height:60px;display:block;margin-top:6px" placeholder="Pesan broadcast..."></textarea>
+      <button onclick="broadcast()" style="margin-top:6px">Kirim Broadcast</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="label">✉️ Direct Message</div>
+    <div style="margin-top:8px">
+      <input id="dm_uid" placeholder="Chat ID" class="inp">
+      <textarea id="dm_text" class="inp" style="width:96%;height:60px;display:block;margin-top:6px" placeholder="Pesan ke user..."></textarea>
+      <button onclick="sendDM()" style="margin-top:6px">Kirim DM</button>
+    </div>
+  </div>
+</div>
+
+<h2>�🏃 Active Jobs</h2>
 ${state.queue.active.length === 0 ? '<div class="empty">No active jobs</div>' : `
 <table>
   <thead><tr><th>#</th><th>User</th><th>Title</th><th>Progress</th></tr></thead>
@@ -241,8 +309,8 @@ ${state.users.list.length === 0 ? '<div class="empty">No users tracked</div>' : 
   <thead><tr><th>Chat ID</th><th>Tier</th><th>Today</th><th>Gacha</th><th>Downloaded</th><th>Lang</th><th>Action</th></tr></thead>
   <tbody>
     ${state.users.list.map(u => `
-      <tr>
-        <td class="mono">${escape(u.chatId)}</td>
+      <tr${u.banned ? ' style="opacity:.5"' : ''}>
+        <td class="mono">${escape(u.chatId)}${u.banned ? ' 🚫' : ''}</td>
         <td>${u.tier === 'vvip' ? '👑 VVIP' : u.tier === 'premium' ? '💎 Premium' : '🆓 Free'}${u.premiumUntil ? `<div class="sub">${new Date(u.premiumUntil).toISOString().slice(0, 10)}</div>` : ''}</td>
         <td>${u.dailyCount}</td>
         <td>${u.gachaCasts}</td>
@@ -252,6 +320,10 @@ ${state.users.list.length === 0 ? '<div class="empty">No users tracked</div>' : 
           <button onclick="grant('${escape(u.chatId)}','premium',30)">+P30</button>
           <button onclick="grant('${escape(u.chatId)}','vvip',30)">+V30</button>
           <button onclick="revoke('${escape(u.chatId)}')">✕</button>
+          <button onclick="dmUser('${escape(u.chatId)}')" style="background:#1f6feb">✉</button>
+          ${u.banned
+      ? `<button onclick="ban('${escape(u.chatId)}','unban')" style="background:#6e7681">unban</button>`
+      : `<button onclick="ban('${escape(u.chatId)}','ban')" style="background:#da3633">ban</button>`}
         </td>
       </tr>
     `).join('')}
@@ -310,6 +382,11 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
   </div>
 </div>
 
+<h2>📜 Recent Logs</h2>
+<div class="card" style="max-height:280px;overflow:auto;font-family:'SF Mono',Consolas,monospace;font-size:12px;line-height:1.6">
+  <div id="logbox" class="sub">loading...</div>
+</div>
+
 <div id="msg" class="refresh-info"></div>
 <div class="refresh-info">Auto-refresh 10s (pauses while typing) · <a href="/admin" style="color: #58a6ff;">manual</a></div>
 
@@ -328,7 +405,46 @@ ${!state.settings ? '<div class="empty">settings unavailable</div>' : `
   function savePrice(tier, days) { post('/admin/api/price', { tier, days, price: document.getElementById('price_' + tier + '_' + days).value }); }
   function notifAdd() { post('/admin/api/notify', { add: notif_id.value }); }
   function notifDel(id) { post('/admin/api/notify', { remove: id }); }
-  setInterval(() => { if (!/INPUT|SELECT|BUTTON/.test(document.activeElement.tagName)) location.reload(); }, 10000);
+  function ban(uid, action) { if (confirm(action + ' ' + uid + '?')) post('/admin/api/ban', { chatId: uid, action }); }
+  function maint(on) { if (confirm((on ? 'Aktifkan' : 'Matikan') + ' maintenance mode?')) post('/admin/api/maintenance', { on }); }
+  function setConc() { post('/admin/api/queue', { action: 'concurrency', value: q_conc.value }); }
+  function clearQ() { if (confirm('Clear semua antrean pending?')) post('/admin/api/queue', { action: 'clear' }); }
+  function clearCache() { if (confirm('Clear file-ID cache?')) post('/admin/api/cache', { action: 'clear' }); }
+  function restart() { if (confirm('Restart bot sekarang? Job berjalan akan terputus.')) post('/admin/api/restart', {}); }
+  function dmUser(uid) { dm_uid.value = uid; dm_text.focus(); document.getElementById('dm_uid').scrollIntoView({ behavior: 'smooth' }); }
+  function sendDM() {
+    const t = dm_text.value.trim(); if (!t) return;
+    post('/admin/api/dm', { chatId: dm_uid.value, text: t });
+  }
+  function broadcast() {
+    const t = bc_text.value.trim(); if (!t) return;
+    if (!confirm('Kirim broadcast ke ' + bc_tier.value + '?')) return;
+    post('/admin/api/broadcast', { tier: bc_tier.value, text: t });
+  }
+  async function runHealth() {
+    document.getElementById('health_out').textContent = '⏳ checking...';
+    const r = await fetch('/admin/api/health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const d = await r.json().catch(() => ({}));
+    if (d.ok && d.results) {
+      document.getElementById('health_out').innerHTML = d.results.map(x =>
+        (x.status === 'ok' ? '✅' : x.status === 'warn' ? '⚠️' : '❌') + ' ' + x.name + ' · ' + x.latencyMs + 'ms').join('<br>');
+    } else { document.getElementById('health_out').textContent = '❌ ' + (d.error || 'failed'); }
+  }
+  async function loadLogs() {
+    try {
+      const r = await fetch('/admin/api/logs');
+      const d = await r.json().catch(() => ({}));
+      if (d.logs) {
+        const col = { info: '#8b949e', ok: '#7ee787', warn: '#e3b341', error: '#f85149' };
+        document.getElementById('logbox').innerHTML = d.logs.slice(-120).reverse().map(l =>
+          '<span style="color:#6e7681">' + new Date(l.t).toLocaleTimeString() + '</span> ' +
+          '<span style="color:' + (col[l.level] || '#c9d1d9') + '">' + l.m.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])) + '</span>'
+        ).join('<br>');
+      }
+    } catch (_) { }
+  }
+  loadLogs(); setInterval(loadLogs, 5000);
+  setInterval(() => { if (!/INPUT|SELECT|BUTTON|TEXTAREA/.test(document.activeElement.tagName)) location.reload(); }, 10000);
 </script>
 </body>
 </html>`;
@@ -387,6 +503,57 @@ function startDashboard(deps) {
             if (data.remove) st.removeNotify(String(data.remove));
             return ok('notify updated');
           }
+          if (route === 'ban') {
+            if (!sdb || !/^\d+$/.test(String(data.chatId))) return fail('chatId invalid');
+            if (data.action === 'unban') { sdb.unbanUser(String(data.chatId)); return ok('unbanned'); }
+            sdb.banUser(String(data.chatId));
+            return ok('banned');
+          }
+          if (route === 'maintenance') {
+            if (!st) return fail('settings unavailable');
+            const v = st.setMaintenance(!!data.on);
+            return ok('maintenance ' + (v ? 'ON' : 'OFF'));
+          }
+          if (route === 'queue') {
+            const qm = deps.queueManager;
+            if (!qm) return fail('queue unavailable');
+            if (data.action === 'concurrency') return ok('concurrency → ' + qm.setMaxConcurrency(data.value));
+            if (data.action === 'clear') return ok(qm.clearAllQueues() + ' pending dibuang');
+            return fail('unknown queue action');
+          }
+          if (route === 'cache') {
+            if (!deps.fileCache) return fail('cache unavailable');
+            if (data.action === 'clear') return ok(deps.fileCache.clearAll() + ' entries dihapus');
+            return fail('unknown cache action');
+          }
+          if (route === 'dm') {
+            if (!deps.onDM || !/^\d+$/.test(String(data.chatId))) return fail('chatId invalid');
+            if (!data.text) return fail('text kosong');
+            Promise.resolve(deps.onDM(String(data.chatId), String(data.text)))
+              .then(() => ok('DM terkirim')).catch(e => fail(e.message));
+            return;
+          }
+          if (route === 'broadcast') {
+            if (!deps.onBroadcast) return fail('broadcast unavailable');
+            if (!data.text) return fail('text kosong');
+            Promise.resolve(deps.onBroadcast(String(data.text), data.tier || 'all'))
+              .then(r => ok(`broadcast: ${r.sent}/${r.total} terkirim${r.failed ? `, ${r.failed} gagal` : ''}`))
+              .catch(e => fail(e.message));
+            return;
+          }
+          if (route === 'health') {
+            if (!deps.healthcheck) return fail('healthcheck unavailable');
+            Promise.resolve(deps.healthcheck.checkAllSources())
+              .then(results => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, results })); })
+              .catch(e => fail(e.message));
+            return;
+          }
+          if (route === 'restart') {
+            if (!deps.onRestart) return fail('restart unavailable');
+            ok('restarting...');
+            deps.onRestart();
+            return;
+          }
           return fail('unknown action');
         } catch (e) { return fail(e.message); }
       });
@@ -402,6 +569,18 @@ function startDashboard(deps) {
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'text/plain' });
         res.end(`500: ${e.message}`);
+      }
+      return;
+    }
+
+    if (req.url === '/admin/api/logs') {
+      try {
+        const logs = deps.getLogs ? deps.getLogs() : [];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, logs }));
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
       }
       return;
     }

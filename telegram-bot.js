@@ -147,6 +147,23 @@ class DownloadQueue {
     this.checkQueue();
   }
 
+  /** Ubah batas job konkuren secara live (dari dashboard). Return nilai baru. */
+  setMaxConcurrency(n) {
+    const v = Math.max(1, Math.min(64, parseInt(n, 10) || this.maxConcurrency));
+    this.maxConcurrency = v;
+    this.checkQueue();
+    return v;
+  }
+
+  /** Kosongkan semua antrean pending (job yang sedang berjalan tidak terpengaruh).
+   *  Return jumlah job yang dibuang. */
+  clearAllQueues() {
+    let n = 0;
+    for (const q of this.userQueues.values()) n += q.length;
+    this.userQueues.clear();
+    return n;
+  }
+
   /**
    * Round-robin pick: prioritaskan user premium, lalu yang paling lama tidak dilayani.
    */
@@ -268,6 +285,30 @@ const ADMIN_IDS = new Set(
 );
 const isAdmin = (chatId) => ADMIN_IDS.has(String(chatId));
 
+/**
+ * Gerbang akses: cek ban + maintenance mode sebelum proses request user.
+ * Return true kalau BOLEH lanjut. Kalau diblok, opsional kirim pesan sekali.
+ * Admin selalu lolos.
+ */
+const _gateNotified = new Map(); // chatId -> ts (anti-spam pesan blokir)
+function userAllowed(bot, chatId, notify = true) {
+  if (isAdmin(chatId)) return true;
+  if (statsDb.isBanned(chatId)) {
+    return false; // banned: diam-diam abaikan
+  }
+  if (settings.getMaintenance()) {
+    if (notify) {
+      const last = _gateNotified.get(chatId) || 0;
+      if (Date.now() - last > 60000) {
+        _gateNotified.set(chatId, Date.now());
+        bot.sendMessage(chatId, '🛠️ <b>Bot sedang maintenance.</b> Coba lagi sebentar lagi ya.', { parse_mode: 'HTML' }).catch(() => { });
+      }
+    }
+    return false;
+  }
+  return true;
+}
+
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN,
   ALLOWED_USER_IDS: [], // kosong = semua
@@ -287,11 +328,17 @@ const CONFIG = {
 };
 
 // ─── LOGGER & UTILS ──────────────────────────────────────────────────────────
+// Ring buffer log terakhir (untuk live-view di dashboard web).
+const recentLogs = [];
+function pushLog(level, m) {
+  recentLogs.push({ t: Date.now(), level, m: String(m).replace(/\x1b\[[0-9;]*m/g, '').slice(0, 500) });
+  if (recentLogs.length > 300) recentLogs.shift();
+}
 const log = {
-  info: (m) => console.log(`\x1b[36m[INFO]\x1b[0m  ${m}`),
-  ok: (m) => console.log(`\x1b[32m[OK]\x1b[0m    ${m}`),
-  warn: (m) => console.log(`\x1b[33m[WARN]\x1b[0m  ${m}`),
-  error: (m) => console.log(`\x1b[31m[ERROR]\x1b[0m ${m}`),
+  info: (m) => { pushLog('info', m); console.log(`\x1b[36m[INFO]\x1b[0m  ${m}`); },
+  ok: (m) => { pushLog('ok', m); console.log(`\x1b[32m[OK]\x1b[0m    ${m}`); },
+  warn: (m) => { pushLog('warn', m); console.log(`\x1b[33m[WARN]\x1b[0m  ${m}`); },
+  error: (m) => { pushLog('error', m); console.log(`\x1b[31m[ERROR]\x1b[0m ${m}`); },
 };
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const isImage = (f) => CONFIG.IMAGE_EXTS.includes(path.extname(f).toLowerCase());
@@ -4414,6 +4461,9 @@ function startBot() {
     queueManager,
     statsDb,
     settings,
+    fileCache,
+    healthcheck,
+    getLogs: () => recentLogs,
     statsDbRead: () => {
       // Read stats.json langsung untuk get all users
       try {
@@ -4424,6 +4474,33 @@ function startBot() {
     onGrant: (chatId, tier, days, until) => {
       const label = tier === 'vvip' ? '👑 VVIP' : '💎 Premium';
       bot.sendMessage(chatId, `${label} <b>aktif!</b> Berlaku sampai <b>${fmtDate(until)}</b>. Makasih! 🙏`, { parse_mode: 'HTML' }).catch(() => { });
+    },
+    // Broadcast pesan ke banyak user (opsional filter tier). Return {sent, failed, total}.
+    onBroadcast: async (text, tierFilter) => {
+      const all = statsDb.allChatIds();
+      const targets = all.filter(id => {
+        if (statsDb.isBanned(id)) return false;
+        if (!tierFilter || tierFilter === 'all') return true;
+        return statsDb.getTier(id) === tierFilter;
+      });
+      let sent = 0, failed = 0;
+      for (const id of targets) {
+        try { await bot.sendMessage(id, text, { parse_mode: 'HTML', disable_web_page_preview: true }); sent++; }
+        catch (_) { failed++; }
+        await sleep(40); // hindari rate-limit Telegram (~30 msg/s)
+      }
+      log.ok(`[Broadcast] tier=${tierFilter || 'all'} sent=${sent}/${targets.length}`);
+      return { sent, failed, total: targets.length };
+    },
+    // Kirim DM ke satu user dari dashboard.
+    onDM: async (chatId, text) => {
+      await bot.sendMessage(chatId, text, { parse_mode: 'HTML', disable_web_page_preview: true });
+      return true;
+    },
+    // Restart proses (PM2 auto-respawn). High-risk; dipakai dari tombol berkonfirmasi.
+    onRestart: () => {
+      log.warn('[Dashboard] restart diminta dari web — exit(0), PM2 akan respawn.');
+      setTimeout(() => process.exit(0), 500);
     },
   });
 
@@ -4453,6 +4530,8 @@ function startBot() {
       const chatId = msg.chat.id;
       if (autoClean) bot.deleteMessage(chatId, msg.message_id).catch(() => { });
       if (adminOnly && !isAdmin(chatId)) return;
+      // Gerbang ban + maintenance (admin selalu lolos). /start tetap diizinkan agar user tahu statusnya.
+      if (name !== 'start' && !userAllowed(bot, chatId)) return;
       const arg = hasArg && match && match[1] ? match[1].trim() : null;
       log.info(`[User ${chatId}] Execute /${name}${arg ? ' ' + arg.slice(0, 60) : ''}`);
       try {
@@ -5041,6 +5120,7 @@ function startBot() {
   bot.on('message', async (msg) => {
     if (!msg.text || msg.text.startsWith('/')) return;
     const chatId = msg.chat.id;
+    if (!userAllowed(bot, chatId)) return;
     const text = msg.text.trim();
     log.info(`[User ${chatId}] Mengirim pesan text: ${text.substring(0, 50)}...`);
 
@@ -5274,6 +5354,7 @@ function startBot() {
     const action = query.data;
     log.info(`[User ${chatId}] Hitungan Callback: ${action}`);
     bot.answerCallbackQuery(query.id).catch(() => { });
+    if (action !== 'menu_awal' && action !== 'lang_en' && action !== 'lang_id' && !userAllowed(bot, chatId)) return;
 
     let sid = null;
     const status = async (txt) => {

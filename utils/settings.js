@@ -28,6 +28,7 @@ function defaults() {
       vvip: parseInt(process.env.LIMIT_VVIP || '50', 10),
     },
     notifyExtra: [], // chat id tambahan untuk watcher/deploy notif (selain ADMIN_IDS)
+    maintenance: false, // kalau true, bot tolak user non-admin
   };
 }
 
@@ -81,8 +82,11 @@ function setLimit(tier, value) {
   return true;
 }
 
-function addNotify(chatId) {
-  const s = load();
+/** Maintenance mode: true → bot tolak non-admin. */
+function getMaintenance() { return !!load().maintenance; }
+function setMaintenance(on) { const s = load(); s.maintenance = !!on; save(); return s.maintenance; }
+
+function addNotify(chatId) {  const s = load();
   const id = String(chatId).trim();
   if (id && !s.notifyExtra.includes(id)) { s.notifyExtra.push(id); save(); }
 }
@@ -93,4 +97,4 @@ function removeNotify(chatId) {
   save();
 }
 
-module.exports = { getAll, getPlans, getLimits, getNotifyExtra, setPlanPrice, setLimit, addNotify, removeNotify };
+module.exports = { getAll, getPlans, getLimits, getNotifyExtra, setPlanPrice, setLimit, addNotify, removeNotify, getMaintenance, setMaintenance };
