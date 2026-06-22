@@ -36,7 +36,10 @@ const cfg = {
     .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
   maxNotify: parseInt(process.env.WATCHER_MAX_NOTIFY || '5', 10),
   seenLimit: parseInt(process.env.WATCHER_SEEN_LIMIT || '300', 10),
+  digest: (process.env.WATCHER_DIGEST ?? '1') === '1', // kumpulkan post baru jadi 1 pesan (anti-spam)
 };
+
+let digestOverride = null; // override mode digest dari dashboard (settings); null = pakai env
 
 let state = null;        // { [sourceKey]: { seen: string[], lastCheck, lastError, lastNew } }
 let timer = null;
@@ -48,6 +51,11 @@ let activeOverride = null; // override sumber aktif dari settings (via dashboard
 function activeSources() {
   const base = (activeOverride && activeOverride.length) ? activeOverride : cfg.sources;
   return base.filter(k => ADAPTERS[k]);
+}
+
+/** Mode digest aktif? override dashboard > env. */
+function digestEnabled() {
+  return (digestOverride == null) ? cfg.digest : !!digestOverride;
 }
 
 // Token map untuk tombol "Buka di Bot" (in-memory, hilang saat restart — itu OK).
@@ -272,6 +280,66 @@ async function notifySummary(adapter, extraCount, sourceKey) {
   }
 }
 
+/** Mode lama: kirim tiap post baru sebagai kartu terpisah (banyak pesan). */
+async function sendIndividual(freshBySource) {
+  for (const [key, fresh] of Object.entries(freshBySource)) {
+    const adapter = ADAPTERS[key];
+    const toShow = fresh.slice(0, cfg.maxNotify);
+    for (const item of toShow) {
+      await notifyAdmins(adapter, item, key);
+      await new Promise(r => setTimeout(r, 400));
+    }
+    if (fresh.length > toShow.length) await notifySummary(adapter, fresh.length - toShow.length, key);
+  }
+}
+
+/** Mode digest: kumpulkan SEMUA post baru jadi 1 pesan per penerima (anti-spam). */
+async function sendDigest(freshBySource) {
+  const keys = activeSources().filter(k => freshBySource[k] && freshBySource[k].length);
+  if (!keys.length) return;
+
+  // Buat token sekali per item (dipakai ulang lintas penerima).
+  for (const k of keys) for (const it of freshBySource[k]) it._token = makeToken(it.route, it.query);
+
+  const totalNew = keys.reduce((a, k) => a + freshBySource[k].length, 0);
+  const perSourceCap = Math.max(3, cfg.maxNotify); // jumlah judul ditampilkan per source
+  const MAX_BTN = 8;
+
+  for (const chatId of recipients()) {
+    const myKeys = keys.filter(k => !ctx.shouldNotify || ctx.shouldNotify(chatId, k));
+    if (!myKeys.length) continue;
+    const myTotal = myKeys.reduce((a, k) => a + freshBySource[k].length, 0);
+
+    let text = `🔔 <b>${myTotal} post baru</b> dari ${myKeys.length} sumber\n`;
+    const btns = [];
+    let n = 0;
+    for (const k of myKeys) {
+      const ad = ADAPTERS[k];
+      const items = freshBySource[k];
+      text += `\n${ad.icon} <b>${escHtml(ad.label)}</b> · ${items.length} baru\n`;
+      for (const it of items.slice(0, perSourceCap)) {
+        n++;
+        const title = escHtml((it.title || 'Untitled').slice(0, 90));
+        text += `${n}. ${it.url ? `<a href="${escHtml(it.url)}">${title}</a>` : title}\n`;
+        if (btns.length < MAX_BTN) btns.push({ text: `🔎 ${n}`, callback_data: `watch_open_${it._token}` });
+      }
+      if (items.length > perSourceCap) text += `<i>+${items.length - perSourceCap} lainnya…</i>\n`;
+    }
+    if (text.length > 3900) text = text.slice(0, 3900) + '\n<i>…dipotong</i>';
+    const keyboard = [];
+    for (let i = 0; i < btns.length; i += 5) keyboard.push(btns.slice(i, i + 5));
+
+    try {
+      await ctx.bot.sendMessage(chatId, text, {
+        parse_mode: 'HTML', disable_web_page_preview: true,
+        reply_markup: keyboard.length ? { inline_keyboard: keyboard } : undefined,
+      });
+    } catch (_) { }
+    await new Promise(r => setTimeout(r, 200));
+  }
+  log.ok(`[Watcher] digest: ${totalNew} post baru dari ${keys.length} sumber → ${recipients().length} penerima.`);
+}
+
 // ─── CORE POLL ───────────────────────────────────────────────────────────────
 async function checkSource(key) {
   const adapter = ADAPTERS[key];
@@ -307,7 +375,7 @@ async function checkSource(key) {
     s.lastNew = 0;
     scheduleSave();
     log.info(`${adapter.label}: seed ${items.length} item (tanpa notif).`);
-    return { key, seeded: items.length };
+    return { key, seeded: items.length, fresh: [] };
   }
 
   s.lastNew = fresh.length;
@@ -315,27 +383,25 @@ async function checkSource(key) {
 
   if (fresh.length === 0) {
     log.info(`${adapter.label}: tidak ada post baru.`);
-    return { key, new: 0 };
+    return { key, new: 0, fresh: [] };
   }
 
-  log.ok(`${adapter.label}: ${fresh.length} post baru → notif admin.`);
-  const toShow = fresh.slice(0, cfg.maxNotify);
-  for (const item of toShow) {
-    await notifyAdmins(adapter, item, key);
-    await new Promise(r => setTimeout(r, 400)); // jeda kecil antar-kirim
-  }
-  if (fresh.length > toShow.length) {
-    await notifySummary(adapter, fresh.length - toShow.length, key);
-  }
-  return { key, new: fresh.length };
+  log.ok(`${adapter.label}: ${fresh.length} post baru.`);
+  return { key, new: fresh.length, fresh };
 }
 
 async function runCycle() {
   if (running) { log.warn('Siklus sebelumnya masih jalan, skip.'); return; }
   running = true;
   try {
+    const freshBySource = {};
     for (const key of activeSources()) {
-      await checkSource(key);
+      const r = await checkSource(key);
+      if (r && r.fresh && r.fresh.length) freshBySource[key] = r.fresh;
+    }
+    if (Object.keys(freshBySource).length) {
+      if (digestEnabled()) await sendDigest(freshBySource);
+      else await sendIndividual(freshBySource);
     }
   } catch (e) {
     log.error(`runCycle error: ${e.message}`);
@@ -357,6 +423,7 @@ function startWatcher(opts) {
   if (Array.isArray(opts.activeSources) && opts.activeSources.length) {
     activeOverride = opts.activeSources.filter(k => ADAPTERS[k]);
   }
+  if (opts.digest != null) digestOverride = !!opts.digest;
 
   if (!cfg.enabled) { log.info('WATCHER_ENABLED!=1 → watcher nonaktif.'); return; }
   if (!ctx.adminChatIds || ctx.adminChatIds.length === 0) {
@@ -415,6 +482,11 @@ function setActiveSources(arr) {
   return getActiveSources();
 }
 
+/** Mode digest aktif sekarang? */
+function isDigest() { return digestEnabled(); }
+/** Set mode digest live (dari dashboard). null → balik ke env. */
+function setDigest(on) { digestOverride = (on == null) ? null : !!on; return digestEnabled(); }
+
 module.exports = {
   startWatcher,
   stopWatcher,
@@ -424,5 +496,7 @@ module.exports = {
   getSourcesMeta,
   getActiveSources,
   setActiveSources,
+  isDigest,
+  setDigest,
   _config: cfg,
 };

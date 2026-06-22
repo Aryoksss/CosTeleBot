@@ -30,6 +30,7 @@ function defaults() {
     notifyExtra: [], // [deprecated] dimigrasikan ke watchSubs saat load
     watchSubs: {},   // { "<chatId>": ["javtiful","otakudesu"] | ["all"] } — langganan watcher per-user
     watchActiveSources: null, // null = pakai default env; array = override source yang dipoll
+    watchDigest: true, // kumpulkan post baru jadi 1 pesan (anti-spam)
     maintenance: false, // kalau true, bot tolak user non-admin
   };
 }
@@ -140,6 +141,10 @@ function setWatchActiveSources(arr) {
   return s.watchActiveSources;
 }
 
+/** Mode digest watcher (kumpulkan jadi 1 pesan). Default true. */
+function getWatchDigest() { const v = load().watchDigest; return v == null ? true : !!v; }
+function setWatchDigest(on) { const s = load(); s.watchDigest = !!on; save(); return s.watchDigest; }
+
 function addNotify(chatId) {  const s = load();
   const id = String(chatId).trim();
   if (id && !s.notifyExtra.includes(id)) { s.notifyExtra.push(id); save(); }
@@ -151,4 +156,4 @@ function removeNotify(chatId) {
   save();
 }
 
-module.exports = { getAll, getPlans, getLimits, getNotifyExtra, getWatchSubs, setPlanPrice, setLimit, addNotify, removeNotify, getMaintenance, setMaintenance, addWatchRecipient, removeWatchRecipient, setWatchSources, watchShouldNotify, getWatchActiveSources, setWatchActiveSources };
+module.exports = { getAll, getPlans, getLimits, getNotifyExtra, getWatchSubs, setPlanPrice, setLimit, addNotify, removeNotify, getMaintenance, setMaintenance, addWatchRecipient, removeWatchRecipient, setWatchSources, watchShouldNotify, getWatchActiveSources, setWatchActiveSources, getWatchDigest, setWatchDigest };

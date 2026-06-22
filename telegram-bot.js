@@ -4449,6 +4449,8 @@ function startBot() {
     shouldNotify: (chatId, sourceKey) => settings.watchShouldNotify(chatId, sourceKey),
     // Source aktif: override dari dashboard (settings) kalau ada, else default env.
     activeSources: settings.getWatchActiveSources(),
+    // Mode digest (kumpulkan jadi 1 pesan) — diatur dari dashboard.
+    digest: settings.getWatchDigest(),
     scrapers: {
       cosplaytele: cosplayteleScraper,
       javtiful: javtifulScraper,

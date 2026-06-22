@@ -115,7 +115,7 @@ function buildStateJson(deps) {
       const active = deps.watcher.getActiveSources();
       const all = deps.watcher.getSourcesMeta();
       const meta = all.filter(m => active.includes(m.key));
-      watch = { sources: meta, allSources: all, active, subs: deps.settings.getWatchSubs() };
+      watch = { sources: meta, allSources: all, active, subs: deps.settings.getWatchSubs(), digest: deps.watcher.isDigest ? deps.watcher.isDigest() : true };
     } catch (_) { }
   }
 
@@ -531,6 +531,10 @@ ${!state.watch ? '' : `
   <div class="fieldrow" style="gap:14px;margin-top:10px">
     ${state.watch.allSources.map(s => `<label class="switch" style="color:var(--text)"><input type="checkbox" ${state.watch.active.includes(s.key) ? 'checked' : ''} onchange="srcToggle()" data-srckey="${escape(s.key)}"><span class="track"></span> ${s.icon} ${escape(s.label)}</label>`).join('')}
   </div>
+  <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+    <label class="switch" style="color:var(--text)"><input type="checkbox" id="digest_tog" ${state.watch.digest ? 'checked' : ''} onchange="digestToggle()"><span class="track"></span> 📦 Mode Digest</label>
+    <div class="sub" style="margin-top:4px">${state.watch.digest ? '✅ Post baru dikumpulkan jadi <b>1 pesan</b> per siklus (anti-spam).' : '⚠️ Tiap post baru dikirim terpisah (bisa spam kalau banyak).'}</div>
+  </div>
 </div>`}
 <div class="card">
   <div class="sub">Admin selalu menerima semua source aktif. Di bawah ini penerima tambahan — centang source yang mau dikirim ke tiap orang. (Notif deploy/health terpisah, admin saja.)</div>
@@ -613,6 +617,7 @@ ${!state.watch ? '' : `
     const sources = Array.from(boxes).filter(b => b.checked).map(b => b.getAttribute('data-srckey'));
     post('/admin/api/watchsources', { sources });
   }
+  function digestToggle() { post('/admin/api/watchdigest', { on: document.getElementById('digest_tog').checked }); }
   function ban(uid, action) { if (confirm(action + ' ' + uid + '?')) post('/admin/api/ban', { chatId: uid, action }); }
   function maint(on) { if (confirm((on ? 'Aktifkan' : 'Matikan') + ' maintenance mode?')) post('/admin/api/maintenance', { on }); }
   function setConc() { post('/admin/api/queue', { action: 'concurrency', value: q_conc.value }); }
@@ -771,6 +776,13 @@ function startDashboard(deps) {
             st.setWatchActiveSources(arr);
             if (deps.watcher && deps.watcher.setActiveSources) deps.watcher.setActiveSources(arr);
             return ok('source aktif: ' + (arr.length ? arr.join(', ') : 'default'));
+          }
+          if (route === 'watchdigest') {
+            if (!st) return fail('settings unavailable');
+            const on = !!data.on;
+            st.setWatchDigest(on);
+            if (deps.watcher && deps.watcher.setDigest) deps.watcher.setDigest(on);
+            return ok('digest ' + (on ? 'ON (anti-spam)' : 'OFF'));
           }
           if (route === 'ban') {
             if (!sdb || !/^\d+$/.test(String(data.chatId))) return fail('chatId invalid');
