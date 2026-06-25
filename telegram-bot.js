@@ -1507,8 +1507,11 @@ async function sendPostDetail(bot, chatId, loadMsg, post, cacheIndex) {
   // Back navigation
   const stateInfo = browseCache.get(chatId);
   if (stateInfo && stateInfo.isGacha) {
+    // Reroll LANGSUNG dengan mode yang sama (one-tap, tanpa balik ke pemilihan mode).
+    const gm = stateInfo.gachaMode || 'random';
     dlButtons.push([
-      { text: '🎲 Gacha Lagi', callback_data: 'menu_gacha' },
+      { text: '🎲 Gacha Lagi', callback_data: `cptgacha_${gm}` },
+      { text: '🎛️ Mode', callback_data: 'menu_cosplaytele' },
       { text: '🔙 Menu', callback_data: 'menu_awal' },
     ]);
   } else {
