@@ -93,6 +93,40 @@ async function resolveGofile(gofileUrl) {
     await Promise.race([apiInterception, page.waitForTimeout(8000)]);
     console.log(`[Gofile] Files ditemukan: ${files.length}`);
 
+    // Fallback: kalau interception XHR meleset tapi browser LOLOS Cloudflare,
+    // panggil API gofile langsung dari dalam page (berbagi cookie + clearance).
+    if (files.length === 0) {
+      const contentId = (gofileUrl.match(/\/d\/([\w-]+)/) || [])[1];
+      if (contentId) {
+        console.log(`[Gofile] interception kosong → coba in-page API fetch (id=${contentId})...`);
+        const apiData = await page.evaluate(async (id) => {
+          try {
+            let wt = (window.appdata && window.appdata.wt) || null;
+            if (!wt) {
+              for (const s of document.scripts) {
+                const m = (s.textContent || '').match(/wt\s*[:=]\s*["']([\w]+)["']/);
+                if (m) { wt = m[1]; break; }
+              }
+            }
+            const tk = (document.cookie.match(/accountToken=([\w]+)/) || [])[1] || null;
+            const r = await fetch(`https://api.gofile.io/contents/${id}?wt=${wt || ''}&cache=true`, {
+              headers: tk ? { 'Authorization': 'Bearer ' + tk } : {},
+            });
+            return await r.json();
+          } catch (e) { return { error: e.message }; }
+        }, contentId);
+        if (apiData && apiData.status === 'ok' && apiData.data && apiData.data.children) {
+          for (const cid in apiData.data.children) {
+            const fi = apiData.data.children[cid];
+            if (fi && fi.link) files.push({ id: cid, name: fi.name || 'archive.zip', link: fi.link });
+          }
+          console.log(`[Gofile] in-page API fetch → ${files.length} file`);
+        } else {
+          console.log(`[Gofile] in-page API fetch gagal: ${apiData && apiData.error ? apiData.error : 'no children (kemungkinan IP di-block / butuh GOFILE_PROXY)'}`);
+        }
+      }
+    }
+
     // Ambil cookies (untuk fallback axios) + accountToken secara spesifik
     const cookies = await ctx.cookies();
     const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');

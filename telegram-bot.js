@@ -1723,11 +1723,23 @@ async function doKemonoGacha(bot, chatId, creatorUrl) {
         if (!ext.match(/\.(jpg|jpeg|png|webp|gif|mp4|mov|webm)$/i)) ext = '.jpg'; // Fallback
         const dest = path.join(jobDir, `media_${i}${ext}`);
 
-        // Mengunduh diam-diam + validasi content-type agar HTML error tidak tersimpan sbg .jpg
-        await downloadStream(u, dest, null, null, { expectMedia: true });
+        // Mengunduh diam-diam + validasi content-type agar HTML error tidak tersimpan sbg .jpg.
+        // Coba host utama dulu; kalau gagal (CDN/IP block), fallback ke mirror kemono lain.
+        let ok = false, lastErr = null;
+        const hosts = kemonoScraper.MIRRORS || ['kemono.cr'];
+        for (let h = 0; h < hosts.length; h++) {
+          const tryUrl = h === 0 ? u : kemonoScraper.mirrorize(u, hosts[h]);
+          try {
+            await downloadStream(tryUrl, dest, null, null, { expectMedia: true });
+            ok = true;
+            if (h > 0) log.info(`[Kemono DL] sukses via mirror ${hosts[h]}`);
+            break;
+          } catch (e) { lastErr = e; }
+        }
+        if (!ok) throw lastErr || new Error('semua mirror gagal');
         downloadedFiles.push(dest);
       } catch (e) {
-        log.warn(`[Kemono DL] Gagal download ${u}`);
+        log.warn(`[Kemono DL] Gagal download (semua mirror) ${u.slice(0, 80)}`);
       }
     }
 

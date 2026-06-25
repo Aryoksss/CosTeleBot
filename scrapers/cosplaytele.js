@@ -66,6 +66,7 @@ const NON_POST_SLUGS = new Set([
   'explore-categories', '24-hours', '3-day', '7-day',
   'best-cosplayer', 'dmca', 'contact', 'about', 'privacy',
   'terms', 'sitemap', 'login', 'register', 'category', 'tag', 'page',
+  'search', 'shop', 'cart', 'checkout', 'wishlist', 'my-account', 'account',
 ]);
 
 function isPostUrl(url) {

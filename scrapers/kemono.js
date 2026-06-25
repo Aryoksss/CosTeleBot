@@ -149,9 +149,20 @@ async function getKemonoPostMedia(postUrl) {
   return { links, inlineImgs };
 }
 
+/** Mirror host kemono (urutan prioritas). Semua berbagi backend /data/ yang sama. */
+const MIRRORS = ['kemono.cr', 'kemono.su', 'kemono.party'];
+
+/** Ganti host sebuah URL kemono ke mirror lain (untuk fallback download). */
+function mirrorize(url, host) {
+  if (!url) return url;
+  return url.replace(/^https?:\/\/[^/]+/i, `https://${host}`);
+}
+
 module.exports = {
   getRandomKemonoPost,
   getKemonoPostMedia,
+  MIRRORS,
+  mirrorize,
   // diekspos untuk testing
   parseKemonoUrl,
   buildMediaUrl,
