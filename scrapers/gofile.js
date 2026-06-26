@@ -67,7 +67,7 @@ async function resolveGofile(gofileUrl) {
     console.log(`[Gofile] fresh context OK`);
 
     const page = await ctx.newPage();
-    const files = [];
+    let files = [];
 
     const apiInterception = new Promise((resolve) => {
       page.on('response', async res => {
@@ -100,12 +100,14 @@ async function resolveGofile(gofileUrl) {
     await Promise.race([apiInterception, page.waitForTimeout(8000)]);
     console.log(`[Gofile] Files ditemukan: ${files.length}`);
 
-    // Fallback: kalau interception XHR meleset tapi browser LOLOS Cloudflare,
-    // panggil API gofile langsung dari dalam page (berbagi cookie + clearance).
-    if (files.length === 0) {
+    // Fallback / konsistensi token: panggil API gofile langsung dari dalam page.
+    // - Kalau GOFILE_TOKEN di-set → SELALU pakai itu supaya link terikat ke akun yang
+    //   sama dengan yang dipakai download (kalau beda token, gofile tolak → homepage HTML).
+    // - Kalau tidak, jalankan hanya saat interception kosong (browser lolos Cloudflare).
+    if (files.length === 0 || ACCOUNT_TOKEN) {
       const contentId = (gofileUrl.match(/\/d\/([\w-]+)/) || [])[1];
       if (contentId) {
-        console.log(`[Gofile] interception kosong → coba in-page API fetch (id=${contentId})...`);
+        console.log(`[Gofile] in-page API fetch (id=${contentId}, token=${ACCOUNT_TOKEN ? 'GOFILE_TOKEN' : 'guest'})...`);
         const apiData = await page.evaluate(async (args) => {
           try {
             let wt = (window.appdata && window.appdata.wt) || null;
@@ -123,11 +125,14 @@ async function resolveGofile(gofileUrl) {
           } catch (e) { return { error: e.message }; }
         }, { id: contentId, token: ACCOUNT_TOKEN });
         if (apiData && apiData.status === 'ok' && apiData.data && apiData.data.children) {
+          const apiFiles = [];
           for (const cid in apiData.data.children) {
             const fi = apiData.data.children[cid];
-            if (fi && fi.link) files.push({ id: cid, name: fi.name || 'archive.zip', link: fi.link });
+            if (fi && fi.link) apiFiles.push({ id: cid, name: fi.name || 'archive.zip', link: fi.link });
           }
-          console.log(`[Gofile] in-page API fetch → ${files.length} file`);
+          // Kalau pakai token sendiri, link API ini yang dipakai (terikat ke akun yg download).
+          if (ACCOUNT_TOKEN || files.length === 0) files = apiFiles;
+          console.log(`[Gofile] in-page API fetch → ${apiFiles.length} file (dipakai: ${files.length})`);
         } else {
           console.log(`[Gofile] in-page API fetch gagal: ${apiData && apiData.error ? apiData.error : 'no children (kemungkinan IP di-block / butuh GOFILE_PROXY)'}`);
         }
@@ -223,7 +228,12 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
     maxBodyLength: Infinity,
     validateStatus: () => true,
   };
-  if (accountToken) reqCfg.headers['Authorization'] = `Bearer ${accountToken}`;
+  if (accountToken) {
+    reqCfg.headers['Authorization'] = `Bearer ${accountToken}`;
+    // Gofile CDN sering butuh token via COOKIE juga (bukan cuma Bearer). Kalau cuma
+    // Bearer, CDN bisa balas homepage HTML. Kirim dua-duanya biar aman.
+    reqCfg.headers['Cookie'] = `accountToken=${accountToken}`;
+  }
   // Proxy TIDAK dipakai untuk CDN download — langsung dari VPS (lebih stabil untuk file besar).
   // Proxy hanya untuk resolve page di atas (accountToken fetch).
 
