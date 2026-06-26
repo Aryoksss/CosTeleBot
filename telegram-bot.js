@@ -261,6 +261,7 @@ const fileCache = require('./utils/fileCache');
 const cryptopay = require('./utils/cryptopay');
 const i18n = require('./utils/i18n');
 const settings = require('./utils/settings');
+const subscriptions = require('./utils/subscriptions');
 // Premium gating untuk queue (prioritas + limit lebih tinggi).
 queueManager.isPremiumFn = (chatId) => statsDb.isPremium(chatId);
 // Kuota download harian per tier.
@@ -1489,7 +1490,10 @@ async function sendPostDetail(bot, chatId, loadMsg, post, cacheIndex) {
 
   // Explore: browse by cosplayer / character / series
   if (links.cosplayerSlug) {
-    dlButtons.push([{ text: `👤 More from ${(cosplayer || 'Cosplayer').slice(0, 25)}`, callback_data: `cptcos_${links.cosplayerSlug}` }]);
+    dlButtons.push([
+      { text: `👤 More from ${(cosplayer || 'Cosplayer').slice(0, 20)}`, callback_data: `cptcos_${links.cosplayerSlug}` },
+      { text: '🔔 Follow', callback_data: `subadd_c_${links.cosplayerSlug}` },
+    ]);
   } else if (cosplayer) {
     // Tidak ada kategori cosplayer (cosplayer hanya di judul) → fallback ke pencarian nama.
     dlButtons.push([{ text: `🔎 More from ${cosplayer.slice(0, 25)}`, callback_data: `cptcossrch_${cacheIndex}` }]);
@@ -2327,6 +2331,9 @@ async function doJavDetail(bot, chatId, item) {
         ({ text: `👤 ${a.name.slice(0, 20)}`, callback_data: `javact_${a.slug}` })
       );
       buttons.push(actRow);
+      // Follow aktris pertama (notif post baru otomatis).
+      const a0 = detail.actresses[0];
+      if (a0 && a0.slug) buttons.push([{ text: `🔔 Follow ${a0.name.slice(0, 22)}`, callback_data: `subadd_j_${a0.slug}` }]);
     }
 
     // Explore: category button (max 3)
@@ -4228,6 +4235,87 @@ async function doRandomGacha(bot, chatId) {
   }
 }
 
+// ─── SUBSCRIPTIONS (follow cosplayer/aktris per-user) ────────────────────────
+/** Limit jumlah follow per tier. */
+function subLimit(chatId) {
+  const t = userTier(chatId);
+  if (t === 'admin') return Infinity;
+  if (t === 'vvip') return 100;
+  if (t === 'premium') return 30;
+  return 10;
+}
+
+/** Tampilkan daftar follow + tombol unfollow. */
+async function showSubsList(bot, chatId, editMsgId = null) {
+  const subs = subscriptions.list(chatId);
+  if (!subs.length) {
+    const txt = '🔕 <b>Belum follow siapa-siapa.</b>\n\nBuka detail cosplay/JAV lalu tap <b>🔔 Follow</b> untuk dapat notif otomatis tiap ada post baru dari cosplayer/aktris itu.';
+    const opts = { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] } };
+    if (editMsgId) return bot.editMessageText(txt, { chat_id: chatId, message_id: editMsgId, ...opts }).catch(() => { });
+    return bot.sendMessage(chatId, txt, opts);
+  }
+  let text = `🔔 <b>Following (${subs.length})</b>\n<i>Dapat notif tiap ada post baru.</i>\n\n`;
+  const kb = [];
+  subs.forEach((s, i) => {
+    const icon = s.code === 'c' ? '📚' : '🎥';
+    text += `${i + 1}. ${icon} ${escHtml(s.label)}\n`;
+    kb.push([
+      { text: `${icon} ${s.label.slice(0, 22)}`, callback_data: s.code === 'c' ? `cptcos_${s.target}` : `javact_${s.target}` },
+      { text: '🔕 Unfollow', callback_data: `subdel_${s.key}` },
+    ]);
+  });
+  kb.push([{ text: '🔙 Menu', callback_data: 'menu_awal' }]);
+  const opts = { parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } };
+  if (editMsgId) return bot.editMessageText(text, { chat_id: chatId, message_id: editMsgId, ...opts }).catch(() => { });
+  return bot.sendMessage(chatId, text, opts);
+}
+
+let _subsRunning = false;
+/** Poll semua subscription user, notif kalau ada post baru dari target yang di-follow. */
+async function checkSubscriptions(bot) {
+  if (_subsRunning) return;
+  _subsRunning = true;
+  try {
+    const all = subscriptions.listAllUsers();
+    for (const { chatId, subs } of all) {
+      for (const sub of subs) {
+        try {
+          let items = [];
+          if (sub.code === 'c') {
+            const posts = await cosplayteleScraper.scrapeCategory(sub.target, 1);
+            items = (posts || []).map(p => ({ uid: p.url, title: p.title }));
+          } else if (sub.code === 'j') {
+            const r = await javtifulScraper.scrapeActress(sub.target, 1);
+            items = (((r && r.items) || [])).map(v => ({ uid: v.link, title: v.title }));
+          }
+          if (!items.length) continue;
+          const seen = subscriptions.getSeen(chatId, sub.key);
+          if (seen == null) continue; // sub dihapus di tengah loop
+          const uids = items.map(i => i.uid).filter(Boolean);
+          if (seen.length === 0) { subscriptions.setSeen(chatId, sub.key, uids); continue; } // seed pertama
+          const fresh = items.filter(i => i.uid && !seen.includes(i.uid));
+          subscriptions.setSeen(chatId, sub.key, uids);
+          if (fresh.length) {
+            const icon = sub.code === 'c' ? '📚' : '🎥';
+            const openCb = sub.code === 'c' ? `cptcos_${sub.target}` : `javact_${sub.target}`;
+            let text = `🔔 <b>${escHtml(sub.label)}</b> — ${fresh.length} post baru!\n\n`;
+            fresh.slice(0, 5).forEach((f, i) => { text += `${i + 1}. ${escHtml((f.title || 'Untitled').slice(0, 70))}\n`; });
+            if (fresh.length > 5) text += `<i>+${fresh.length - 5} lainnya…</i>\n`;
+            await bot.sendMessage(chatId, text, {
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: [[{ text: `${icon} Lihat semua`, callback_data: openCb }]] },
+            }).catch(() => { });
+            log.ok(`[Subs] notif ${chatId} "${sub.label}" +${fresh.length}`);
+          }
+          await sleep(600); // jeda antar-sub biar gak hammer sumber
+        } catch (e) { log.warn(`[Subs] check ${chatId} ${sub.key}: ${e.message}`); }
+      }
+    }
+  } finally {
+    _subsRunning = false;
+  }
+}
+
 // ─── PREMIUM (Crypto Pay) ────────────────────────────────────────────────────
 // Limit kuota & harga paket dibaca live dari settings.json (bisa diedit via dashboard).
 function TIER_LIMITS_LIVE() { return settings.getLimits(); }
@@ -4397,6 +4485,7 @@ async function sendMainMenu(bot, chatId) {
       { text: '💎 Premium', callback_data: 'menu_premium' },
     ],
     [
+      { text: en ? '🔔 Following' : '🔔 Following', callback_data: 'menu_subs' },
       { text: en ? '🚦 Queue' : '🚦 Antrean', callback_data: 'tasks_refresh' },
       { text: en ? '🧹 Clear' : '🧹 Bersihkan', callback_data: 'menu_clear' },
       { text: en ? '🌐 ID' : '🌐 EN', callback_data: en ? 'lang_id' : 'lang_en' },
@@ -4533,6 +4622,13 @@ function startBot() {
       setTimeout(() => process.exit(0), 500);
     },
   });
+
+  // Subscriptions checker: poll target yang di-follow user, notif post baru per-user.
+  const SUBS_INTERVAL_MIN = Math.max(10, parseInt(process.env.SUBS_INTERVAL_MIN || '20', 10));
+  setTimeout(() => checkSubscriptions(bot), 45000); // jeda startup
+  const subsTimer = setInterval(() => checkSubscriptions(bot), SUBS_INTERVAL_MIN * 60 * 1000);
+  if (subsTimer.unref) subsTimer.unref();
+  log.info(`[Subs] checker aktif tiap ${SUBS_INTERVAL_MIN} menit.`);
 
   // ─── COMMAND REGISTRY ────────────────────────────────────────────────────────
   // Satu sumber kebenaran untuk semua slash-command. Menyeragamkan:
@@ -4887,6 +4983,12 @@ function startBot() {
     const view = buildTasksView(msg.chat.id);
     const sentMsg = await bot.sendMessage(msg.chat.id, view.text, { parse_mode: 'HTML', reply_markup: view.keyboard });
     autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
+  });
+
+  // /subs — daftar follow cosplayer/aktris + unfollow
+  registerCommand({ name: 'subs', aliases: ['following', 'follow'], description: '🔔 Cosplayer/aktris yang kamu follow', hasArg: false }, async (msg) => {
+    const sentMsg = await showSubsList(bot, msg.chat.id);
+    if (sentMsg) autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
   });
 
   // /health and /ping — same behavior, alias
@@ -5552,6 +5654,46 @@ function startBot() {
       retryActions.delete(chatId);
       try { return await fn(); } catch (e) { log.warn(`[retry] gagal: ${e.message}`); }
       return;
+    }
+    // ── Subscriptions: follow / unfollow / list ──
+    if (action.startsWith('subadd_')) {
+      const m = action.match(/^subadd_([cj])_(.+)$/);
+      if (!m) { bot.answerCallbackQuery(query.id, { text: '⚠️ Target tidak valid' }).catch(() => { }); return; }
+      const code = m[1], slug = m[2];
+      const limit = subLimit(chatId);
+      if (subscriptions.count(chatId) >= limit) {
+        bot.answerCallbackQuery(query.id, { text: `⚠️ Limit follow ${limit} tercapai. Upgrade premium untuk lebih banyak.`, show_alert: true }).catch(() => { });
+        return;
+      }
+      let label = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      if (code === 'c') {
+        const cache = browseCache.get(chatId);
+        if (cache?.detailCache) for (const det of Object.values(cache.detailCache)) {
+          if (det?.cosplayerSlug === slug && det.meta?.cosplayer) { label = det.meta.cosplayer; break; }
+        }
+      } else {
+        const cache = javBrowseCache.get(chatId);
+        if (cache?.detailCache) for (const det of Object.values(cache.detailCache)) {
+          const f = det?.actresses?.find(a => a.slug === slug);
+          if (f) { label = f.name; break; }
+        }
+      }
+      const r = subscriptions.add(chatId, code, slug, label);
+      bot.answerCallbackQuery(query.id, {
+        text: r.ok ? `🔔 Follow ${label}! Notif post baru aktif.` : (r.reason === 'exists' ? `✓ Sudah follow ${label}` : '⚠️ Gagal'),
+        show_alert: true,
+      }).catch(() => { });
+      return;
+    }
+    if (action.startsWith('subdel_')) {
+      const key = action.replace('subdel_', '');
+      subscriptions.remove(chatId, key);
+      bot.answerCallbackQuery(query.id, { text: '🔕 Unfollowed' }).catch(() => { });
+      return showSubsList(bot, chatId, query.message.message_id);
+    }
+    if (action === 'menu_subs') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return showSubsList(bot, chatId);
     }
     // Cosplaytele "More from <cosplayer>" via SEARCH (cosplayer tidak punya kategori sendiri)
     if (action.startsWith('cptcossrch_')) {
