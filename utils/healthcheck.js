@@ -13,9 +13,11 @@
 
 const axios = require('axios');
 const os = require('os');
+const https = require('https');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120';
 const TIMEOUT = 8000;
+const insecureAgent = new https.Agent({ rejectUnauthorized: false });
 
 const client = axios.create({
   headers: { 'User-Agent': UA },
@@ -67,6 +69,7 @@ async function checkKemono() {
       const r = await axios.get(`https://${h}${probePath}`, {
         headers: { 'accept': 'text/css', 'user-agent': UA, 'referer': `https://${h}/` },
         timeout: TIMEOUT,
+        httpsAgent: insecureAgent,
         validateStatus: () => true,
       });
       if (r.status >= 200 && r.status < 300) {

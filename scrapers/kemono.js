@@ -13,6 +13,14 @@
 //   getKemonoPostMedia(postUrl)             → { links: [], inlineImgs: [] }
 
 const axios = require('axios');
+const https = require('https');
+
+// Kemono di belakang DDoS-Guard/CDN yang kadang menyajikan sertifikat yang tidak
+// dipercaya Node ("self-signed certificate"). Untuk konten publik (bukan data sensitif)
+// kita longgarkan verifikasi TLS khusus request kemono.
+const insecureAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
+
+const MIRROR_HOSTS = ['kemono.cr', 'kemono.su'];
 
 const log = {
   info: (m) => console.log(`\x1b[36m[INFO]\x1b[0m  ${m}`),
@@ -44,22 +52,27 @@ function parseKemonoUrl(url) {
   return { host, service: m[1], id: m[2], postId: m[3] || null };
 }
 
-async function apiGet(host, pathAndQuery, retries = 2) {
-  const url = `https://${host}${pathAndQuery}`;
+async function apiGet(host, pathAndQuery, retries = 1) {
+  // Coba host yang diminta dulu, lalu mirror lain (kalau cert/blok/timeout).
+  const hosts = [host, ...MIRROR_HOSTS.filter(h => h !== host)];
   let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const res = await axios.get(url, {
-        headers: apiHeaders(host),
-        timeout: 25000,
-        validateStatus: (s) => s >= 200 && s < 500,
-      });
-      if (res.status === 200) return res.data;
-      lastErr = new Error(`HTTP ${res.status} di ${pathAndQuery}`);
-    } catch (e) {
-      lastErr = e;
+  for (const h of hosts) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await axios.get(`https://${h}${pathAndQuery}`, {
+          headers: apiHeaders(h),
+          timeout: 25000,
+          httpsAgent: insecureAgent,
+          validateStatus: (s) => s >= 200 && s < 500,
+        });
+        if (res.status === 200) return res.data;
+        lastErr = new Error(`HTTP ${res.status} di ${h}${pathAndQuery}`);
+        if (res.status === 403 || res.status === 429) break; // host diblok → langsung pindah mirror
+      } catch (e) {
+        lastErr = e;
+      }
+      if (attempt < retries) await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
     }
-    if (attempt < retries) await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
   }
   throw lastErr || new Error('Permintaan API kemono gagal');
 }

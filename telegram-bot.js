@@ -652,15 +652,20 @@ async function getApiResult(teraboxUrl) {
   }
 }
 
-async function _downloadStreamOnce(url, destPath, onProgress, cookie = null, opts = {}) {
-  const headers = {};
+// Agent TLS longgar (rejectUnauthorized:false) untuk CDN dengan cert untrusted (kemono/DDoS-Guard).
+const _insecureHttpsAgent = new (require('https').Agent)({ rejectUnauthorized: false, keepAlive: true });
+
+async function _downloadStreamOnce(url, destPath, onProgress, cookie = null, opts = {}) {  const headers = {};
   if (cookie) headers['Cookie'] = cookie;
   if (opts.referer) headers['Referer'] = opts.referer;
   if (opts.userAgent) headers['User-Agent'] = opts.userAgent;
 
   let res;
   try {
-    res = await axios({ url, method: 'GET', responseType: 'stream', timeout: 600000, headers, validateStatus: () => true });
+    const reqCfg = { url, method: 'GET', responseType: 'stream', timeout: 600000, headers, validateStatus: () => true };
+    // Beberapa CDN (kemono di balik DDoS-Guard) menyajikan cert untrusted → longgarkan TLS.
+    if (opts.insecure) reqCfg.httpsAgent = _insecureHttpsAgent;
+    res = await axios(reqCfg);
   } catch (e) {
     // Network/DNS error — wrap agar retry loop bisa deteksi
     const err = new Error(e.message);
@@ -1763,7 +1768,7 @@ async function doKemonoGacha(bot, chatId, creatorUrl) {
         for (let h = 0; h < hosts.length; h++) {
           const tryUrl = h === 0 ? u : kemonoScraper.mirrorize(u, hosts[h]);
           try {
-            await downloadStream(tryUrl, dest, null, null, { expectMedia: true });
+            await downloadStream(tryUrl, dest, null, null, { expectMedia: true, insecure: true });
             ok = true;
             if (h > 0) log.info(`[Kemono DL] sukses via mirror ${hosts[h]}`);
             break;
