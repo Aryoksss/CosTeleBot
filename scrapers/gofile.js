@@ -9,6 +9,13 @@ const PROFILE_DIR = path.resolve('./browser_profile_gofile');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 /**
+ * Token akun Gofile milik sendiri (Profile → API token di gofile.io).
+ * Kalau di-set, dipakai untuk listing + download → BYPASS limit guest 1000GB/30hari
+ * yang berbasis IP (WARP/shared IP cepat habis). Premium account = tanpa limit.
+ */
+const ACCOUNT_TOKEN = (process.env.GOFILE_TOKEN || '').trim() || null;
+
+/**
  * Proxy opsional untuk bypass banned IP datacenter (DO/AWS/GCP/Azure).
  * Set GOFILE_PROXY=socks5://127.0.0.1:40000 (Cloudflare WARP proxy mode) di .env.
  * Format didukung Playwright: http://host:port, https://host:port, socks5://host:port.
@@ -99,7 +106,7 @@ async function resolveGofile(gofileUrl) {
       const contentId = (gofileUrl.match(/\/d\/([\w-]+)/) || [])[1];
       if (contentId) {
         console.log(`[Gofile] interception kosong → coba in-page API fetch (id=${contentId})...`);
-        const apiData = await page.evaluate(async (id) => {
+        const apiData = await page.evaluate(async (args) => {
           try {
             let wt = (window.appdata && window.appdata.wt) || null;
             if (!wt) {
@@ -108,13 +115,13 @@ async function resolveGofile(gofileUrl) {
                 if (m) { wt = m[1]; break; }
               }
             }
-            const tk = (document.cookie.match(/accountToken=([\w]+)/) || [])[1] || null;
-            const r = await fetch(`https://api.gofile.io/contents/${id}?wt=${wt || ''}&cache=true`, {
+            const tk = args.token || (document.cookie.match(/accountToken=([\w]+)/) || [])[1] || null;
+            const r = await fetch(`https://api.gofile.io/contents/${args.id}?wt=${wt || ''}&cache=true`, {
               headers: tk ? { 'Authorization': 'Bearer ' + tk } : {},
             });
             return await r.json();
           } catch (e) { return { error: e.message }; }
-        }, contentId);
+        }, { id: contentId, token: ACCOUNT_TOKEN });
         if (apiData && apiData.status === 'ok' && apiData.data && apiData.data.children) {
           for (const cid in apiData.data.children) {
             const fi = apiData.data.children[cid];
@@ -136,7 +143,7 @@ async function resolveGofile(gofileUrl) {
     return {
       files: files,
       cookie: cookieStr,
-      accountToken: accountToken
+      accountToken: ACCOUNT_TOKEN || accountToken
     };
 
   } catch (err) {
@@ -169,7 +176,12 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
   console.log(`[Gofile-DL] START url=${directUrl.slice(0, 80)}... proxy=${proxy ? proxy.server : 'none'}`);
 
   if (!accountToken) {
-    // Fallback: kalau caller tidak forward, fetch accountToken fresh dari Gofile.
+    // Prioritas: token akun sendiri (GOFILE_TOKEN) → bypass limit guest 1000GB per-IP.
+    if (ACCOUNT_TOKEN) {
+      accountToken = ACCOUNT_TOKEN;
+      console.log(`[Gofile-DL] pakai GOFILE_TOKEN (akun sendiri).`);
+    } else {
+      // Fallback: kalau caller tidak forward, fetch accountToken fresh dari Gofile.
     // Ini terjadi kalau dipanggil dari code-path lama yang belum update. Harusnya
     // jarang karena flow baru selalu forward token dari resolveGofile().
     console.log(`[Gofile-DL] accountToken tidak di-forward, fetch fresh guest...`);
@@ -189,6 +201,7 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
       if (c) accountToken = c.value;
     } finally {
       if (tmpBrowser) await tmpBrowser.close().catch(() => { });
+    }
     }
   }
   console.log(`[Gofile-DL] accountToken: ${accountToken ? '***(' + accountToken.length + ' chars)' : 'NONE'}`);
