@@ -387,9 +387,11 @@ ${state.maintenance ? '<div class="maint-banner">🛠️ <b>MAINTENANCE MODE AKT
     <div class="label">🏥 Health & Process</div>
     <div style="margin-top:8px">
       <button onclick="runHealth()">Run Healthcheck</button>
+      <button onclick="runSpeedtest()" class="blue">🚀 Speedtest</button>
       <button onclick="restart()" style="background:#da3633">Restart Bot</button>
     </div>
     <div id="health_out" class="sub" style="margin-top:8px"></div>
+    <div id="speed_out" class="sub" style="margin-top:8px"></div>
   </div>
 </div>
 
@@ -650,6 +652,21 @@ ${!state.watch ? '' : `
         (x.status === 'ok' ? '✅' : x.status === 'warn' ? '⚠️' : '❌') + ' ' + x.name + ' · ' + x.latencyMs + 'ms').join('<br>');
     } else { document.getElementById('health_out').textContent = '❌ ' + (d.error || 'failed'); }
   }
+  async function runSpeedtest() {
+    document.getElementById('speed_out').innerHTML = '⏳ test kecepatan (~10s)...';
+    try {
+      const r = await fetch('/admin/api/speedtest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const d = await r.json().catch(() => ({}));
+      if (d.ok && d.result && d.result.ok) {
+        const s = d.result;
+        document.getElementById('speed_out').innerHTML =
+          '🚀 <b>↓ ' + s.downMbps + ' Mbps</b> · ↑ ' + s.upMbps + ' Mbps<br>' +
+          '📶 ping ' + (s.pingMs != null ? s.pingMs + 'ms' : '-') + ' (min ' + (s.minMs != null ? s.minMs + 'ms' : '-') + ') · ' + s.server + ' · ' + s.took;
+      } else {
+        document.getElementById('speed_out').textContent = '❌ ' + ((d.result && d.result.error) || d.error || 'failed');
+      }
+    } catch (e) { document.getElementById('speed_out').textContent = '❌ ' + e.message; }
+  }
   // ── Logs ──
   let logLevel = 'all';
   function logFilter(lv, btn) { logLevel = lv; document.querySelectorAll('#logs .ghost').forEach(b => b.style.background = ''); if (btn) btn.style.background = '#1f6feb'; renderLogs(); }
@@ -826,6 +843,13 @@ function startDashboard(deps) {
             if (!deps.healthcheck) return fail('healthcheck unavailable');
             Promise.resolve(deps.healthcheck.checkAllSources())
               .then(results => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, results })); })
+              .catch(e => fail(e.message));
+            return;
+          }
+          if (route === 'speedtest') {
+            if (!deps.speedtest) return fail('speedtest unavailable');
+            Promise.resolve(deps.speedtest.run())
+              .then(result => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, result })); })
               .catch(e => fail(e.message));
             return;
           }

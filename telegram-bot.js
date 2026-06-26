@@ -263,6 +263,7 @@ const i18n = require('./utils/i18n');
 const settings = require('./utils/settings');
 const subscriptions = require('./utils/subscriptions');
 const jobStore = require('./utils/jobStore');
+const speedtest = require('./utils/speedtest');
 // Premium gating untuk queue (prioritas + limit lebih tinggi).
 queueManager.isPremiumFn = (chatId) => statsDb.isPremium(chatId);
 // Kuota download harian per tier.
@@ -4613,6 +4614,7 @@ function startBot() {
     fileCache,
     healthcheck,
     watcher,
+    speedtest,
     getLogs: () => recentLogs,
     statsDbRead: () => {
       // Read stats.json langsung untuk get all users
