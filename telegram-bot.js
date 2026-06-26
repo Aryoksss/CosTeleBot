@@ -262,6 +262,7 @@ const cryptopay = require('./utils/cryptopay');
 const i18n = require('./utils/i18n');
 const settings = require('./utils/settings');
 const subscriptions = require('./utils/subscriptions');
+const jobStore = require('./utils/jobStore');
 // Premium gating untuk queue (prioritas + limit lebih tinggi).
 queueManager.isPremiumFn = (chatId) => statsDb.isPremium(chatId);
 // Kuota download harian per tier.
@@ -1087,8 +1088,33 @@ async function trySendCachedFile(bot, chatId, key, caption) {
   }
 }
 
-async function processDownload(bot, chatId, url, password, source = 'terabox', jobId = null, opts = {}) {
-  log.info(`[User ${chatId}] Memulai processDownload: ${url}`);
+/**
+ * Enqueue download PERSISTEN (bisa di-resume kalau VPS restart).
+ * Hanya untuk URL stabil (gofile page / terabox) via processDownload.
+ */
+function enqueuePD(bot, chatId, title, args) {
+  const pid = jobStore.add({ chatId: String(chatId), title, url: args.url, password: args.password ?? null, source: args.source || 'terabox', opts: args.opts || null });
+  return queueManager.addJob(chatId, title, async (jobId) => {
+    try { await processDownload(bot, chatId, args.url, args.password ?? null, args.source || 'terabox', jobId, args.opts || {}); }
+    finally { jobStore.remove(pid); }
+  }, bot);
+}
+
+/** Saat startup: jalankan ulang job download yang terputus karena restart VPS. */
+function resumeJobs(bot) {
+  const pending = jobStore.all();
+  if (!pending.length) return;
+  jobStore.clear(); // akan di-add ulang oleh enqueuePD
+  const byUser = {};
+  for (const j of pending) (byUser[j.chatId] = byUser[j.chatId] || []).push(j);
+  for (const [chatId, jobs] of Object.entries(byUser)) {
+    bot.sendMessage(chatId, `🔄 <b>Melanjutkan ${jobs.length} unduhan</b> yang terputus saat bot restart...`, { parse_mode: 'HTML' }).catch(() => { });
+    for (const j of jobs) enqueuePD(bot, chatId, j.title, { url: j.url, password: j.password, source: j.source, opts: j.opts });
+  }
+  log.info(`[Resume] re-enqueue ${pending.length} job dari ${Object.keys(byUser).length} user.`);
+}
+
+async function processDownload(bot, chatId, url, password, source = 'terabox', jobId = null, opts = {}) {  log.info(`[User ${chatId}] Memulai processDownload: ${url}`);
   const tmpBase = path.join(CONFIG.TEMP_DIR, `job_${Date.now()}`);
   let zipPath = `${tmpBase}_raw.zip`;
   const unzipDir = `${tmpBase}_ext`;
@@ -3439,9 +3465,7 @@ async function doAnimeDownload(bot, chatId, epNumber) {
         await bot.editMessageText(`✅ Gofile ditemukan! Memulai download...\n<code>${escHtml(dl.gofileUrl)}</code>`, {
           chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
         });
-        queueManager.addJob(chatId, `${series.title} Ep ${epNumber}`, async (jobId) => {
-          await processDownload(bot, chatId, dl.gofileUrl, null, 'gofile', jobId);
-        }, bot);
+        enqueuePD(bot, chatId, `${series.title} Ep ${epNumber}`, { url: dl.gofileUrl, password: null, source: 'gofile' });
       } else if (dl.qualityLinks && dl.qualityLinks.length > 0) {
         // Classic layout (.blog): multi-host per quality.
         // ZippyShare mati, LetsUp/Racaty butuh CAPTCHA → fokus ke Mega (support megajs).
@@ -3694,18 +3718,14 @@ async function doAnimeKusoDownload(bot, chatId, qualityIdx, hostType) {
   // Gofile: reuse existing processDownload handler
   if (hostType === 'gf') {
     await bot.sendMessage(chatId, `✅ Gofile detected. Queue via Gofile downloader...\n<code>${escHtml(link.url)}</code>`, { parse_mode: 'HTML' });
-    queueManager.addJob(chatId, title, async (jobId) => {
-      await processDownload(bot, chatId, link.url, null, 'gofile', jobId);
-    }, bot);
+    enqueuePD(bot, chatId, title, { url: link.url, password: null, source: 'gofile' });
     return;
   }
 
   // Terabox: reuse existing terabox handler
   if (hostType === 'tb') {
     await bot.sendMessage(chatId, `✅ Terabox detected. Queue via Terabox downloader...\n<code>${escHtml(link.url)}</code>`, { parse_mode: 'HTML' });
-    queueManager.addJob(chatId, title, async (jobId) => {
-      await processDownload(bot, chatId, link.url, null, 'terabox', jobId);
-    }, bot);
+    enqueuePD(bot, chatId, title, { url: link.url, password: null, source: 'terabox' });
     return;
   }
 
@@ -4630,6 +4650,9 @@ function startBot() {
   if (subsTimer.unref) subsTimer.unref();
   log.info(`[Subs] checker aktif tiap ${SUBS_INTERVAL_MIN} menit.`);
 
+  // Resume unduhan yang terputus karena VPS mati/restart (job dengan URL stabil).
+  setTimeout(() => resumeJobs(bot), 8000);
+
   // ─── COMMAND REGISTRY ────────────────────────────────────────────────────────
   // Satu sumber kebenaran untuk semua slash-command. Menyeragamkan:
   //   - regex anchored + dukungan format grup /cmd@NamaBot (case-insensitive)
@@ -5263,9 +5286,7 @@ function startBot() {
       const pw = (text.toUpperCase() === 'SKIP') ? null : text;
       userStates.delete(chatId);
       bot.sendMessage(chatId, `🔐 Password set to: ${pw ? pw : '(None)'}. Memulai download...`);
-      queueManager.addJob(chatId, 'Manual Download', async (jobId) => {
-        await processDownload(bot, chatId, state.url, pw, 'terabox', jobId);
-      }, bot);
+      enqueuePD(bot, chatId, 'Manual Download', { url: state.url, password: pw, source: 'terabox' });
       return;
     }
 
@@ -5415,9 +5436,7 @@ function startBot() {
     }
 
     if (text.includes('gofile.io')) {
-      queueManager.addJob(chatId, 'Gofile Eksternal', async (jobId) => {
-        await processDownload(bot, chatId, text, null, 'gofile', jobId);
-      }, bot);
+      enqueuePD(bot, chatId, 'Gofile Eksternal', { url: text, password: null, source: 'gofile' });
       return;
     }
 
@@ -5527,9 +5546,7 @@ function startBot() {
       } else {
         // Fallback: resolve ulang jika cache tidak ada (misal bot restart di tengah sesi)
         const gofileUrl = state.url + '#file=' + fileId;
-        queueManager.addJob(chatId, `Gofile (File ${fileId})`, async (jobId) => {
-          await processDownload(bot, chatId, gofileUrl, null, 'gofile', jobId);
-        }, bot);
+        enqueuePD(bot, chatId, `Gofile (File ${fileId})`, { url: gofileUrl, password: null, source: 'gofile' });
       }
       return;
     }
@@ -6583,9 +6600,7 @@ function startBot() {
       if (action === 'src_4khd') {
         userStates.delete(chatId);
         bot.sendMessage(chatId, '✅ Pilihan 4KHD diset. Menghubungi Queue Manager...');
-        queueManager.addJob(chatId, 'TeraBox (4KHD)', async (jobId) => {
-          await processDownload(bot, chatId, state.url, '4KHD', 'terabox', jobId);
-        }, bot);
+        enqueuePD(bot, chatId, 'TeraBox (4KHD)', { url: state.url, password: '4KHD', source: 'terabox' });
       } else {
         userStates.set(chatId, { step: 'AWAITING_PASSWORD', url: state.url });
         bot.sendMessage(chatId, '🔑 Silakan ketik <b>Password Arsip</b> dan kirim.\n<i>(Ketik SKIP jika tidak ada password)</i>', { parse_mode: 'HTML' });
@@ -6655,9 +6670,7 @@ function startBot() {
       const post = cache.posts[idx];
       const links = await cosplayteleScraper.scrapePostDetail(post.url);
       if (links && links.gofile) {
-        queueManager.addJob(chatId, `Gofile: ${post.title}`, async (jobId) => {
-          await processDownload(bot, chatId, links.gofile, links.password || null, 'gofile', jobId);
-        }, bot);
+        enqueuePD(bot, chatId, `Gofile: ${post.title}`, { url: links.gofile, password: links.password || null, source: 'gofile' });
       } else {
         bot.sendMessage(chatId, '⚠️ Link gofile tidak ditemukan untuk post ini.');
       }

@@ -10,4 +10,5 @@ watcher.json
 file_id_cache.json
 settings.json
 subscriptions.json
+jobs.json
 *.tmp
