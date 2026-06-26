@@ -1932,7 +1932,14 @@ async function doR34Gacha(bot, chatId) {
     for (const dl of links) {
       try {
         const dest = path.join(jobDir, 'video.mp4');
-        await downloadStream(dl.url, dest, null, null);
+        const startedAt = Date.now();
+        const throttle = createProgressThrottler(2500);
+        await downloadStream(dl.url, dest, (pct, d, tot) => {
+          throttle(() => {
+            const pText = renderProgressBar({ icon: '🎬', title: pick.title, done: d, total: tot, unit: 'bytes', startedAt });
+            bot.editMessageText(pText, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+          });
+        }, null, { expectMedia: true });
         downloaded = dest;
         dlLabel = dl.label;
         log.ok(`[R34] Berhasil download ${dl.label} (${(fs.statSync(dest).size / 1024 / 1024).toFixed(1)}MB)`);
@@ -1953,15 +1960,14 @@ async function doR34Gacha(bot, chatId) {
     const fsize = fs.statSync(downloaded).size;
     const sizeMB = (fsize / 1024 / 1024).toFixed(1);
 
-    // Hapus pesan loading
-    bot.deleteMessage(chatId, gMsg.message_id).catch(() => { });
-
     // Kirim video
     try {
+      await bot.editMessageText(`📤 <b>${escHtml(pick.title)}</b>\n<i>Mengupload ke Telegram (${sizeMB}MB)...</i>`, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
       await bot.sendVideo(chatId, fs.createReadStream(downloaded), {
         caption: `🎬 <b>${escHtml(pick.title)}</b> (${dlLabel}, ${sizeMB}MB)`,
         parse_mode: 'HTML', supports_streaming: true
       });
+      bot.deleteMessage(chatId, gMsg.message_id).catch(() => { });
     } catch (e) {
       log.error(`[R34 Send Error] ${e.message}`);
     }
@@ -5978,22 +5984,32 @@ function startBot() {
           await fsp.mkdir(jobDir, { recursive: true });
           const dest = path.join(jobDir, 'video.mp4');
 
-          await downloadStream(targetLink.url, dest, null, null);
+          const startedAt = Date.now();
+          const throttle = createProgressThrottler(2500);
+          await downloadStream(targetLink.url, dest, (pct, dl, tot) => {
+            throttle(() => {
+              const pText = renderProgressBar({ icon: '🎬', title: post.title, done: dl, total: tot, unit: 'bytes', startedAt });
+              queueManager.updateJob(jobId, pText);
+              bot.editMessageText(pText, { chat_id: chatId, message_id: dlMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+            });
+          }, null, { expectMedia: true });
+
           const fsize = fs.statSync(dest).size;
           const sizeMB = (fsize / 1024 / 1024).toFixed(1);
           log.ok(`[R34] Downloaded ${targetLink.label} (${sizeMB}MB)`);
 
           if (fsize > CONFIG.VIDEO_MAX_BYTES) {
             await rimraf(jobDir);
-            return bot.sendMessage(chatId, `⚠️ <b>${escHtml(post.title)}</b>\n\n❌ <b>${targetLink.label}</b> berukuran <b>${sizeMB}MB</b> — melebihi batas limit platform Telegram Anda saat ini (${Math.floor(CONFIG.VIDEO_MAX_BYTES / 1024 / 1024)}MB).`);
+            return bot.editMessageText(`⚠️ <b>${escHtml(post.title)}</b>\n\n❌ <b>${targetLink.label}</b> berukuran <b>${sizeMB}MB</b> — melebihi batas limit platform Telegram Anda saat ini (${Math.floor(CONFIG.VIDEO_MAX_BYTES / 1024 / 1024)}MB).`, { chat_id: chatId, message_id: dlMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
           }
 
+          await bot.editMessageText(`📤 <b>${escHtml(post.title)}</b>\n<i>Mengupload ke Telegram (${sizeMB}MB)...</i>`, { chat_id: chatId, message_id: dlMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
           await bot.sendVideo(chatId, fs.createReadStream(dest), {
             caption: `🎬 <b>${escHtml(post.title)}</b> (${targetLink.label}, ${sizeMB}MB)`, parse_mode: 'HTML', supports_streaming: true
           });
+          bot.deleteMessage(chatId, dlMsg.message_id).catch(() => { });
           await rimraf(jobDir);
         }, bot);
-        bot.deleteMessage(chatId, dlMsg.message_id).catch(() => { });
       } catch (e) {
         log.error('R34 DL Error: ' + e.message);
         bot.editMessageText(`❌ Error: ${e.message}`, { chat_id: chatId, message_id: dlMsg.message_id }).catch(() => { });
