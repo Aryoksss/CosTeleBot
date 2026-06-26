@@ -1115,9 +1115,65 @@ function resumeJobs(bot) {
   for (const j of pending) (byUser[j.chatId] = byUser[j.chatId] || []).push(j);
   for (const [chatId, jobs] of Object.entries(byUser)) {
     bot.sendMessage(chatId, `🔄 <b>Melanjutkan ${jobs.length} unduhan</b> yang terputus saat bot restart...`, { parse_mode: 'HTML' }).catch(() => { });
-    for (const j of jobs) enqueuePD(bot, chatId, j.title, { url: j.url, password: j.password, source: j.source, opts: j.opts });
+    for (const j of jobs) {
+      if (j.kind === 'cpt') enqueueCosplayDownload(bot, chatId, { url: j.url, title: j.title });
+      else enqueuePD(bot, chatId, j.title, { url: j.url, password: j.password, source: j.source, opts: j.opts });
+    }
   }
   log.info(`[Resume] re-enqueue ${pending.length} job dari ${Object.keys(byUser).length} user.`);
+}
+
+/**
+ * Coba semua mirror download cosplaytele BERURUTAN sampai ada yang sukses.
+ * Return-nya mengandalkan processDownload yang kini balas true/false/'pending'.
+ */
+async function runCosplayMirrors(bot, chatId, postTitle, links, jobId) {
+  const pw = links.password || null;
+  const mirrors = [];
+  if (links.gofile) mirrors.push({ name: 'Gofile', run: () => processDownload(bot, chatId, links.gofile, pw, 'gofile', jobId) });
+  if (links.sorafolder) mirrors.push({
+    name: 'SoraFolder', run: async () => {
+      const { url, filename } = await sorafolderApi.getDirectLink(links.sorafolder);
+      return processDownload(bot, chatId, url, pw, 'direct', jobId, { fileName: filename });
+    }
+  });
+  if (links.mediafire) mirrors.push({
+    name: 'MediaFire', run: async () => {
+      const u = await mediafireApi.getDirectLink(links.mediafire);
+      return processDownload(bot, chatId, u, pw, 'direct', jobId);
+    }
+  });
+  if (links.terabox) mirrors.push({ name: 'Terabox', run: () => processDownload(bot, chatId, links.terabox, pw, 'terabox', jobId) });
+
+  if (!mirrors.length) { bot.sendMessage(chatId, '⚠️ Tidak ada link download di post ini.').catch(() => { }); return; }
+
+  for (let i = 0; i < mirrors.length; i++) {
+    const m = mirrors[i];
+    try {
+      if (jobId) queueManager.updateJob(jobId, `⚙️ Mirror ${m.name} (${i + 1}/${mirrors.length})...`);
+      const res = await m.run();
+      if (res === 'pending' || res === true) return; // sukses / menunggu user pilih file gofile
+      log.warn(`[CPT-Fallback] ${m.name} gagal (false)`);
+    } catch (e) {
+      log.warn(`[CPT-Fallback] ${m.name} error: ${e.message}`);
+    }
+    if (i < mirrors.length - 1) bot.sendMessage(chatId, `⚠️ <b>${m.name}</b> gagal — coba mirror berikutnya...`, { parse_mode: 'HTML' }).catch(() => { });
+  }
+  bot.sendMessage(chatId, `❌ Semua mirror gagal untuk <b>${escHtml(postTitle || 'post')}</b>. Coba lagi nanti.`, { parse_mode: 'HTML' }).catch(() => { });
+}
+
+/**
+ * Enqueue download cosplaytele dengan AUTO-FALLBACK antar mirror + resume-able.
+ */
+function enqueueCosplayDownload(bot, chatId, post) {
+  const pid = jobStore.add({ chatId: String(chatId), kind: 'cpt', url: post.url, title: post.title || 'Cosplaytele' });
+  return queueManager.addJob(chatId, `CPT: ${(post.title || 'post').slice(0, 40)}`, async (jobId) => {
+    try {
+      const links = await cosplayteleScraper.scrapePostDetail(post.url);
+      if (!links) { bot.sendMessage(chatId, '⚠️ Gagal memuat detail post.').catch(() => { }); return; }
+      await runCosplayMirrors(bot, chatId, post.title, links, jobId);
+    } finally { jobStore.remove(pid); }
+  }, bot);
 }
 
 async function processDownload(bot, chatId, url, password, source = 'terabox', jobId = null, opts = {}) {  log.info(`[User ${chatId}] Memulai processDownload: ${url}`);
@@ -1147,7 +1203,8 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       const gofileRes = await gofileApi.resolveGofile(url);
       if (!gofileRes || gofileRes.files.length === 0) {
         log.warn(`[Process] Resolving Gofile gagal / kosong: ${url}`);
-        return status('❌ Gagal meresolve isi Gofile, atau folder kosong.');
+        await status('❌ Gagal meresolve isi Gofile, atau folder kosong.');
+        return false;
       }
 
       let targetFile;
@@ -1181,10 +1238,10 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
           chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
           reply_markup: { inline_keyboard: btns }
         });
-        return; // Hentikan di sini.
+        return 'pending'; // Menunggu user pilih file → hentikan fallback.
       }
 
-      if (!targetFile) return status('❌ File tidak ditemukan di dalam Gofile.');
+      if (!targetFile) { await status('❌ File tidak ditemukan di dalam Gofile.'); return false; }
 
       downloadLink = targetFile.link;
       fileName = targetFile.name || 'gofile_archive.zip';
@@ -1217,7 +1274,8 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       try {
         api = await getApiResult(url);
       } catch (err) {
-        return status(`❌ <b>Terabox gagal:</b> ${escHtml(err.message.slice(0, 300))}`);
+        await status(`❌ <b>Terabox gagal:</b> ${escHtml(err.message.slice(0, 300))}`);
+        return false;
       }
 
       downloadLink = api.zipDlink;
@@ -1289,13 +1347,15 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     // Sanity check ukuran: file arsip <50 KB hampir pasti HTML error page / truncated.
     if (isArchiveTarget && finalSize > 0 && finalSize < 50 * 1024) {
       if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-      return status(`❌ <b>Download gagal.</b> Link CDN balik ukuran ${(finalSize / 1024).toFixed(0)}KB (terlalu kecil, kemungkinan link expired/rate-limited). Coba klik Download lagi dari menu.`);
+      await status(`❌ <b>Download gagal.</b> Link CDN balik ukuran ${(finalSize / 1024).toFixed(0)}KB (terlalu kecil, kemungkinan link expired/rate-limited). Coba klik Download lagi dari menu.`);
+      return false;
     }
 
     // Validate magic-byte: tolak file yang ekstensinya .zip/.rar/.7z tapi isinya bukan arsip (HTML/JSON error).
     if (isArchiveTarget && !isLikelyValidArchive(zipPath)) {
       if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-      return status(`❌ <b>File korup.</b> Yang terdownload bukan arsip valid (kemungkinan link expired atau session Gofile bocor). Coba klik Download lagi.`);
+      await status(`❌ <b>File korup.</b> Yang terdownload bukan arsip valid (kemungkinan link expired atau session Gofile bocor). Coba klik Download lagi.`);
+      return false;
     }
 
     // Tandai status jadi Ekstraksi
@@ -1326,7 +1386,7 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
           );
           if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
           await rimraf(unzipDir);
-          return;
+          return false;
         }
         await status(`⚠️ <b>Gagal ekstrak arsip.</b> Mengirim file mentahan (${(archSize / 1024 / 1024).toFixed(1)}MB) langsung...`);
         if (!fs.existsSync(unzipDir)) fs.mkdirSync(unzipDir);
@@ -1347,7 +1407,7 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
       : files.filter(f => !isMedia(f) && !isArchive(f));
     const total = medias.length + docs.length;
 
-    if (total === 0) return status('⚠️ Arsip kosong atau berpassword proteksi tingkat tinggi.');
+    if (total === 0) { await status('⚠️ Arsip kosong atau berpassword proteksi tingkat tinggi.'); return false; }
     botStats.totalJobs += 1; // TRACKING KERJAAN
     botStats.extractedFiles += total; // TRACKING JUMLAH FILE
 
@@ -1431,6 +1491,7 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
 
     // Bersihkan folder temp SETELAH pengiriman selesai
     await rimraf(unzipDir);
+    return true;
 
   } catch (err) {
     log.error(`[User ${chatId}] processDownload gagal: ${err.message}`);
@@ -1452,6 +1513,7 @@ async function processDownload(bot, chatId, url, password, source = 'terabox', j
     }
     await status(userMsg);
     await rimraf(unzipDir); // Bersihkan juga di catch kalau ada error lain
+    return false;
   } finally {
     // Hanya hapus file zip saja di sini (kalau masih ada)
     if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
@@ -1510,10 +1572,14 @@ async function sendPostDetail(bot, chatId, loadMsg, post, cacheIndex) {
   // Build buttons
   const dlButtons = [];
 
-  // Download auto (pakai existing callback names agar backward compat)
-  if (links.gofile) dlButtons.push([{ text: '⬇️ Download via Gofile (Auto)', callback_data: `dlgofile_${cacheIndex}` }]);
-  if (links.mediafire) dlButtons.push([{ text: '⬇️ Download via MediaFire (Auto)', callback_data: `dlmediafire_${cacheIndex}` }]);
-  if (links.sorafolder) dlButtons.push([{ text: '⬇️ Download via SoraFolder (Auto)', callback_data: `dlsorafolder_${cacheIndex}` }]);
+  // Download auto dengan FALLBACK antar mirror (Gofile → SoraFolder → MediaFire → Terabox).
+  const dlMirrors = [
+    links.gofile && 'Gofile', links.sorafolder && 'Sora',
+    links.mediafire && 'MF', links.terabox && 'TB',
+  ].filter(Boolean);
+  if (dlMirrors.length) {
+    dlButtons.push([{ text: `⬇️ Download (auto: ${dlMirrors.join('/')})`, callback_data: `cptdl_${cacheIndex}` }]);
+  }
 
   // Preview gallery (kalau ada ≥3 image)
   if (links.previewImages && links.previewImages.length >= 3) {
@@ -6685,9 +6751,18 @@ function startBot() {
       return bot.sendMessage(chatId, 'Sesi kadaluarsa, ketik /browse kembali.');
     }
 
-    // Auto Gofile Download dari menu
-    if (action.startsWith('dlgofile_')) {
+    // Auto download cosplaytele dengan FALLBACK antar mirror
+    if (action.startsWith('cptdl_')) {
       const idx = parseInt(action.split('_')[1], 10);
+      const cache = browseCache.get(chatId);
+      if (!cache || !cache.posts[idx]) { bot.answerCallbackQuery(query.id, { text: '⚠️ Sesi kadaluarsa' }).catch(() => { }); return; }
+      bot.answerCallbackQuery(query.id, { text: '⬇️ Masuk antrean (auto-fallback)...' }).catch(() => { });
+      enqueueCosplayDownload(bot, chatId, cache.posts[idx]);
+      return;
+    }
+
+    // Auto Gofile Download dari menu
+    if (action.startsWith('dlgofile_')) {      const idx = parseInt(action.split('_')[1], 10);
       const cache = browseCache.get(chatId);
       if (!cache || !cache.posts[idx]) return;
       const post = cache.posts[idx];
