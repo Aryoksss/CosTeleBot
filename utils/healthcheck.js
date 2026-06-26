@@ -52,6 +52,36 @@ async function checkUrl(name, url, opts = {}) {
 }
 
 /**
+ * Check Kemono khusus: situs pakai DDoS-Guard + API butuh header `Accept: text/css`.
+ * GET homepage polos sering kena 403/challenge → false negative. Coba beberapa mirror
+ * pakai endpoint API ringan; ok kalau ADA mirror yang reachable.
+ */
+async function checkKemono() {
+  const hosts = ['kemono.cr', 'kemono.su'];
+  // Endpoint yang sama persis dipakai bot (kreator yang pasti ada) → sinyal akurat.
+  const probePath = '/api/v1/patreon/user/3295915/profile';
+  const t0 = Date.now();
+  let lastNote = 'unreachable';
+  for (const h of hosts) {
+    try {
+      const r = await axios.get(`https://${h}${probePath}`, {
+        headers: { 'accept': 'text/css', 'user-agent': UA, 'referer': `https://${h}/` },
+        timeout: TIMEOUT,
+        validateStatus: () => true,
+      });
+      if (r.status >= 200 && r.status < 300) {
+        return { name: 'Kemono', status: 'ok', latencyMs: Date.now() - t0, note: h };
+      }
+      lastNote = `${h} HTTP ${r.status}`;
+    } catch (e) {
+      lastNote = `${h} ${e.code || 'ERR'}`;
+    }
+  }
+  // Semua mirror tak balas 2xx → warn (DDoS-Guard sementara), bukan error mati total.
+  return { name: 'Kemono', status: 'warn', latencyMs: Date.now() - t0, note: lastNote };
+}
+
+/**
  * Check source-source scraper.
  */
 async function checkAllSources() {
@@ -62,7 +92,7 @@ async function checkAllSources() {
     checkUrl('XNXX', 'https://www.xnxx.com/'),
     checkUrl('Rule34Video', 'https://rule34video.com/'),
     checkUrl('Pinterest API', 'https://www.pinterest.com/'),
-    checkUrl('Kemono', 'https://kemono.cr/'),
+    checkKemono(),
     checkUrl('Gofile API', 'https://api.gofile.io/servers'),
     checkUrl('Telegram API', 'https://api.telegram.org/'),
   ];

@@ -150,7 +150,7 @@ async function getKemonoPostMedia(postUrl) {
 }
 
 /** Mirror host kemono (urutan prioritas). Semua berbagi backend /data/ yang sama. */
-const MIRRORS = ['kemono.cr', 'kemono.su', 'kemono.party'];
+const MIRRORS = ['kemono.cr', 'kemono.su'];
 
 /** Ganti host sebuah URL kemono ke mirror lain (untuk fallback download). */
 function mirrorize(url, host) {
