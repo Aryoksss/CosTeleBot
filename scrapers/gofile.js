@@ -100,14 +100,16 @@ async function resolveGofile(gofileUrl) {
     await Promise.race([apiInterception, page.waitForTimeout(8000)]);
     console.log(`[Gofile] Files ditemukan: ${files.length}`);
 
-    // Fallback / konsistensi token: panggil API gofile langsung dari dalam page.
-    // - Kalau GOFILE_TOKEN di-set → SELALU pakai itu supaya link terikat ke akun yang
-    //   sama dengan yang dipakai download (kalau beda token, gofile tolak → homepage HTML).
-    // - Kalau tidak, jalankan hanya saat interception kosong (browser lolos Cloudflare).
-    if (files.length === 0 || ACCOUNT_TOKEN) {
+    // Ambil daftar file via API DARI DALAM page (berbagi clearance Cloudflare).
+    // Mode default = GUEST ROTATE: tiap resolve bikin akun guest BARU (POST /accounts)
+    // → token fresh, kuota 1000GB/30hari mulai dari nol tiap download.
+    // Kalau GOFILE_TOKEN di-set, pakai itu (akun sendiri/premium).
+    // Token yang dipakai untuk listing DIFORWARD ke download supaya link & auth konsisten.
+    let apiToken = null;
+    {
       const contentId = (gofileUrl.match(/\/d\/([\w-]+)/) || [])[1];
       if (contentId) {
-        console.log(`[Gofile] in-page API fetch (id=${contentId}, token=${ACCOUNT_TOKEN ? 'GOFILE_TOKEN' : 'guest'})...`);
+        console.log(`[Gofile] in-page API fetch (id=${contentId}, mode=${ACCOUNT_TOKEN ? 'GOFILE_TOKEN' : 'guest-rotate'})...`);
         const apiData = await page.evaluate(async (args) => {
           try {
             let wt = (window.appdata && window.appdata.wt) || null;
@@ -117,24 +119,35 @@ async function resolveGofile(gofileUrl) {
                 if (m) { wt = m[1]; break; }
               }
             }
-            const tk = args.token || (document.cookie.match(/accountToken=([\w]+)/) || [])[1] || null;
+            // Token: GOFILE_TOKEN > guest baru (POST /accounts) > cookie existing.
+            let tk = args.token;
+            if (!tk) {
+              try {
+                const acc = await fetch('https://api.gofile.io/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                const aj = await acc.json();
+                tk = (aj && aj.data && aj.data.token) ? aj.data.token : null;
+              } catch (_) { }
+            }
+            if (!tk) tk = (document.cookie.match(/accountToken=([\w]+)/) || [])[1] || null;
             const r = await fetch(`https://api.gofile.io/contents/${args.id}?wt=${wt || ''}&cache=true`, {
               headers: tk ? { 'Authorization': 'Bearer ' + tk } : {},
             });
-            return await r.json();
+            const j = await r.json();
+            return { token: tk, data: j };
           } catch (e) { return { error: e.message }; }
         }, { id: contentId, token: ACCOUNT_TOKEN });
-        if (apiData && apiData.status === 'ok' && apiData.data && apiData.data.children) {
+
+        const apiData2 = apiData && apiData.data;
+        if (apiData2 && apiData2.status === 'ok' && apiData2.data && apiData2.data.children) {
           const apiFiles = [];
-          for (const cid in apiData.data.children) {
-            const fi = apiData.data.children[cid];
+          for (const cid in apiData2.data.children) {
+            const fi = apiData2.data.children[cid];
             if (fi && fi.link) apiFiles.push({ id: cid, name: fi.name || 'archive.zip', link: fi.link });
           }
-          // Kalau pakai token sendiri, link API ini yang dipakai (terikat ke akun yg download).
-          if (ACCOUNT_TOKEN || files.length === 0) files = apiFiles;
-          console.log(`[Gofile] in-page API fetch → ${apiFiles.length} file (dipakai: ${files.length})`);
+          if (apiFiles.length) { files = apiFiles; apiToken = apiData.token || null; }
+          console.log(`[Gofile] API fetch → ${apiFiles.length} file (token=${apiToken ? 'fresh' : 'n/a'}, dipakai: ${files.length})`);
         } else {
-          console.log(`[Gofile] in-page API fetch gagal: ${apiData && apiData.error ? apiData.error : 'no children (kemungkinan IP di-block / butuh GOFILE_PROXY)'}`);
+          console.log(`[Gofile] API fetch gagal: ${apiData && apiData.error ? apiData.error : 'no children (kemungkinan IP di-block / butuh GOFILE_PROXY)'} — fallback ke hasil intercept (${files.length} file)`);
         }
       }
     }
@@ -148,7 +161,8 @@ async function resolveGofile(gofileUrl) {
     return {
       files: files,
       cookie: cookieStr,
-      accountToken: ACCOUNT_TOKEN || accountToken
+      // Prioritas: GOFILE_TOKEN > token fresh dari API (guest-rotate) > cookie token.
+      accountToken: ACCOUNT_TOKEN || apiToken || accountToken
     };
 
   } catch (err) {
