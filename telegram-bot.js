@@ -1940,8 +1940,27 @@ async function doKemonoGacha(bot, chatId, creatorUrl) {
   }
 }
 
+/**
+ * Jalankan `tasks` (array of async functions) dengan concurrency terbatas.
+ * Dipakai untuk paralelkan download banyak file kecil (foto) tanpa flood server target.
+ */
+async function runWithConcurrency(tasks, limit) {
+  const results = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= tasks.length) return;
+      try { results[i] = await tasks[i](); } catch (e) { results[i] = { error: e }; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()));
+  return results;
+}
+
 // ─── 4KHD HANDLERS ───────────────────────────────────────────────────────────
 const KHD_MAX_PHOTOS = parseInt(process.env.KHD_MAX_PHOTOS || '80', 10); // cap agar tidak spam/timeout
+const KHD_DL_CONCURRENCY = Math.max(1, parseInt(process.env.KHD_DL_CONCURRENCY || '8', 10));
 
 /** Tampilkan listing 4KHD (search / latest) dengan tombol pilih post. */
 async function do4khdBrowse(bot, chatId, query = null, page = 1) {
@@ -2039,18 +2058,30 @@ async function do4khdDetail(bot, chatId, post) {
 
     const jobDir = path.join(CONFIG.TEMP_DIR, '4khd_' + Date.now());
     await fsp.mkdir(jobDir, { recursive: true });
-    const files = [];
-    for (let i = 0; i < images.length; i++) {
-      try {
-        const dest = path.join(jobDir, `p_${String(i).padStart(3, '0')}.webp`);
-        await downloadStream(images[i], dest, null, null, { expectMedia: true, referer: 'https://www.4khd.com/' });
-        files.push(dest);
-      } catch (e) { log.warn(`[4KHD DL] gagal foto ${i}: ${e.message}`); }
-      if (i % 10 === 9) {
-        bot.editMessageText(`🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ Unduh ${files.length}/${images.length}...</i>`, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+
+    // Download PARALEL (concurrency terbatas) — jauh lebih cepat daripada satu-satu.
+    let doneCount = 0;
+    let lastTick = Date.now();
+    const tasks = images.map((imgUrl, i) => async () => {
+      const dest = path.join(jobDir, `p_${String(i).padStart(3, '0')}.webp`);
+      await downloadStream(imgUrl, dest, null, null, { expectMedia: true, referer: 'https://www.4khd.com/' });
+      doneCount++;
+      const now = Date.now();
+      if (now - lastTick > 1500) {
+        lastTick = now;
+        bot.editMessageText(`🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ Unduh ${doneCount}/${images.length} (${KHD_DL_CONCURRENCY}x paralel)...</i>`, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
       }
-    }
+      return dest;
+    });
+    const results = await runWithConcurrency(tasks, KHD_DL_CONCURRENCY);
+    const files = [];
+    results.forEach((r, i) => {
+      if (r && r.error) log.warn(`[4KHD DL] gagal foto ${i}: ${r.error.message}`);
+      else if (typeof r === 'string' && fs.existsSync(r)) files.push(r);
+    });
     if (!files.length) { await rimraf(jobDir); return bot.editMessageText('❌ Gagal mengunduh foto.', { chat_id: chatId, message_id: gMsg.message_id }).catch(() => { }); }
+    // Urutkan ulang sesuai nama file (p_000, p_001, ...) karena hasil paralel bisa out-of-order.
+    files.sort();
 
     await sanitizeMediasForTelegram(files, (txt) => bot.editMessageText(txt, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { }));
     const valid = files.filter(f => fs.existsSync(f) && fs.statSync(f).size <= CONFIG.VIDEO_MAX_BYTES);
