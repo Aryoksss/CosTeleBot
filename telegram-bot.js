@@ -3586,9 +3586,16 @@ async function doAnimeGacha(bot, chatId, mode = 'ongoing') {
       });
     }
 
-    // Shuffle + pick top 5
-    pool.sort(() => Math.random() - 0.5);
-    const picked = pool.slice(0, 5);
+    // Anti-repeat via historyTracker (category 'anime') — konsisten dengan gacha sumber lain.
+    // Prioritaskan judul yang belum pernah muncul di gacha user ini; kalau semua sudah pernah
+    // dilihat (pool kecil), fallback ke pool penuh biar gacha tetap jalan.
+    const animeKey = (a) => a.url || a.link || a.slug || a.title;
+    const unseen = pool.filter(a => !historyTracker.hasSeen(chatId, 'anime', animeKey(a)));
+    const shufflePool = unseen.length >= 5 ? unseen : pool;
+    shufflePool.sort(() => Math.random() - 0.5);
+    const picked = shufflePool.slice(0, 5);
+    picked.forEach(a => historyTracker.markSeen(chatId, 'anime', animeKey(a)));
+    log.ok(`[Anime-Gacha] pool=${pool.length} unseen=${unseen.length} picked=${picked.length}`);
 
     const label = mode === 'ongoing' ? 'Gacha Ongoing 🟢' : 'Gacha Batch 📦';
     await _renderAnimeList(bot, chatId, loadMsg.message_id, label, picked, `anmgacha_${mode}`);
