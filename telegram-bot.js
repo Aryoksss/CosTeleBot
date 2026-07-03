@@ -1964,16 +1964,22 @@ const KHD_DL_CONCURRENCY = Math.max(1, parseInt(process.env.KHD_DL_CONCURRENCY |
 
 /** Tampilkan listing 4KHD (search / latest) dengan tombol pilih post. */
 async function do4khdBrowse(bot, chatId, query = null, page = 1) {
-  const header = query ? `🖼️ <b>4KHD:</b> <i>${escHtml(query)}</i> · Hal ${page}` : `🖼️ <b>4KHD Terbaru</b> · Hal ${page}`;
-  const loadMsg = await bot.sendMessage(chatId, `${header}\n<i>Memuat...</i>`, { parse_mode: 'HTML' });
+  const en = statsDb.getLang(chatId) === 'en';
+  const pageLabel = en ? 'Page' : 'Hal';
+  const header = query
+    ? `🖼️ <b>4KHD:</b> <i>${escHtml(query)}</i> · ${pageLabel} ${page}`
+    : `🖼️ <b>4KHD ${en ? 'Latest' : 'Terbaru'}</b> · ${pageLabel} ${page}`;
+  const loadMsg = await bot.sendMessage(chatId, `${header}\n<i>${en ? 'Loading...' : 'Memuat...'}</i>`, { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
   try {
     const posts = query ? await fourkhdScraper.scrapeSearch(query, page) : await fourkhdScraper.scrapeLatest(page);
     if (!posts.length) {
-      return bot.editMessageText(`⚠️ Tidak ada hasil untuk <b>${escHtml(query || 'terbaru')}</b>.`, {
-        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] },
-      });
+      return bot.editMessageText(
+        en ? `⚠️ No results for <b>${escHtml(query || 'latest')}</b>.` : `⚠️ Tidak ada hasil untuk <b>${escHtml(query || 'terbaru')}</b>.`,
+        {
+          chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: en ? '🔙 Menu' : '🔙 Menu', callback_data: 'menu_awal' }]] },
+        });
     }
     const shown = posts.slice(0, 10);
     shown.forEach((p, i) => { p._idx = i; });
@@ -1995,29 +2001,30 @@ async function do4khdBrowse(bot, chatId, query = null, page = 1) {
     if (page > 1) nav.push({ text: '◀ Prev', callback_data: `khdpage_${page - 1}` });
     nav.push({ text: 'Next ▶', callback_data: `khdpage_${page + 1}` });
     buttons.push(nav);
-    buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+    buttons.push([{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }]);
 
     await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
   } catch (e) {
     log.error(`[4KHD] browse error: ${e.message}`);
-    bot.editMessageText(`❌ Gagal: ${escHtml(e.message)}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+    bot.editMessageText(`❌ ${en ? 'Failed' : 'Gagal'}: ${escHtml(e.message)}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
   }
 }
 
 /** Tampilkan preview (thumbnail + meta) sebelum download — user putuskan lanjut atau reroll. */
 async function do4khdPreview(bot, chatId, post, opts = {}) {
   const isGacha = !!opts.isGacha;
+  const en = statsDb.getLang(chatId) === 'en';
   const parts = [];
-  if (post.photoCount) parts.push(`📸 ${post.photoCount} foto`);
+  if (post.photoCount) parts.push(`📸 ${post.photoCount} ${en ? 'photos' : 'foto'}`);
   if (post.size) parts.push(`📦 ${post.size}`);
   const metaLine = parts.length ? `\n${parts.join(' · ')}` : '';
-  const text = `${isGacha ? '🎰 <b>4KHD Gacha!</b>\n\n' : ''}🖼️ <b>${escHtml(post.title)}</b>${metaLine}`;
+  const text = `${isGacha ? `🎰 <b>4KHD Gacha!</b>\n\n` : ''}🖼️ <b>${escHtml(post.title)}</b>${metaLine}`;
 
-  const buttons = [[{ text: '⬇️ Download Semua Foto', callback_data: `khdgo_${post._idx}` }]];
+  const buttons = [[{ text: en ? '⬇️ Download All Photos' : '⬇️ Download Semua Foto', callback_data: `khdgo_${post._idx}` }]];
   if (isGacha) {
     buttons.push([{ text: '🎲 Reroll', callback_data: 'khd_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]);
   } else {
-    buttons.push([{ text: '🔙 Kembali', callback_data: 'back_khd' }]);
+    buttons.push([{ text: en ? '🔙 Back' : '🔙 Kembali', callback_data: 'back_khd' }]);
   }
 
   if (post.thumb) {
@@ -2036,7 +2043,8 @@ async function do4khdPreview(bot, chatId, post, opts = {}) {
  *  isGacha=false (dari search/latest) → JANGAN hapus apa pun, ini aksi baru yang disengaja user. */
 async function do4khdDetail(bot, chatId, post, opts = {}) {
   const isGacha = !!opts.isGacha;
-  const gMsg = await bot.sendMessage(chatId, `🖼️ <b>${escHtml(post.title)}</b>\n<i>Memuat galeri...</i>`, { parse_mode: 'HTML' });
+  const en = statsDb.getLang(chatId) === 'en';
+  const gMsg = await bot.sendMessage(chatId, `🖼️ <b>${escHtml(post.title)}</b>\n<i>${en ? 'Loading gallery...' : 'Memuat galeri...'}</i>`, { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, gMsg.message_id);
 
   // Bersihkan galeri gacha lama — HANYA kalau ini reroll gacha, bukan hasil search.
@@ -2049,17 +2057,21 @@ async function do4khdDetail(bot, chatId, post, opts = {}) {
   try {
     const detail = await fourkhdScraper.scrapePostDetail(post.url);
     if (!detail || !detail.images.length) {
-      return bot.editMessageText(`😔 Galeri kosong / gagal dimuat. Coba post lain.`, {
-        chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] },
-      });
+      return bot.editMessageText(
+        en ? `😔 Empty gallery / failed to load. Try another post.` : `😔 Galeri kosong / gagal dimuat. Coba post lain.`,
+        {
+          chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] },
+        });
     }
 
     let images = detail.images;
     const capped = images.length > KHD_MAX_PHOTOS;
     if (capped) images = images.slice(0, KHD_MAX_PHOTOS);
 
-    await bot.editMessageText(`🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ Mengunduh ${images.length} foto ke server...</i>`, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+    await bot.editMessageText(
+      `🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ ${en ? `Downloading ${images.length} photos to server...` : `Mengunduh ${images.length} foto ke server...`}</i>`,
+      { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
 
     const jobDir = path.join(CONFIG.TEMP_DIR, '4khd_' + Date.now());
     await fsp.mkdir(jobDir, { recursive: true });
@@ -2074,7 +2086,10 @@ async function do4khdDetail(bot, chatId, post, opts = {}) {
       const now = Date.now();
       if (now - lastTick > 1500) {
         lastTick = now;
-        bot.editMessageText(`🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ Unduh ${doneCount}/${images.length} (${KHD_DL_CONCURRENCY}x paralel)...</i>`, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+        const t = en
+          ? `🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ Downloading ${doneCount}/${images.length} (${KHD_DL_CONCURRENCY}x parallel)...</i>`
+          : `🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ Unduh ${doneCount}/${images.length} (${KHD_DL_CONCURRENCY}x paralel)...</i>`;
+        bot.editMessageText(t, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
       }
       return dest;
     });
@@ -2084,7 +2099,10 @@ async function do4khdDetail(bot, chatId, post, opts = {}) {
       if (r && r.error) log.warn(`[4KHD DL] gagal foto ${i}: ${r.error.message}`);
       else if (typeof r === 'string' && fs.existsSync(r)) files.push(r);
     });
-    if (!files.length) { await rimraf(jobDir); return bot.editMessageText('❌ Gagal mengunduh foto.', { chat_id: chatId, message_id: gMsg.message_id }).catch(() => { }); }
+    if (!files.length) {
+      await rimraf(jobDir);
+      return bot.editMessageText(en ? '❌ Failed to download photos.' : '❌ Gagal mengunduh foto.', { chat_id: chatId, message_id: gMsg.message_id }).catch(() => { });
+    }
     // Urutkan ulang sesuai nama file (p_000, p_001, ...) karena hasil paralel bisa out-of-order.
     files.sort();
 
@@ -2115,11 +2133,17 @@ async function do4khdDetail(bot, chatId, post, opts = {}) {
       if (ci < chunks.length - 1) await sleep(2500);
     }
 
-    let navText = `🖼️ <b>${escHtml(detail.title)}</b>\n\n✨ <i>Selesai! ${sentCount}/${valid.length} foto terkirim.</i>`;
-    if (capped) navText += `\n⚠️ <i>Set ini punya ${detail.photoCount} foto, ditampilkan ${images.length} pertama (batas anti-spam).</i>`;
+    let navText = en
+      ? `🖼️ <b>${escHtml(detail.title)}</b>\n\n✨ <i>Done! ${sentCount}/${valid.length} photos sent.</i>`
+      : `🖼️ <b>${escHtml(detail.title)}</b>\n\n✨ <i>Selesai! ${sentCount}/${valid.length} foto terkirim.</i>`;
+    if (capped) {
+      navText += en
+        ? `\n⚠️ <i>This set has ${detail.photoCount} photos, showing the first ${images.length} (anti-spam cap).</i>`
+        : `\n⚠️ <i>Set ini punya ${detail.photoCount} foto, ditampilkan ${images.length} pertama (batas anti-spam).</i>`;
+    }
     const navMsg = await bot.sendMessage(chatId, navText, {
       parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: [[{ text: '🖼️ 4KHD Lain', callback_data: 'khd_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] },
+      reply_markup: { inline_keyboard: [[{ text: en ? '🖼️ Another 4KHD' : '🖼️ 4KHD Lain', callback_data: 'khd_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] },
     });
     autoCleanOldMenu(bot, chatId, navMsg.message_id);
     await rimraf(jobDir);
@@ -2132,11 +2156,14 @@ async function do4khdDetail(bot, chatId, post, opts = {}) {
 /** Gacha 4KHD: post acak dari homepage → tampilkan preview dulu (bukan langsung download). */
 async function do4khdGacha(bot, chatId) {
   statsDb.addGacha(chatId);
-  const loadMsg = await bot.sendMessage(chatId, '🎲 <b>4KHD Gacha...</b>\n<i>Mengacak galeri...</i>', { parse_mode: 'HTML' });
+  const en = statsDb.getLang(chatId) === 'en';
+  const loadMsg = await bot.sendMessage(chatId,
+    en ? '🎲 <b>4KHD Gacha...</b>\n<i>Shuffling gallery...</i>' : '🎲 <b>4KHD Gacha...</b>\n<i>Mengacak galeri...</i>',
+    { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
   const posts = await fourkhdScraper.scrapeGacha();
   if (!posts.length) {
-    return bot.editMessageText('⚠️ Gacha 4KHD kosong, coba lagi.', {
+    return bot.editMessageText(en ? '⚠️ 4KHD gacha is empty, try again.' : '⚠️ Gacha 4KHD kosong, coba lagi.', {
       chat_id: chatId, message_id: loadMsg.message_id,
       reply_markup: { inline_keyboard: [[{ text: '🎲 Reroll', callback_data: 'khd_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] },
     }).catch(() => { });
@@ -5072,14 +5099,15 @@ function startBot() {
     if (query) {
       do4khdBrowse(bot, msg.chat.id, query, 1);
     } else {
-      const sentMsg = await bot.sendMessage(msg.chat.id, `🖼️ <b>4KHD</b> — galeri foto HD\n\nPilih mode:`, {
+      const en = statsDb.getLang(msg.chat.id) === 'en';
+      const sentMsg = await bot.sendMessage(msg.chat.id, `🖼️ <b>4KHD</b> — ${en ? 'HD photo gallery' : 'galeri foto HD'}\n\n${en ? 'Choose mode:' : 'Pilih mode:'}`, {
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
-            [{ text: '🔍 Cari', callback_data: 'khd_search_prompt' }],
-            [{ text: '🆕 Terbaru', callback_data: 'khdpage_1' }],
-            [{ text: '🎲 Gacha Random', callback_data: 'khd_gacha' }],
-            [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]
+            [{ text: en ? '🔍 Search' : '🔍 Cari', callback_data: 'khd_search_prompt' }],
+            [{ text: en ? '🆕 Latest' : '🆕 Terbaru', callback_data: 'khdpage_1' }],
+            [{ text: en ? '🎲 Random Gacha' : '🎲 Gacha Random', callback_data: 'khd_gacha' }],
+            [{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }]
           ]
         }
       });
@@ -6255,14 +6283,15 @@ function startBot() {
     // ── 4KHD Callbacks ──
     if (action === 'menu_4khd') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      const sentMsg = await bot.sendMessage(chatId, `🖼️ <b>4KHD</b> — galeri foto HD\n\nPilih mode:`, {
+      const en = statsDb.getLang(chatId) === 'en';
+      const sentMsg = await bot.sendMessage(chatId, `🖼️ <b>4KHD</b> — ${en ? 'HD photo gallery' : 'galeri foto HD'}\n\n${en ? 'Choose mode:' : 'Pilih mode:'}`, {
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
-            [{ text: '🔍 Cari', callback_data: 'khd_search_prompt' }],
-            [{ text: '🆕 Terbaru', callback_data: 'khdpage_1' }],
-            [{ text: '🎲 Gacha Random', callback_data: 'khd_gacha' }],
-            [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+            [{ text: en ? '🔍 Search' : '🔍 Cari', callback_data: 'khd_search_prompt' }],
+            [{ text: en ? '🆕 Latest' : '🆕 Terbaru', callback_data: 'khdpage_1' }],
+            [{ text: en ? '🎲 Random Gacha' : '🎲 Gacha Random', callback_data: 'khd_gacha' }],
+            [{ text: en ? '🔙 Main Menu' : '🔙 Menu Utama', callback_data: 'menu_awal' }],
           ]
         }
       });
@@ -6272,12 +6301,18 @@ function startBot() {
     if (action === 'khd_search_prompt') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       userStates.set(chatId, { step: 'AWAITING_4KHD_SEARCH' });
-      const m = await bot.sendMessage(chatId, '🖼️ <b>Cari di 4KHD</b>\nKetik nama/kata kunci (mis. <code>nikke</code>, <code>tiny asa</code>):', { parse_mode: 'HTML' });
+      const en = statsDb.getLang(chatId) === 'en';
+      const m = await bot.sendMessage(chatId,
+        en
+          ? '🖼️ <b>Search 4KHD</b>\nType a name/keyword (e.g. <code>nikke</code>, <code>tiny asa</code>):'
+          : '🖼️ <b>Cari di 4KHD</b>\nKetik nama/kata kunci (mis. <code>nikke</code>, <code>tiny asa</code>):',
+        { parse_mode: 'HTML' });
       autoCleanOldMenu(bot, chatId, m.message_id);
       return;
     }
     if (action === 'khd_gacha') {
-      bot.answerCallbackQuery(query.id, { text: '🎲 Ngocok 4KHD...' }).catch(() => { });
+      const en = statsDb.getLang(chatId) === 'en';
+      bot.answerCallbackQuery(query.id, { text: en ? '🎲 Shuffling 4KHD...' : '🎲 Ngocok 4KHD...' }).catch(() => { });
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return do4khdGacha(bot, chatId);
     }
