@@ -241,6 +241,7 @@ const erothotsScraper = require('./scrapers/erothots');
 const xnxxScraper = require('./scrapers/xnxx');
 const otakudesuScraper = require('./scrapers/otakudesu');
 const oploverzScraper = require('./scrapers/oploverz');
+const fourkhdScraper = require('./scrapers/fourkhd');
 const hostResolver = require('./scrapers/hostResolver');
 const megaResolver = require('./scrapers/megaResolver');
 const kusonimeScraper = require('./scrapers/kusonime');
@@ -530,6 +531,8 @@ const browseCache = new Map(); // chatId -> { posts: [], page, category, query }
 const menuTracker = new Map(); // chatId -> lastMessageId (Untuk auto-clean menu lama)
 const kemonoTracker = new Map(); // chatId -> array of message_ids (Untuk auto-clean media gacha)
 const r34BrowseCache = new Map(); // chatId -> { posts: [], page, query }
+const fourkhdCache = new Map(); // chatId -> { posts: [], page, query }
+const fourkhdTracker = new Map(); // chatId -> array of message_ids (auto-clean galeri lama)
 const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, prevBookmarks: [] }
 const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const eroBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
@@ -1915,6 +1918,131 @@ async function doKemonoGacha(bot, chatId, creatorUrl) {
     log.error('Patreon Gacha gagal: ' + e.message);
     bot.editMessageText(`❌ Error Patreon: ${e.message}`, { chat_id: chatId, message_id: gMsg.message_id }).catch(() => { });
   }
+}
+
+// ─── 4KHD HANDLERS ───────────────────────────────────────────────────────────
+const KHD_MAX_PHOTOS = parseInt(process.env.KHD_MAX_PHOTOS || '80', 10); // cap agar tidak spam/timeout
+
+/** Tampilkan listing 4KHD (search / latest) dengan tombol pilih post. */
+async function do4khdBrowse(bot, chatId, query = null, page = 1) {
+  const header = query ? `🖼️ <b>4KHD:</b> <i>${escHtml(query)}</i> · Hal ${page}` : `🖼️ <b>4KHD Terbaru</b> · Hal ${page}`;
+  const loadMsg = await bot.sendMessage(chatId, `${header}\n<i>Memuat...</i>`, { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
+  try {
+    const posts = query ? await fourkhdScraper.scrapeSearch(query, page) : await fourkhdScraper.scrapeLatest(page);
+    if (!posts.length) {
+      return bot.editMessageText(`⚠️ Tidak ada hasil untuk <b>${escHtml(query || 'terbaru')}</b>.`, {
+        chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] },
+      });
+    }
+    const shown = posts.slice(0, 10);
+    fourkhdCache.set(chatId, { posts: shown, page, query });
+
+    let text = `${header}\n\n`;
+    shown.forEach((p, i) => {
+      const meta = [p.photoCount ? `📸 ${p.photoCount}` : null, p.size].filter(Boolean).join(' · ');
+      text += `${i + 1}. ${escHtml(p.title.slice(0, 60))}${meta ? `\n    ${meta}` : ''}\n`;
+    });
+
+    const buttons = [];
+    for (let i = 0; i < shown.length; i += 2) {
+      const row = [{ text: `${i + 1} 🖼️`, callback_data: `khd_${i}` }];
+      if (i + 1 < shown.length) row.push({ text: `${i + 2} 🖼️`, callback_data: `khd_${i + 1}` });
+      buttons.push(row);
+    }
+    const nav = [];
+    if (page > 1) nav.push({ text: '◀ Prev', callback_data: `khdpage_${page - 1}` });
+    nav.push({ text: 'Next ▶', callback_data: `khdpage_${page + 1}` });
+    buttons.push(nav);
+    buttons.push([{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]);
+
+    await bot.editMessageText(text, { chat_id: chatId, message_id: loadMsg.message_id, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+  } catch (e) {
+    log.error(`[4KHD] browse error: ${e.message}`);
+    bot.editMessageText(`❌ Gagal: ${escHtml(e.message)}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
+  }
+}
+
+/** Download semua foto 1 post 4KHD + kirim sebagai album. */
+async function do4khdDetail(bot, chatId, post) {
+  const gMsg = await bot.sendMessage(chatId, `🖼️ <b>${escHtml(post.title)}</b>\n<i>Memuat galeri...</i>`, { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, gMsg.message_id);
+
+  // Bersihkan galeri lama
+  const oldMsgs = fourkhdTracker.get(chatId) || [];
+  for (const mId of oldMsgs) { bot.deleteMessage(chatId, mId).catch(() => { }); await sleep(30); }
+  fourkhdTracker.set(chatId, []);
+
+  try {
+    const detail = await fourkhdScraper.scrapePostDetail(post.url);
+    if (!detail || !detail.images.length) {
+      return bot.editMessageText(`😔 Galeri kosong / gagal dimuat. Coba post lain.`, {
+        chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Menu', callback_data: 'menu_awal' }]] },
+      });
+    }
+
+    let images = detail.images;
+    const capped = images.length > KHD_MAX_PHOTOS;
+    if (capped) images = images.slice(0, KHD_MAX_PHOTOS);
+
+    await bot.editMessageText(`🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ Mengunduh ${images.length} foto ke server...</i>`, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+
+    const jobDir = path.join(CONFIG.TEMP_DIR, '4khd_' + Date.now());
+    await fsp.mkdir(jobDir, { recursive: true });
+    const files = [];
+    for (let i = 0; i < images.length; i++) {
+      try {
+        const dest = path.join(jobDir, `p_${String(i).padStart(3, '0')}.webp`);
+        await downloadStream(images[i], dest, null, null, { expectMedia: true, referer: 'https://www.4khd.com/' });
+        files.push(dest);
+      } catch (e) { log.warn(`[4KHD DL] gagal foto ${i}: ${e.message}`); }
+      if (i % 10 === 9) {
+        bot.editMessageText(`🖼️ <b>${escHtml(detail.title)}</b>\n<i>⏳ Unduh ${files.length}/${images.length}...</i>`, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { });
+      }
+    }
+    if (!files.length) { await rimraf(jobDir); return bot.editMessageText('❌ Gagal mengunduh foto.', { chat_id: chatId, message_id: gMsg.message_id }).catch(() => { }); }
+
+    await sanitizeMediasForTelegram(files, (txt) => bot.editMessageText(txt, { chat_id: chatId, message_id: gMsg.message_id, parse_mode: 'HTML' }).catch(() => { }));
+    const valid = files.filter(f => fs.existsSync(f) && fs.statSync(f).size <= CONFIG.VIDEO_MAX_BYTES);
+    if (valid.length) statsDb.addDownloadSize(chatId, valid.reduce((s, f) => s + fs.statSync(f).size, 0));
+
+    bot.deleteMessage(chatId, gMsg.message_id).catch(() => { });
+
+    const chunks = chunkMediaByLimits(valid);
+    for (const chunk of chunks) {
+      const group = chunk.map(f => ({ type: 'photo', media: fs.createReadStream(f) }));
+      try {
+        const res = await bot.sendMediaGroup(chatId, group);
+        const tracked = fourkhdTracker.get(chatId) || [];
+        res.forEach(m => tracked.push(m.message_id));
+        fourkhdTracker.set(chatId, tracked);
+      } catch (e) { log.error(`[4KHD send] ${e.message}`); }
+      await sleep(CONFIG.SEND_DELAY);
+    }
+
+    let navText = `🖼️ <b>${escHtml(detail.title)}</b>\n\n✨ <i>Selesai! ${valid.length} foto terkirim.</i>`;
+    if (capped) navText += `\n⚠️ <i>Set ini punya ${detail.photoCount} foto, ditampilkan ${images.length} pertama (batas anti-spam).</i>`;
+    const navMsg = await bot.sendMessage(chatId, navText, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: '🖼️ 4KHD Lain', callback_data: 'khd_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] },
+    });
+    autoCleanOldMenu(bot, chatId, navMsg.message_id);
+    await rimraf(jobDir);
+  } catch (e) {
+    log.error(`[4KHD] detail error: ${e.message}`);
+    bot.editMessageText(`❌ Error: ${escHtml(e.message)}`, { chat_id: chatId, message_id: gMsg.message_id }).catch(() => { });
+  }
+}
+
+/** Gacha 4KHD: post acak dari homepage. */
+async function do4khdGacha(bot, chatId) {
+  statsDb.addGacha(chatId);
+  const posts = await fourkhdScraper.scrapeGacha();
+  if (!posts.length) return bot.sendMessage(chatId, '⚠️ Gacha 4KHD kosong, coba lagi.').catch(() => { });
+  const pick = posts[Math.floor(Math.random() * posts.length)];
+  return do4khdDetail(bot, chatId, pick);
 }
 
 // ─── RULE34VIDEO HANDLERS ────────────────────────────────────────────────────
@@ -3915,6 +4043,7 @@ async function doSmartSearchMenu(bot, chatId, query, preferredSource) {
   if (preferredSource === 'jav') return doJavBrowse(bot, chatId, query, 1);
   if (preferredSource === 'ero') return doEroBrowse(bot, chatId, query, 1);
   if (preferredSource === 'xnxx') return doXnxxBrowse(bot, chatId, query, 1);
+  if (preferredSource === '4khd') return do4khdBrowse(bot, chatId, query, 1);
   if (preferredSource === 'anime') return doAnimeSearch(bot, chatId, query);
 
   // 'all' atau tidak ada preference → tanya user dulu
@@ -4578,6 +4707,9 @@ async function sendMainMenu(bot, chatId) {
       { text: '🎬 R34', callback_data: 'menu_r34' },
     ],
     [
+      { text: '🖼️ 4KHD', callback_data: 'menu_4khd' },
+    ],
+    [
       { text: '📥 Terabox', callback_data: 'menu_terabox' },
       { text: en ? '👤 Profile' : '👤 Profil', callback_data: 'menu_profile' },
       { text: '💎 Premium', callback_data: 'menu_premium' },
@@ -4825,6 +4957,25 @@ function startBot() {
             [{ text: '🔍 Cari Video', callback_data: 'r34_search_prompt' }],
             [{ text: '📋 Browse Terbaru', callback_data: 'menu_r34_browse' }],
             [{ text: '🎲 Gacha Video Random', callback_data: 'menu_r34_gacha' }],
+            [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]
+          ]
+        }
+      });
+      autoCleanOldMenu(bot, msg.chat.id, sentMsg.message_id);
+    }
+  });
+
+  registerCommand({ name: '4khd', aliases: ['khd'], description: '🖼️ 4KHD galeri foto HD (Search/Gacha)' }, async (msg, query) => {
+    if (query) {
+      do4khdBrowse(bot, msg.chat.id, query, 1);
+    } else {
+      const sentMsg = await bot.sendMessage(msg.chat.id, `🖼️ <b>4KHD</b> — galeri foto HD\n\nPilih mode:`, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🔍 Cari', callback_data: 'khd_search_prompt' }],
+            [{ text: '🆕 Terbaru', callback_data: 'khdpage_1' }],
+            [{ text: '🎲 Gacha Random', callback_data: 'khd_gacha' }],
             [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }]
           ]
         }
@@ -5399,6 +5550,14 @@ function startBot() {
       userStates.delete(chatId);
       log.info(`[User ${chatId}] Pencarian R34Video: ${text}`);
       doR34Browse(bot, chatId, 1, text);
+      return;
+    }
+
+    // If awaiting 4KHD search query
+    if (state && state.step === 'AWAITING_4KHD_SEARCH') {
+      userStates.delete(chatId);
+      log.info(`[User ${chatId}] Pencarian 4KHD: ${text}`);
+      do4khdBrowse(bot, chatId, text, 1);
       return;
     }
 
@@ -5990,6 +6149,49 @@ function startBot() {
       return doKemonoGacha(bot, chatId, pickedUrl);
     }
 
+    // ── 4KHD Callbacks ──
+    if (action === 'menu_4khd') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      const sentMsg = await bot.sendMessage(chatId, `🖼️ <b>4KHD</b> — galeri foto HD\n\nPilih mode:`, {
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🔍 Cari', callback_data: 'khd_search_prompt' }],
+            [{ text: '🆕 Terbaru', callback_data: 'khdpage_1' }],
+            [{ text: '🎲 Gacha Random', callback_data: 'khd_gacha' }],
+            [{ text: '🔙 Menu Utama', callback_data: 'menu_awal' }],
+          ]
+        }
+      });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    }
+    if (action === 'khd_search_prompt') {
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      userStates.set(chatId, { step: 'AWAITING_4KHD_SEARCH' });
+      const m = await bot.sendMessage(chatId, '🖼️ <b>Cari di 4KHD</b>\nKetik nama/kata kunci (mis. <code>nikke</code>, <code>tiny asa</code>):', { parse_mode: 'HTML' });
+      autoCleanOldMenu(bot, chatId, m.message_id);
+      return;
+    }
+    if (action === 'khd_gacha') {
+      bot.answerCallbackQuery(query.id, { text: '🎲 Ngocok 4KHD...' }).catch(() => { });
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return do4khdGacha(bot, chatId);
+    }
+    if (action.startsWith('khdpage_')) {
+      const pg = parseInt(action.replace('khdpage_', ''), 10) || 1;
+      const cache = fourkhdCache.get(chatId);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return do4khdBrowse(bot, chatId, cache?.query || null, pg);
+    }
+    if (action.startsWith('khd_') && /^khd_\d+$/.test(action)) {
+      const idx = parseInt(action.replace('khd_', ''), 10);
+      const cache = fourkhdCache.get(chatId);
+      if (!cache || !cache.posts[idx]) return bot.answerCallbackQuery(query.id, { text: '⚠️ Sesi kadaluarsa' }).catch(() => { });
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return do4khdDetail(bot, chatId, cache.posts[idx]);
+    }
+
     // ── Rule34Video Callbacks ──
     if (action === 'menu_r34_browse') {
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
@@ -6099,6 +6301,7 @@ function startBot() {
       if (src === 'jav') return doJavBrowse(bot, chatId, q, 1);
       if (src === 'ero') return doEroBrowse(bot, chatId, q, 1);
       if (src === 'xnxx') return doXnxxBrowse(bot, chatId, q, 1);
+      if (src === '4khd') return do4khdBrowse(bot, chatId, q, 1);
       if (src === 'anime') return doAnimeSearch(bot, chatId, q);
       if (src === 'all') return doAggregateSearch(bot, chatId, q);
       return;

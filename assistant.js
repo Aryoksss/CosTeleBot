@@ -24,6 +24,7 @@ Tulis TEKS BIASA (tanpa Markdown/HTML). Jangan mengarang command/fitur yang tida
 const CAPABILITIES =
 `SUMBER & KEGUNAANNYA:
 - cosplay  = Cosplaytele. Album foto/video cosplay (karakter, cosplayer). Contoh: "ganyu cosplay", "byoru".
+- 4khd     = 4KHD. Galeri foto HD (cosplay/model, set foto besar). Contoh: "4khd tiny asa", "4khd nikke".
 - jav      = Javtiful. Video JAV. Kenali KODE JAV (mis. MIDE-232, SSNI-001, ABP-123) dan nama aktris Jepang.
 - ero      = EroThots. Video amatir / OnlyFans leak.
 - xnxx     = XNXX. Tube video dewasa umum (segala kategori).
@@ -66,7 +67,7 @@ CONTOH (input → output JSON):
 - "menu" → {"action":"menu","query":null,"source":null,"reply":"Ini menu utamanya 👇"}`;
 
 const ACTIONS = ['search', 'gacha', 'jav_gacha', 'browse', 'anime', 'menu', 'chat'];
-const VALID_SRC = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'xnxx', 'anime', 'kemono', 'all'];
+const VALID_SRC = ['cosplay', 'r34', 'pinterest', 'jav', 'ero', 'xnxx', 'anime', 'kemono', '4khd', 'all'];
 
 /**
  * Balasan obrolan teks biasa (tanpa aksi). Dipakai untuk fallback ringan.
@@ -102,7 +103,7 @@ async function assist(userText, commands = [], history = [], lang = 'id') {
 PENTING: tulis field "reply" HANYA dalam ${replyLang}. Contoh-contoh di bawah memakai Bahasa Indonesia hanya sebagai ilustrasi struktur — terjemahkan gayanya ke ${replyLang}.
 
 Balas HANYA JSON (tanpa teks lain) dengan skema:
-{ "action": "search"|"gacha"|"browse"|"anime"|"menu"|"chat", "query": string|null, "source": "cosplay"|"r34"|"pinterest"|"jav"|"ero"|"xnxx"|"anime"|"kemono"|"all"|null, "reply": string }
+{ "action": "search"|"gacha"|"browse"|"anime"|"menu"|"chat", "query": string|null, "source": "cosplay"|"r34"|"pinterest"|"jav"|"ero"|"xnxx"|"anime"|"kemono"|"4khd"|"all"|null, "reply": string }
 
 ${CAPABILITIES}
 
