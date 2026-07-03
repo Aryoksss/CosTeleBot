@@ -552,7 +552,6 @@ const menuTracker = new Map(); // chatId -> lastMessageId (Untuk auto-clean menu
 const kemonoTracker = new Map(); // chatId -> array of message_ids (Untuk auto-clean media gacha)
 const r34BrowseCache = new Map(); // chatId -> { posts: [], page, query }
 const fourkhdCache = new Map(); // chatId -> { posts: [], page, query }
-const fourkhdTracker = new Map(); // chatId -> array of message_ids (auto-clean galeri lama)
 const pinBrowseCache = new Map(); // chatId -> { pins: [], query, nextBookmark, prevBookmarks: [] }
 const javBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
 const eroBrowseCache = new Map(); // chatId -> { items: [], query, page, hasNext }
@@ -2047,13 +2046,6 @@ async function do4khdDetail(bot, chatId, post, opts = {}) {
   const gMsg = await bot.sendMessage(chatId, `🖼️ <b>${escHtml(post.title)}</b>\n<i>${en ? 'Loading gallery...' : 'Memuat galeri...'}</i>`, { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, gMsg.message_id);
 
-  // Bersihkan galeri gacha lama — HANYA kalau ini reroll gacha, bukan hasil search.
-  if (isGacha) {
-    const oldMsgs = fourkhdTracker.get(chatId) || [];
-    for (const mId of oldMsgs) { bot.deleteMessage(chatId, mId).catch(() => { }); await sleep(30); }
-    fourkhdTracker.set(chatId, []);
-  }
-
   try {
     const detail = await fourkhdScraper.scrapePostDetail(post.url);
     if (!detail || !detail.images.length) {
@@ -2118,14 +2110,7 @@ async function do4khdDetail(bot, chatId, post, opts = {}) {
       const chunk = chunks[ci];
       const group = chunk.map(f => ({ type: 'photo', media: fs.createReadStream(f) }));
       try {
-        const res = await sendMediaGroupWithRetry(bot, chatId, group);
-        // Hanya track message_id untuk auto-clean kalau ini gacha (biar hasil search
-        // tidak ikut kehapus saat user gacha di lain waktu).
-        if (isGacha) {
-          const tracked = fourkhdTracker.get(chatId) || [];
-          res.forEach(m => tracked.push(m.message_id));
-          fourkhdTracker.set(chatId, tracked);
-        }
+        await sendMediaGroupWithRetry(bot, chatId, group);
         sentCount += chunk.length;
       } catch (e) { log.error(`[4KHD send] chunk ${ci + 1}/${chunks.length} gagal permanen: ${e.message}`); }
       // Delay lebih besar antar-album (bukan per-foto) — Telegram rate-limit ketat untuk
