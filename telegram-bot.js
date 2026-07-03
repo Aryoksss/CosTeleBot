@@ -2031,15 +2031,20 @@ async function do4khdPreview(bot, chatId, post, opts = {}) {
   autoCleanOldMenu(bot, chatId, sentMsg.message_id);
 }
 
-/** Download semua foto 1 post 4KHD + kirim sebagai album. */
-async function do4khdDetail(bot, chatId, post) {
+/** Download semua foto 1 post 4KHD + kirim sebagai album.
+ *  isGacha=true → hapus galeri gacha SEBELUMNYA dulu (biar reroll gak numpuk chat).
+ *  isGacha=false (dari search/latest) → JANGAN hapus apa pun, ini aksi baru yang disengaja user. */
+async function do4khdDetail(bot, chatId, post, opts = {}) {
+  const isGacha = !!opts.isGacha;
   const gMsg = await bot.sendMessage(chatId, `🖼️ <b>${escHtml(post.title)}</b>\n<i>Memuat galeri...</i>`, { parse_mode: 'HTML' });
   await autoCleanOldMenu(bot, chatId, gMsg.message_id);
 
-  // Bersihkan galeri lama
-  const oldMsgs = fourkhdTracker.get(chatId) || [];
-  for (const mId of oldMsgs) { bot.deleteMessage(chatId, mId).catch(() => { }); await sleep(30); }
-  fourkhdTracker.set(chatId, []);
+  // Bersihkan galeri gacha lama — HANYA kalau ini reroll gacha, bukan hasil search.
+  if (isGacha) {
+    const oldMsgs = fourkhdTracker.get(chatId) || [];
+    for (const mId of oldMsgs) { bot.deleteMessage(chatId, mId).catch(() => { }); await sleep(30); }
+    fourkhdTracker.set(chatId, []);
+  }
 
   try {
     const detail = await fourkhdScraper.scrapePostDetail(post.url);
@@ -2096,9 +2101,13 @@ async function do4khdDetail(bot, chatId, post) {
       const group = chunk.map(f => ({ type: 'photo', media: fs.createReadStream(f) }));
       try {
         const res = await sendMediaGroupWithRetry(bot, chatId, group);
-        const tracked = fourkhdTracker.get(chatId) || [];
-        res.forEach(m => tracked.push(m.message_id));
-        fourkhdTracker.set(chatId, tracked);
+        // Hanya track message_id untuk auto-clean kalau ini gacha (biar hasil search
+        // tidak ikut kehapus saat user gacha di lain waktu).
+        if (isGacha) {
+          const tracked = fourkhdTracker.get(chatId) || [];
+          res.forEach(m => tracked.push(m.message_id));
+          fourkhdTracker.set(chatId, tracked);
+        }
         sentCount += chunk.length;
       } catch (e) { log.error(`[4KHD send] chunk ${ci + 1}/${chunks.length} gagal permanen: ${e.message}`); }
       // Delay lebih besar antar-album (bukan per-foto) — Telegram rate-limit ketat untuk
@@ -6292,7 +6301,7 @@ function startBot() {
       if (!cache || !cache.posts[idx]) return bot.answerCallbackQuery(query.id, { text: '⚠️ Sesi kadaluarsa' }).catch(() => { });
       bot.answerCallbackQuery(query.id, { text: '⬇️ Memulai download...' }).catch(() => { });
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
-      return do4khdDetail(bot, chatId, cache.posts[idx]);
+      return do4khdDetail(bot, chatId, cache.posts[idx], { isGacha: !!cache.isGacha });
     }
     // Balik dari preview ke listing terakhir.
     if (action === 'back_khd') {
