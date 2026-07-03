@@ -370,6 +370,26 @@ function collectFiles(dir) {
   return res.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
+/**
+ * Kirim sendMediaGroup dengan retry otomatis saat kena 429 (rate-limit Telegram).
+ * Menghormati `retry_after` dari error Telegram + backoff kecil. Tanpa ini, chunk yang
+ * kena limit langsung di-skip (foto hilang) — retry memastikan tetap terkirim.
+ */
+async function sendMediaGroupWithRetry(bot, chatId, group, maxRetries = 4) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await bot.sendMediaGroup(chatId, group);
+    } catch (e) {
+      const m = /retry after (\d+)/i.exec(e.message || '');
+      const isRateLimit = /429/.test(e.message || '') || m;
+      if (!isRateLimit || attempt === maxRetries) throw e;
+      const waitSec = m ? parseInt(m[1], 10) + 1 : 3 * attempt;
+      log.warn(`[sendMediaGroup] 429, retry ${attempt}/${maxRetries} dalam ${waitSec}s...`);
+      await sleep(waitSec * 1000);
+    }
+  }
+}
+
 function chunkMediaByLimits(medias) {
   const MAX_ITEMS = 10;
   // Limit gabungan upload Telegram Bot API (sekitar 90% dari MAX_BYTES agar aman terhadap metadata tambahan)
@@ -1937,6 +1957,7 @@ async function do4khdBrowse(bot, chatId, query = null, page = 1) {
       });
     }
     const shown = posts.slice(0, 10);
+    shown.forEach((p, i) => { p._idx = i; });
     fourkhdCache.set(chatId, { posts: shown, page, query });
 
     let text = `${header}\n\n`;
@@ -1962,6 +1983,33 @@ async function do4khdBrowse(bot, chatId, query = null, page = 1) {
     log.error(`[4KHD] browse error: ${e.message}`);
     bot.editMessageText(`❌ Gagal: ${escHtml(e.message)}`, { chat_id: chatId, message_id: loadMsg.message_id }).catch(() => { });
   }
+}
+
+/** Tampilkan preview (thumbnail + meta) sebelum download — user putuskan lanjut atau reroll. */
+async function do4khdPreview(bot, chatId, post, opts = {}) {
+  const isGacha = !!opts.isGacha;
+  const parts = [];
+  if (post.photoCount) parts.push(`📸 ${post.photoCount} foto`);
+  if (post.size) parts.push(`📦 ${post.size}`);
+  const metaLine = parts.length ? `\n${parts.join(' · ')}` : '';
+  const text = `${isGacha ? '🎰 <b>4KHD Gacha!</b>\n\n' : ''}🖼️ <b>${escHtml(post.title)}</b>${metaLine}`;
+
+  const buttons = [[{ text: '⬇️ Download Semua Foto', callback_data: `khdgo_${post._idx}` }]];
+  if (isGacha) {
+    buttons.push([{ text: '🎲 Reroll', callback_data: 'khd_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]);
+  } else {
+    buttons.push([{ text: '🔙 Kembali', callback_data: 'back_khd' }]);
+  }
+
+  if (post.thumb) {
+    try {
+      const sentMsg = await bot.sendPhoto(chatId, post.thumb, { caption: text, parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+      autoCleanOldMenu(bot, chatId, sentMsg.message_id);
+      return;
+    } catch (e) { log.warn(`[4KHD] preview sendPhoto gagal: ${e.message}`); }
+  }
+  const sentMsg = await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
+  autoCleanOldMenu(bot, chatId, sentMsg.message_id);
 }
 
 /** Download semua foto 1 post 4KHD + kirim sebagai album. */
@@ -2011,18 +2059,23 @@ async function do4khdDetail(bot, chatId, post) {
     bot.deleteMessage(chatId, gMsg.message_id).catch(() => { });
 
     const chunks = chunkMediaByLimits(valid);
-    for (const chunk of chunks) {
+    let sentCount = 0;
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
       const group = chunk.map(f => ({ type: 'photo', media: fs.createReadStream(f) }));
       try {
-        const res = await bot.sendMediaGroup(chatId, group);
+        const res = await sendMediaGroupWithRetry(bot, chatId, group);
         const tracked = fourkhdTracker.get(chatId) || [];
         res.forEach(m => tracked.push(m.message_id));
         fourkhdTracker.set(chatId, tracked);
-      } catch (e) { log.error(`[4KHD send] ${e.message}`); }
-      await sleep(CONFIG.SEND_DELAY);
+        sentCount += chunk.length;
+      } catch (e) { log.error(`[4KHD send] chunk ${ci + 1}/${chunks.length} gagal permanen: ${e.message}`); }
+      // Delay lebih besar antar-album (bukan per-foto) — Telegram rate-limit ketat untuk
+      // sendMediaGroup beruntun ke chat yang sama. 600ms terlalu cepat untuk banyak chunk.
+      if (ci < chunks.length - 1) await sleep(2500);
     }
 
-    let navText = `🖼️ <b>${escHtml(detail.title)}</b>\n\n✨ <i>Selesai! ${valid.length} foto terkirim.</i>`;
+    let navText = `🖼️ <b>${escHtml(detail.title)}</b>\n\n✨ <i>Selesai! ${sentCount}/${valid.length} foto terkirim.</i>`;
     if (capped) navText += `\n⚠️ <i>Set ini punya ${detail.photoCount} foto, ditampilkan ${images.length} pertama (batas anti-spam).</i>`;
     const navMsg = await bot.sendMessage(chatId, navText, {
       parse_mode: 'HTML',
@@ -2036,13 +2089,23 @@ async function do4khdDetail(bot, chatId, post) {
   }
 }
 
-/** Gacha 4KHD: post acak dari homepage. */
+/** Gacha 4KHD: post acak dari homepage → tampilkan preview dulu (bukan langsung download). */
 async function do4khdGacha(bot, chatId) {
   statsDb.addGacha(chatId);
+  const loadMsg = await bot.sendMessage(chatId, '🎲 <b>4KHD Gacha...</b>\n<i>Mengacak galeri...</i>', { parse_mode: 'HTML' });
+  await autoCleanOldMenu(bot, chatId, loadMsg.message_id);
   const posts = await fourkhdScraper.scrapeGacha();
-  if (!posts.length) return bot.sendMessage(chatId, '⚠️ Gacha 4KHD kosong, coba lagi.').catch(() => { });
+  if (!posts.length) {
+    return bot.editMessageText('⚠️ Gacha 4KHD kosong, coba lagi.', {
+      chat_id: chatId, message_id: loadMsg.message_id,
+      reply_markup: { inline_keyboard: [[{ text: '🎲 Reroll', callback_data: 'khd_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] },
+    }).catch(() => { });
+  }
   const pick = posts[Math.floor(Math.random() * posts.length)];
-  return do4khdDetail(bot, chatId, pick);
+  pick._idx = 0;
+  fourkhdCache.set(chatId, { posts: [pick], page: 1, query: null, isGacha: true });
+  bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
+  return do4khdPreview(bot, chatId, pick, { isGacha: true });
 }
 
 // ─── RULE34VIDEO HANDLERS ────────────────────────────────────────────────────
@@ -6189,7 +6252,22 @@ function startBot() {
       const cache = fourkhdCache.get(chatId);
       if (!cache || !cache.posts[idx]) return bot.answerCallbackQuery(query.id, { text: '⚠️ Sesi kadaluarsa' }).catch(() => { });
       bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return do4khdPreview(bot, chatId, cache.posts[idx], { isGacha: false });
+    }
+    // Tombol "Download Semua Foto" di preview → eksekusi download beneran.
+    if (action.startsWith('khdgo_')) {
+      const idx = parseInt(action.replace('khdgo_', ''), 10);
+      const cache = fourkhdCache.get(chatId);
+      if (!cache || !cache.posts[idx]) return bot.answerCallbackQuery(query.id, { text: '⚠️ Sesi kadaluarsa' }).catch(() => { });
+      bot.answerCallbackQuery(query.id, { text: '⬇️ Memulai download...' }).catch(() => { });
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
       return do4khdDetail(bot, chatId, cache.posts[idx]);
+    }
+    // Balik dari preview ke listing terakhir.
+    if (action === 'back_khd') {
+      const cache = fourkhdCache.get(chatId);
+      bot.deleteMessage(chatId, query.message.message_id).catch(() => { });
+      return do4khdBrowse(bot, chatId, cache?.query || null, cache?.page || 1);
     }
 
     // ── Rule34Video Callbacks ──
