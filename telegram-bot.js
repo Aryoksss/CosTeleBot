@@ -2168,7 +2168,14 @@ async function do4khdGacha(bot, chatId) {
       reply_markup: { inline_keyboard: [[{ text: '🎲 Reroll', callback_data: 'khd_gacha' }, { text: '🔙 Menu', callback_data: 'menu_awal' }]] },
     }).catch(() => { });
   }
-  const pick = posts[Math.floor(Math.random() * posts.length)];
+  // Anti-repeat via historyTracker (category '4khd') — konsisten dengan gacha sumber lain.
+  const unseen = posts.filter(p => !historyTracker.hasSeen(chatId, '4khd', p.url));
+  const pick = unseen.length > 0
+    ? unseen[Math.floor(Math.random() * unseen.length)]
+    : posts[Math.floor(Math.random() * posts.length)];
+  historyTracker.markSeen(chatId, '4khd', pick.url);
+  log.ok(`[4KHD-Gacha] pool=${posts.length} unseen=${unseen.length} pick="${(pick.title || '?').slice(0, 60)}"`);
+
   pick._idx = 0;
   fourkhdCache.set(chatId, { posts: [pick], page: 1, query: null, isGacha: true });
   bot.deleteMessage(chatId, loadMsg.message_id).catch(() => { });
