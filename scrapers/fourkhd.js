@@ -66,11 +66,18 @@ function parseListing(html) {
   return posts;
 }
 
-/** Cari post via kata kunci. */
+/**
+ * Cari post via kata kunci.
+ * PENTING: 4khd punya 2 mekanisme pagination BERBEDA (WordPress Query Loop block):
+ *   - Search  : path-based → /search/<query>/page/<N>  (classic WP pagination)
+ *   - Latest  : query-param → /?query-3-page=<N>        (Gutenberg Query block ID #3)
+ * Format lama `/page/N/?s=query` SELALU balik ke halaman 1 (parameter diabaikan situs),
+ * jadi gacha/reroll collision tinggi karena pool-nya cuma 1 halaman berulang.
+ */
 async function scrapeSearch(query, page = 1) {
   if (!query || !query.trim()) return [];
   const url = page > 1
-    ? `${BASE}/page/${page}/?s=${encodeURIComponent(query)}`
+    ? `${BASE}/search/${encodeURIComponent(query)}/page/${page}`
     : `${BASE}/?s=${encodeURIComponent(query)}`;
   log.info(`[4KHD] search "${query}" page=${page}`);
   try {
@@ -82,9 +89,9 @@ async function scrapeSearch(query, page = 1) {
   } catch (e) { log.error(`[4KHD] search error: ${e.message}`); return []; }
 }
 
-/** Post terbaru (homepage / paginated). */
+/** Post terbaru (homepage / paginated via Gutenberg Query Loop block ?query-3-page=N). */
 async function scrapeLatest(page = 1) {
-  const url = page > 1 ? `${BASE}/page/${page}/` : `${BASE}/`;
+  const url = page > 1 ? `${BASE}/?query-3-page=${page}` : `${BASE}/`;
   log.info(`[4KHD] latest page=${page}`);
   try {
     const r = await client.get(url);
@@ -144,9 +151,13 @@ async function scrapePostDetail(postUrl) {
   } catch (e) { log.error(`[4KHD] detail error: ${e.message}`); return null; }
 }
 
-/** Gacha: ambil post acak dari homepage (beberapa halaman awal). */
+/**
+ * Gacha: ambil post acak dari homepage. Situs punya ribuan halaman (~3000+), jadi
+ * rentang random dilebarkan jauh (1-500) untuk pool yang benar-benar beragam —
+ * sebelumnya cuma 1-15 karena keliru pakai format pagination yang tidak berfungsi.
+ */
 async function scrapeGacha() {
-  const page = Math.floor(Math.random() * 15) + 1;
+  const page = Math.floor(Math.random() * 500) + 1;
   const posts = await scrapeLatest(page);
   return posts;
 }
