@@ -2,11 +2,25 @@ const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 chromium.use(StealthPlugin());
 
 const PROFILE_DIR = path.resolve('./browser_profile_gofile');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+/**
+ * X-Website-Token: header WAJIB yang dibutuhkan API gofile (selain Authorization Bearer).
+ * Tanpa ini, API balas 401 "error-notPremium" meski token guest valid — ini BUKAN soal
+ * premium, murni header yang kurang. Formula reverse-engineered dari proyek open-source
+ * ltsdw/gofile-downloader: sha256(`${userAgent}::en-US::${accountToken}::${timeSlot}::9844d94d963d30`)
+ * timeSlot = jam Unix dibagi 14400 (4 jam) → token valid per window 4 jam.
+ */
+function generateWebsiteToken(userAgent, accountToken) {
+  const timeSlot = Math.floor(Date.now() / 1000 / 14400);
+  const raw = `${userAgent}::en-US::${accountToken || ''}::${timeSlot}::9844d94d963d30`;
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
 
 /**
  * Token akun Gofile milik sendiri (Profile → API token di gofile.io).
@@ -43,6 +57,28 @@ function buildLaunchOpts(extra = {}) {
     ...(proxy ? { proxy } : {}),
     ...extra,
   };
+}
+
+/**
+ * Ubah response `data` dari /contents/{id} jadi flat list {id, name, link}.
+ * Handle 2 bentuk: single file (data.type !== 'folder') atau folder dengan `children`
+ * (yang bisa nested subfolder — rekursif).
+ */
+function collectGofileFiles(data) {
+  const out = [];
+  if (!data) return out;
+  if (data.type && data.type !== 'folder' && data.link) {
+    out.push({ id: data.id, name: data.name || 'file', link: data.link });
+    return out;
+  }
+  const children = data.children || {};
+  for (const cid in children) {
+    const child = children[cid];
+    if (!child) continue;
+    if (child.type === 'folder') out.push(...collectGofileFiles(child));
+    else if (child.link) out.push({ id: child.id || cid, name: child.name || 'file', link: child.link });
+  }
+  return out;
 }
 
 async function resolveGofile(gofileUrl) {
@@ -100,54 +136,59 @@ async function resolveGofile(gofileUrl) {
     await Promise.race([apiInterception, page.waitForTimeout(8000)]);
     console.log(`[Gofile] Files ditemukan: ${files.length}`);
 
-    // Ambil daftar file via API DARI DALAM page (berbagi clearance Cloudflare).
+    // Ambil daftar file via API DARI NODE (axios), BUKAN dari dalam browser.
+    // Alasan: page.evaluate(fetch) ikut jalur network browser (termasuk proxy/WARP kalau
+    // di-set) — kalau proxy itu bermasalah reach ke api.gofile.io, browser cuma kasih error
+    // generik "Failed to fetch" tanpa detail. axios di Node terpisah dari proxy resolve
+    // (default tanpa proxy untuk API call), jadi lebih robust + errornya lebih informatif.
     // Mode default = GUEST ROTATE: tiap resolve bikin akun guest BARU (POST /accounts)
-    // → token fresh, kuota 1000GB/30hari mulai dari nol tiap download.
-    // Kalau GOFILE_TOKEN di-set, pakai itu (akun sendiri/premium).
-    // Token yang dipakai untuk listing DIFORWARD ke download supaya link & auth konsisten.
+    // → token fresh. Kalau GOFILE_TOKEN di-set, pakai itu (akun sendiri/premium).
     let apiToken = null;
     {
       const contentId = (gofileUrl.match(/\/d\/([\w-]+)/) || [])[1];
       if (contentId) {
-        console.log(`[Gofile] in-page API fetch (id=${contentId}, mode=${ACCOUNT_TOKEN ? 'GOFILE_TOKEN' : 'guest-rotate'})...`);
-        const apiData = await page.evaluate(async (args) => {
-          try {
-            let wt = (window.appdata && window.appdata.wt) || null;
-            if (!wt) {
-              for (const s of document.scripts) {
-                const m = (s.textContent || '').match(/wt\s*[:=]\s*["']([\w]+)["']/);
-                if (m) { wt = m[1]; break; }
-              }
-            }
-            // Token: GOFILE_TOKEN > guest baru (POST /accounts) > cookie existing.
-            let tk = args.token;
-            if (!tk) {
-              try {
-                const acc = await fetch('https://api.gofile.io/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-                const aj = await acc.json();
-                tk = (aj && aj.data && aj.data.token) ? aj.data.token : null;
-              } catch (_) { }
-            }
-            if (!tk) tk = (document.cookie.match(/accountToken=([\w]+)/) || [])[1] || null;
-            const r = await fetch(`https://api.gofile.io/contents/${args.id}?wt=${wt || ''}&cache=true`, {
-              headers: tk ? { 'Authorization': 'Bearer ' + tk } : {},
-            });
-            const j = await r.json();
-            return { token: tk, data: j };
-          } catch (e) { return { error: e.message }; }
-        }, { id: contentId, token: ACCOUNT_TOKEN });
-
-        const apiData2 = apiData && apiData.data;
-        if (apiData2 && apiData2.status === 'ok' && apiData2.data && apiData2.data.children) {
-          const apiFiles = [];
-          for (const cid in apiData2.data.children) {
-            const fi = apiData2.data.children[cid];
-            if (fi && fi.link) apiFiles.push({ id: cid, name: fi.name || 'archive.zip', link: fi.link });
+        console.log(`[Gofile] Node-side API fetch (id=${contentId}, mode=${ACCOUNT_TOKEN ? 'GOFILE_TOKEN' : 'guest-rotate'})...`);
+        try {
+          const axiosLib = require('axios');
+          let tk = ACCOUNT_TOKEN;
+          if (!tk) {
+            try {
+              const wtCreate = generateWebsiteToken(UA, '');
+              const acc = await axiosLib.post('https://api.gofile.io/accounts', {}, {
+                headers: {
+                  'Content-Type': 'application/json', 'User-Agent': UA,
+                  'X-Website-Token': wtCreate, 'X-BL': 'en-US',
+                  'Origin': 'https://gofile.io', 'Referer': 'https://gofile.io/',
+                },
+                timeout: 15000, validateStatus: () => true,
+              });
+              tk = (acc.data && acc.data.data && acc.data.data.token) || null;
+            } catch (e) { console.log(`[Gofile] gagal buat guest token: ${e.message}`); }
           }
-          if (apiFiles.length) { files = apiFiles; apiToken = apiData.token || null; }
-          console.log(`[Gofile] API fetch → ${apiFiles.length} file (token=${apiToken ? 'fresh' : 'n/a'}, dipakai: ${files.length})`);
-        } else {
-          console.log(`[Gofile] API fetch gagal: ${apiData && apiData.error ? apiData.error : 'no children (kemungkinan IP di-block / butuh GOFILE_PROXY)'} — fallback ke hasil intercept (${files.length} file)`);
+          if (tk) {
+            // WAJIB: X-Website-Token (hash) + X-BL, bukan cuma Authorization Bearer.
+            // Tanpa ini API balas 401 "error-notPremium" meski token valid.
+            const wtContents = generateWebsiteToken(UA, tk);
+            const r = await axiosLib.get(`https://api.gofile.io/contents/${contentId}?cache=true&sortField=createTime&sortDirection=1`, {
+              headers: {
+                'Authorization': `Bearer ${tk}`, 'User-Agent': UA,
+                'X-Website-Token': wtContents, 'X-BL': 'en-US',
+                'Origin': 'https://gofile.io', 'Referer': 'https://gofile.io/',
+              },
+              timeout: 15000, validateStatus: () => true,
+            });
+            if (r.status === 200 && r.data && r.data.status === 'ok' && r.data.data) {
+              const apiFiles = collectGofileFiles(r.data.data);
+              if (apiFiles.length) { files = apiFiles; apiToken = tk; }
+              console.log(`[Gofile] API fetch → ${apiFiles.length} file (dipakai: ${files.length})`);
+            } else {
+              console.log(`[Gofile] API fetch gagal: HTTP ${r.status} ${JSON.stringify(r.data).slice(0, 150)} — fallback ke hasil intercept (${files.length} file)`);
+            }
+          } else {
+            console.log(`[Gofile] tidak ada token tersedia untuk API fetch — fallback ke hasil intercept (${files.length} file)`);
+          }
+        } catch (e) {
+          console.log(`[Gofile] Node-side API fetch error: ${e.message} — fallback ke hasil intercept (${files.length} file)`);
         }
       }
     }
@@ -247,6 +288,8 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
     // Gofile CDN sering butuh token via COOKIE juga (bukan cuma Bearer). Kalau cuma
     // Bearer, CDN bisa balas homepage HTML. Kirim dua-duanya biar aman.
     reqCfg.headers['Cookie'] = `accountToken=${accountToken}`;
+    reqCfg.headers['X-Website-Token'] = generateWebsiteToken(UA, accountToken);
+    reqCfg.headers['X-BL'] = 'en-US';
   }
   // Proxy TIDAK dipakai untuk CDN download — langsung dari VPS (lebih stabil untuk file besar).
   // Proxy hanya untuk resolve page di atas (accountToken fetch).
