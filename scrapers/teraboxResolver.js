@@ -29,6 +29,30 @@ const http = axios.create({ timeout: 45000, headers: { 'User-Agent': UA } });
 
 const TERACORE_API = 'https://tera-core.vercel.app/api';
 
+// ─── Cookie helper ───────────────────────────────────────────────────────────
+// ndus token dari .env (TERABOX_COOKIE atau COOKIE_JSON format simple string).
+// Kalau di-set, API /share/list akan return dlink (direct download link).
+function getTeraboxCookie() {
+  const raw = process.env.TERABOX_COOKIE || process.env.COOKIE_JSON || '';
+  // COOKIE_JSON bisa full JSON {"ndus":"xxx"} atau string polos
+  if (!raw) return null;
+  try {
+    const j = JSON.parse(raw);
+    if (j.ndus) return `ndus=${j.ndus}`;
+  } catch (_) { /* bukan JSON, anggap string polos */ }
+  // Format: ndus=xxxxx
+  if (raw.includes('=')) return raw;
+  // Format: token polos → bungkus sebagai ndus
+  return `ndus=${raw.trim()}`;
+}
+
+function buildApiHeaders(extra = {}) {
+  const h = { 'Accept': 'application/json', 'User-Agent': UA, ...extra };
+  const cookie = getTeraboxCookie();
+  if (cookie) h['Cookie'] = cookie;
+  return h;
+}
+
 // ─── Helper: ekstrak domain dari URL Terabox ──────────────────────────────────
 function extractDomain(url) {
   try {
@@ -233,10 +257,7 @@ async function resolveViaDirect(teraboxUrl) {
 
   const apiRes = await http.get(`${origin}/share/list`, {
     params,
-    headers: {
-      'Accept': 'application/json',
-      'Referer': finalUrl,
-    },
+    headers: buildApiHeaders({ 'Referer': finalUrl }),
     validateStatus: () => true,
   });
 
