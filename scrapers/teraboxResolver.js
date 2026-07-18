@@ -97,128 +97,106 @@ async function resolveViaTeraCore(teraboxUrl) {
 // ─── PROVIDER 2: Direct scraper (tanpa API eksternal) ─────────────────────────
 // Fallback mandiri: fetch share page → extract token → panggil API Terabox langsung.
 // Tidak bergantung pada third-party API manapun.
+//
+// Support 2 format halaman Terabox:
+//   A. terabox.com (lama)        — HTML dengan yunData/jsToken inline
+//   B. 1024tera.com / terabox.app (baru, SPA) — jsToken di eval(decodeURIComponent(...))
 
 /**
- * Ekstrak jsToken, shorturl, sign, timestamp, logid dari HTML share page Terabox.
+ * Ekstrak tokens dari HTML share page Terabox (support format lama & baru).
+ * @param {string} html
+ * @param {string} finalUrl — URL akhir setelah redirect (untuk ekstrak origin + surl)
  */
-function extractTokens(html, shareUrl) {
-  const $ = cheerio.load(html);
-
-  // Strategy 1: cari di <script> yang mengandung "try{ eval(function(p,a,c,k,e,d)"
-  // atau "jsToken" / "yunData"
-  const scripts = [];
-  $('script').each((_, el) => {
-    const text = $(el).html() || '';
-    if (text.length > 100) scripts.push(text);
-  });
-
-  // Gabungkan semua script text untuk pencarian regex
-  const allScripts = scripts.join('\n');
-
+function extractTokens(html, finalUrl) {
   const tokens = {};
 
-  // jsToken — format: "jsToken":"XXXX" atau jsToken%3DXXXX atau jsToken=XXXX
-  let m = allScripts.match(/jsToken["'%3D=\s]+([A-Za-z0-9_-]+)/i);
+  // ── jsToken: coba 2 pola ────────────────────────────────────────────────
+  // Pola A (1024tera.com SPA): eval(decodeURIComponent(...jsToken%20%3D%20a...fn%28%22TOKEN%22...))
+  let m = html.match(/jsToken%20%3D%20a%7D%3Bfn%28%22([A-Fa-f0-9]+?)%22/);
   if (m) tokens.jsToken = m[1];
 
-  // logid
-  m = allScripts.match(/logid["'%3D=\s]+([0-9]+)/i);
+  // Pola B (terabox.com klasik): "jsToken":"XXXX" atau jsToken=XXXX
+  if (!tokens.jsToken) {
+    m = html.match(/jsToken["'%3D=\s]+([A-Za-z0-9_-]+)/i);
+    if (m) tokens.jsToken = m[1];
+  }
+
+  // ── logid: coba 2 pola ──────────────────────────────────────────────────
+  // Pola A: dp-logid=xxxxx (di og:image meta tag)
+  m = html.match(/dp-logid=(\d+)/);
   if (m) tokens.logid = m[1];
 
-  // sign
-  m = allScripts.match(/sign["'%3D=\s]+([A-Za-z0-9_-]+)/i);
-  if (m) tokens.sign = m[1];
+  // Pola B: logid="xxxxx"
+  if (!tokens.logid) {
+    m = html.match(/logid["'%3D=\s]+([0-9]+)/i);
+    if (m) tokens.logid = m[1];
+  }
 
-  // timestamp
-  m = allScripts.match(/timestamp["'%3D=\s]+([0-9]+)/i);
+  // ── sign & timestamp (format klasik) ─────────────────────────────────────
+  m = html.match(/sign["'%3D=\s]+([A-Za-z0-9_-]+)/i);
+  if (m) tokens.sign = m[1];
+  m = html.match(/timestamp["'%3D=\s]+([0-9]+)/i);
   if (m) tokens.timestamp = m[1];
 
-  // shorturl: ekstrak dari URL (bagian setelah /s/)
-  m = shareUrl.match(/\/s\/([A-Za-z0-9_-]+)/);
+  // ── shorturl: dari final URL parameter surl= ─────────────────────────────
+  m = finalUrl.match(/surl=([A-Za-z0-9_-]+)/i);
   if (m) tokens.shorturl = m[1];
 
-  // Fallback: coba dari yunData / window.yunData (format JSON di inline script)
-  if (!tokens.jsToken || !tokens.sign || !tokens.logid) {
-    // Cari JSON object yang mengandung jsToken
+  // Fallback: dari path /s/XXXX
+  if (!tokens.shorturl) {
+    m = finalUrl.match(/\/s\/([A-Za-z0-9_-]+)/i);
+    if (m) tokens.shorturl = m[1];
+  }
+
+  // ── origin: dari templateData JSON (format SPA) ──────────────────────────
+  m = html.match(/"origin":"([^"]+)"/);
+  if (m) tokens.origin = m[1];
+
+  // ── Fallback yunData (format klasik) ─────────────────────────────────────
+  if (!tokens.jsToken || !tokens.sign) {
+    const scripts = [];
+    const $ = cheerio.load(html);
+    $('script').each((_, el) => {
+      const text = $(el).html() || '';
+      if (text.length > 100) scripts.push(text);
+    });
+    const allScripts = scripts.join('\n');
     m = allScripts.match(/yunData\s*[:=]\s*(\{[^}]+\})/i);
     if (m) {
       try {
         const yun = JSON.parse(m[1].replace(/'/g, '"'));
-        if (yun.jsToken) tokens.jsToken = yun.jsToken;
-        if (yun.sign) tokens.sign = yun.sign;
-        if (yun.timestamp) tokens.timestamp = yun.timestamp;
-        if (yun.logid) tokens.logid = String(yun.logid);
-        if (yun.shorturl) tokens.shorturl = yun.shorturl;
+        if (!tokens.jsToken && yun.jsToken) tokens.jsToken = yun.jsToken;
+        if (!tokens.sign && yun.sign) tokens.sign = yun.sign;
+        if (!tokens.timestamp && yun.timestamp) tokens.timestamp = yun.timestamp;
+        if (!tokens.logid && yun.logid) tokens.logid = String(yun.logid);
+        if (!tokens.shorturl && yun.shorturl) tokens.shorturl = yun.shorturl;
       } catch (_) { /* ignore parse error */ }
     }
-  }
-
-  // Strategy 2: cari di teks mentah halaman dengan URL-encoded params
-  if (!tokens.jsToken) {
-    m = html.match(/jsToken=([A-Za-z0-9_-]+)/i);
-    if (m) tokens.jsToken = m[1];
-  }
-  if (!tokens.logid) {
-    m = html.match(/logid=([0-9]+)/i);
-    if (m) tokens.logid = m[1];
-  }
-  if (!tokens.shorturl) {
-    m = html.match(/shorturl=([A-Za-z0-9_-]+)/i);
-    if (m) tokens.shorturl = m[1];
   }
 
   return tokens;
 }
 
 /**
- * Panggil API /share/list Terabox langsung untuk mendapatkan file list + dlink.
+ * Strip leading "1" dari shorturl (format 1024tera.com).
+ * Contoh: "182LURMwETEYdY6qgyJHycg" → "82LURMwETEYdY6qgyJHycg"
  */
-async function callTeraboxApi(origin, tokens) {
-  const params = {
-    app_id: '250528',
-    shorturl: tokens.shorturl,
-    root: '1',
-    dir: '0',
-    page: '1',
-    num: '100',
-    order: 'time',
-    desc: '1',
-  };
-
-  if (tokens.jsToken) params.jsToken = tokens.jsToken;
-  if (tokens.sign) params.sign = tokens.sign;
-  if (tokens.timestamp) params.timestamp = tokens.timestamp;
-  if (tokens.logid) params.logid = tokens.logid;
-
-  const res = await http.get(`${origin}/share/list`, {
-    params,
-    headers: {
-      'Accept': 'application/json',
-      'Referer': `${origin}/sharing/link?surl=${tokens.shorturl}`,
-    },
-    validateStatus: () => true,
-  });
-
-  if (res.status !== 200) {
-    throw new Error(`Terabox API HTTP ${res.status}`);
-  }
-
-  const data = res.data;
-  if (data.errno !== 0) {
-    throw new Error(`Terabox API errno=${data.errno}: ${data.errmsg || 'unknown'}`);
-  }
-
-  return data;
+function normalizeShorturl(surl) {
+  if (!surl) return surl;
+  return surl.startsWith('1') && surl.length > 10 ? surl.slice(1) : surl;
 }
 
 /**
  * Resolve via direct scraper (mandiri, tanpa API eksternal).
- * Flow: fetch share page → extract tokens → call /share/list → build download links.
+ * Flow: fetch share page → extract tokens → call /share/list → build file list.
+ *
+ * Catatan: untuk format SPA (1024tera.com), API /share/list TIDAK mengembalikan
+ * dlink (direct download link) tanpa cookies login. File tetap bisa di-list,
+ * tapi download link mungkin kosong. Kalau itu terjadi, fallback ke Playwright
+ * (lihat resolveViaBrowser).
  */
 async function resolveViaDirect(teraboxUrl) {
-  const origin = extractDomain(teraboxUrl);
-
-  // Step 1: Fetch share page
+  // Step 1: Fetch share page — ikuti redirect untuk dapat origin + shorturl final
   const pageRes = await http.get(teraboxUrl, {
     headers: { 'Accept': 'text/html,application/xhtml+xml' },
     validateStatus: () => true,
@@ -230,38 +208,221 @@ async function resolveViaDirect(teraboxUrl) {
   }
 
   const html = typeof pageRes.data === 'string' ? pageRes.data : String(pageRes.data);
+  const finalUrl = pageRes.request.res.responseUrl || teraboxUrl;
 
-  // Step 2: Extract tokens
-  const tokens = extractTokens(html, teraboxUrl);
+  // Step 2: Extract tokens dari HTML + final URL
+  const tokens = extractTokens(html, finalUrl);
+  const origin = tokens.origin || extractDomain(finalUrl);
+  tokens.shorturl = normalizeShorturl(tokens.shorturl);
+
   if (!tokens.shorturl) {
     throw new Error('tidak bisa ekstrak shorturl dari halaman');
   }
 
-  // Step 3: Call Terabox API
-  const apiData = await callTeraboxApi(origin, tokens);
+  // Step 3: Call /share/list API
+  const params = {
+    app_id: '250528',
+    shorturl: tokens.shorturl,
+    root: '1', dir: '0', page: '1', num: '100',
+    order: 'time', desc: '1',
+  };
+  if (tokens.jsToken) params.jsToken = tokens.jsToken;
+  if (tokens.logid) params.logid = tokens.logid;
+  if (tokens.sign) params.sign = tokens.sign;
+  if (tokens.timestamp) params.timestamp = tokens.timestamp;
+
+  const apiRes = await http.get(`${origin}/share/list`, {
+    params,
+    headers: {
+      'Accept': 'application/json',
+      'Referer': finalUrl,
+    },
+    validateStatus: () => true,
+  });
+
+  if (apiRes.status !== 200) {
+    throw new Error(`Terabox API HTTP ${apiRes.status}`);
+  }
+
+  const data = apiRes.data;
+  if (data.errno !== 0) {
+    // errno=2130 → link private/expired, errno=105 → invalid
+    throw new Error(`Terabox API errno=${data.errno}: ${data.errmsg || 'unknown'}`);
+  }
 
   // Step 4: Parse file list
-  const list = apiData.list || [];
+  const list = data.list || [];
   if (list.length === 0) throw new Error('tidak ada file di response API');
 
   const files = list.map(f => ({
     filename: f.server_filename || f.filename || 'terabox_file',
     sizeBytes: parseInt(f.size || '0', 10),
     sizeLabel: f.size ? `${(f.size / 1024 / 1024).toFixed(1)} MB` : '?',
-    // dlink adalah direct download link dari Terabox API
+    // dlink bisa kosong untuk format SPA tanpa cookies — ditangani caller
     directLink: f.dlink || null,
-    isDirectory: !!f.isdir,
-  })).filter(f => f.directLink && !f.isDirectory);
+    isDirectory: !!(f.isdir && f.isdir !== '0'),
+  })).filter(f => !f.isDirectory);
 
-  if (files.length === 0) throw new Error('tidak ada file dengan direct link (mungkin folder)');
+  if (files.length === 0) {
+    // Mungkin folder / tidak ada file non-direktori — tetap return folder items
+    const allFiles = list.map(f => ({
+      filename: f.server_filename || f.filename || 'terabox_file',
+      sizeBytes: parseInt(f.size || '0', 10),
+      sizeLabel: f.size ? `${(f.size / 1024 / 1024).toFixed(1)} MB` : '?',
+      directLink: f.dlink || null,
+      isDirectory: !!(f.isdir && f.isdir !== '0'),
+    }));
+    if (allFiles.length === 0) throw new Error('tidak ada file sama sekali');
+    return allFiles;
+  }
+
   return files;
 }
 
 // Daftar provider gratis, dicoba berurutan sampai ada yang sukses.
+// Prioritas: tera-core (cepat, third-party) → direct (axios, mandiri) → browser (Playwright, berat)
 const PROVIDERS = [
   { name: 'tera-core', fn: resolveViaTeraCore },
   { name: 'direct', fn: resolveViaDirect },
 ];
+
+// ─── PROVIDER 3: Playwright Browser (last resort, untuk SPA tanpa cookies) ────
+// Dipakai hanya kalau tera-core & direct gagal / tidak menghasilkan dlink.
+// Membuka halaman share Terabox di headless Chromium, menunggu SPA render,
+// lalu intercept network request untuk mendapatkan download link.
+
+let _resolveViaBrowser = null; // lazy-loaded (playwright berat)
+
+async function resolveViaBrowser(teraboxUrl) {
+  if (!_resolveViaBrowser) {
+    // eslint-disable-next-line global-require
+    const { chromium } = require('playwright-extra');
+    const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+    chromium.use(StealthPlugin());
+
+    _resolveViaBrowser = async (url) => {
+      let browser;
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        });
+        const ctx = await browser.newContext({
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        });
+        const page = await ctx.newPage();
+
+        // Kumpulkan download links dari network interception
+        const downloadLinks = []; // { filename, url }
+        const seenUrls = new Set();
+
+        page.on('response', async (res) => {
+          const resUrl = res.url();
+          // Tangkap redirect 302 dari klik download → biasanya ke CDN Terabox
+          if (res.status() === 302 && (resUrl.includes('terabox') || resUrl.includes('tera') || resUrl.includes('baidu'))) {
+            const loc = res.headers()['location'];
+            if (loc && !seenUrls.has(loc)) {
+              seenUrls.add(loc);
+              // Coba dapatkan filename dari content-disposition
+              const disp = res.headers()['content-disposition'] || '';
+              const fnMatch = disp.match(/filename[*]?=(?:UTF-8'')?([^;]+)/i);
+              let fname = fnMatch ? decodeURIComponent(fnMatch[1].replace(/"/g, '')) : '';
+              downloadLinks.push({ filename: fname, url: loc });
+            }
+          }
+          // Tangkap juga XHR API response yang mengandung dlink
+          try {
+            const ct = res.headers()['content-type'] || '';
+            if (ct.includes('json') && resUrl.includes('/share/')) {
+              const json = await res.json();
+              if (json.list) {
+                for (const f of json.list) {
+                  if (f.dlink && !seenUrls.has(f.dlink)) {
+                    seenUrls.add(f.dlink);
+                    downloadLinks.push({
+                      filename: f.server_filename || f.filename || '',
+                      url: f.dlink,
+                      sizeBytes: parseInt(f.size || '0', 10),
+                    });
+                  }
+                }
+              }
+            }
+          } catch (_) { /* bukan JSON atau bukan response yg dicari */ }
+        });
+
+        // Buka halaman & tunggu SPA render (file list muncul)
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(5000); // tunggu SPA fetch API
+
+        // Kalau intercept dapat links dari API response, return langsung
+        if (downloadLinks.length > 0) {
+          return downloadLinks.map(dl => ({
+            filename: dl.filename || 'terabox_file',
+            sizeBytes: dl.sizeBytes || 0,
+            sizeLabel: dl.sizeBytes ? `${(dl.sizeBytes / 1024 / 1024).toFixed(1)} MB` : '?',
+            directLink: dl.url,
+            isDirectory: false,
+          }));
+        }
+
+        // Fallback: coba klik download button di DOM
+        // Cari semua tombol/link download
+        const dlButtons = await page.$$('a[download], button[class*="download"], a[class*="download"], [class*="dl-btn"]');
+        for (const btn of dlButtons.slice(0, 5)) {
+          try {
+            const [newPage] = await Promise.all([
+              ctx.waitForEvent('page', { timeout: 5000 }).catch(() => null),
+              btn.click({ noWaitAfter: true }),
+            ]);
+            if (newPage) {
+              const dlUrl = newPage.url();
+              if (dlUrl && !dlUrl.includes('terabox') && !dlUrl.includes('sharing')) {
+                downloadLinks.push({ filename: '', url: dlUrl });
+              }
+              await newPage.close().catch(() => {});
+            }
+          } catch (_) { /* tombol ini bukan download */ }
+        }
+
+        await ctx.close();
+
+        if (downloadLinks.length === 0) {
+          throw new Error('Browser: tidak bisa mendapatkan download link dari halaman');
+        }
+
+        return downloadLinks.map(dl => ({
+          filename: dl.filename || 'terabox_file',
+          sizeBytes: dl.sizeBytes || 0,
+          sizeLabel: dl.sizeBytes ? `${(dl.sizeBytes / 1024 / 1024).toFixed(1)} MB` : '?',
+          directLink: dl.url,
+          isDirectory: false,
+        }));
+      } finally {
+        if (browser) await browser.close().catch(() => {});
+      }
+    };
+  }
+
+  return _resolveViaBrowser(teraboxUrl);
+}
+
+// Provider Playwright hanya dipasang kalau chromium tersedia (cek lazy)
+function _hasPlaywright() {
+  try {
+    require.resolve('playwright-extra');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Inisialisasi PROVIDERS — tambahkan browser resolver kalau Playwright tersedia
+(function initProviders() {
+  if (_hasPlaywright()) {
+    PROVIDERS.push({ name: 'browser', fn: resolveViaBrowser });
+  }
+})();
 
 /**
  * Resolve share Terabox via provider gratis (urut). Return provider pertama yang sukses.
