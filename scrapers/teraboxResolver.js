@@ -308,9 +308,13 @@ const PROVIDERS = [
 ];
 
 // ─── PROVIDER 3: Playwright Browser (last resort, untuk SPA tanpa cookies) ────
-// Dipakai hanya kalau tera-core & direct gagal / tidak menghasilkan dlink.
-// Membuka halaman share Terabox di headless Chromium, menunggu SPA render,
-// lalu intercept network request untuk mendapatkan download link.
+// Strategi: buka halaman di headless Chromium → tunggu SPA render → ekstrak
+// file list dari DOM (bukan dari network interception). Untuk download link,
+// klik tombol download satu per satu dan tangkap URL popup/redirect.
+//
+// PERHATIAN: Tanpa cookies login Terabox, tombol download mungkin tetap mengarah
+// ke login page, bukan direct download link. Provider ini hanya berguna kalau
+// halaman SPA menampilkan download link yang bisa di-klik tanpa login.
 
 let _resolveViaBrowser = null; // lazy-loaded (playwright berat)
 
@@ -333,92 +337,115 @@ async function resolveViaBrowser(teraboxUrl) {
         });
         const page = await ctx.newPage();
 
-        // Kumpulkan download links dari network interception
-        const downloadLinks = []; // { filename, url }
-        const seenUrls = new Set();
+        // Buka halaman & tunggu SPA render
+        await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+        await page.waitForTimeout(3000);
 
-        page.on('response', async (res) => {
-          const resUrl = res.url();
-          // Tangkap redirect 302 dari klik download → biasanya ke CDN Terabox
-          if (res.status() === 302 && (resUrl.includes('terabox') || resUrl.includes('tera') || resUrl.includes('baidu'))) {
-            const loc = res.headers()['location'];
-            if (loc && !seenUrls.has(loc)) {
-              seenUrls.add(loc);
-              // Coba dapatkan filename dari content-disposition
-              const disp = res.headers()['content-disposition'] || '';
-              const fnMatch = disp.match(/filename[*]?=(?:UTF-8'')?([^;]+)/i);
-              let fname = fnMatch ? decodeURIComponent(fnMatch[1].replace(/"/g, '')) : '';
-              downloadLinks.push({ filename: fname, url: loc });
+        // Ekstrak file list dari DOM yang sudah di-render SPA.
+        // Terabox SPA menampilkan file dalam struktur list/grid dengan nama & ukuran.
+        const files = await page.evaluate(() => {
+          const results = [];
+
+          // Strategy 1: Cari elemen dengan atribut data-* atau class yang mengandung file info
+          // Terabox SPA biasanya punya struktur: container > file items > nama + size
+          const selectors = [
+            '[class*="file-item"]', '[class*="fileItem"]', '[class*="file_item"]',
+            '[class*="file-list"] > *', '[class*="fileList"] > *',
+            '[class*="share"] [class*="item"]', '[class*="share"] li',
+            'tr[class*="file"]', 'tr[data-fid]',
+            '[class*="download"]', // fallback
+          ];
+
+          let items = [];
+          for (const sel of selectors) {
+            items = document.querySelectorAll(sel);
+            if (items.length >= 1) break;
+          }
+
+          // Strategy 2: Cari teks yang mengandung pola ukuran file (MB, GB)
+          if (items.length === 0) {
+            const allText = document.body.innerText;
+            const sizePattern = /(\d+(?:\.\d+)?)\s*(MB|GB|KB)/gi;
+            if (sizePattern.test(allText)) {
+              // Cari container yang mengandung banyak file
+              const containers = document.querySelectorAll('[class*="list"], [class*="grid"], [class*="content"], main, .main');
+              for (const c of containers) {
+                const children = c.querySelectorAll('div, li, tr, [class*="item"]');
+                if (children.length >= 2) { items = children; break; }
+              }
             }
           }
-          // Tangkap juga XHR API response yang mengandung dlink
-          try {
-            const ct = res.headers()['content-type'] || '';
-            if (ct.includes('json') && resUrl.includes('/share/')) {
-              const json = await res.json();
-              if (json.list) {
-                for (const f of json.list) {
-                  if (f.dlink && !seenUrls.has(f.dlink)) {
-                    seenUrls.add(f.dlink);
-                    downloadLinks.push({
-                      filename: f.server_filename || f.filename || '',
-                      url: f.dlink,
-                      sizeBytes: parseInt(f.size || '0', 10),
-                    });
-                  }
-                }
+
+          for (const el of items) {
+            const text = (el.textContent || '').trim();
+            if (text.length < 3) continue;
+
+            // Ekstrak ukuran file
+            const sizeMatch = text.match(/(\d+(?:\.\d+)?)\s*(GB|MB|KB)/i);
+            let sizeBytes = 0;
+            if (sizeMatch) {
+              const num = parseFloat(sizeMatch[1]);
+              const unit = sizeMatch[2].toUpperCase();
+              if (unit === 'GB') sizeBytes = num * 1024 * 1024 * 1024;
+              else if (unit === 'MB') sizeBytes = num * 1024 * 1024;
+              else if (unit === 'KB') sizeBytes = num * 1024;
+            }
+
+            // Cari link download (href atau data-url)
+            let dlLink = null;
+            const links = el.querySelectorAll('a[href]');
+            for (const a of links) {
+              const href = a.getAttribute('href') || '';
+              // Skip link navigasi/internal
+              if (href.startsWith('#') || href.startsWith('javascript:') || href.includes('sharing')) continue;
+              if (href.startsWith('http') || href.startsWith('/')) {
+                dlLink = href.startsWith('/') ? window.location.origin + href : href;
+                break;
               }
             }
-          } catch (_) { /* bukan JSON atau bukan response yg dicari */ }
+
+            // Cari data attributes
+            if (!dlLink) {
+              dlLink = el.getAttribute('data-url') || el.getAttribute('data-dlink') || el.getAttribute('data-link') || '';
+            }
+
+            // Ekstrak nama file (teks sebelum ukuran)
+            let filename = text;
+            if (sizeMatch) {
+              filename = text.substring(0, text.indexOf(sizeMatch[0])).trim();
+              // Bersihkan teks non-filename (icon, checkbox, dll)
+              filename = filename.replace(/^[^\w(（\[]+/, '').trim();
+            }
+            if (filename.length > 200) filename = filename.substring(0, 200);
+
+            if (filename && sizeBytes > 0) {
+              results.push({
+                filename: filename || 'terabox_file',
+                sizeBytes,
+                sizeLabel: sizeMatch ? sizeMatch[0].toUpperCase() : '?',
+                directLink: dlLink || null,
+                isDirectory: false,
+              });
+            }
+          }
+
+          return results;
         });
-
-        // Buka halaman & tunggu SPA render (file list muncul)
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForTimeout(5000); // tunggu SPA fetch API
-
-        // Kalau intercept dapat links dari API response, return langsung
-        if (downloadLinks.length > 0) {
-          return downloadLinks.map(dl => ({
-            filename: dl.filename || 'terabox_file',
-            sizeBytes: dl.sizeBytes || 0,
-            sizeLabel: dl.sizeBytes ? `${(dl.sizeBytes / 1024 / 1024).toFixed(1)} MB` : '?',
-            directLink: dl.url,
-            isDirectory: false,
-          }));
-        }
-
-        // Fallback: coba klik download button di DOM
-        // Cari semua tombol/link download
-        const dlButtons = await page.$$('a[download], button[class*="download"], a[class*="download"], [class*="dl-btn"]');
-        for (const btn of dlButtons.slice(0, 5)) {
-          try {
-            const [newPage] = await Promise.all([
-              ctx.waitForEvent('page', { timeout: 5000 }).catch(() => null),
-              btn.click({ noWaitAfter: true }),
-            ]);
-            if (newPage) {
-              const dlUrl = newPage.url();
-              if (dlUrl && !dlUrl.includes('terabox') && !dlUrl.includes('sharing')) {
-                downloadLinks.push({ filename: '', url: dlUrl });
-              }
-              await newPage.close().catch(() => {});
-            }
-          } catch (_) { /* tombol ini bukan download */ }
-        }
 
         await ctx.close();
 
-        if (downloadLinks.length === 0) {
-          throw new Error('Browser: tidak bisa mendapatkan download link dari halaman');
+        if (files.length === 0) {
+          throw new Error('Browser: tidak bisa ekstrak file list dari halaman (SPA belum render atau format tidak dikenal)');
         }
 
-        return downloadLinks.map(dl => ({
-          filename: dl.filename || 'terabox_file',
-          sizeBytes: dl.sizeBytes || 0,
-          sizeLabel: dl.sizeBytes ? `${(dl.sizeBytes / 1024 / 1024).toFixed(1)} MB` : '?',
-          directLink: dl.url,
-          isDirectory: false,
-        }));
+        // Filter: hanya return file yang punya nama + ukuran valid
+        const validFiles = files.filter(f => f.filename !== 'terabox_file' && f.sizeBytes > 0);
+        if (validFiles.length === 0) {
+          // Return apa adanya tapi kasih warning
+          console.log('[Terabox:Browser] DOM extraction returned files without valid size/name');
+        }
+
+        return validFiles.length > 0 ? validFiles : files;
       } finally {
         if (browser) await browser.close().catch(() => {});
       }
