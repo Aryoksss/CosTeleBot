@@ -649,9 +649,9 @@ async function getApiResult(teraboxUrl) {
         if (attempt < 3) await sleep(2000 * attempt);
       }
     }
-    log.warn('[Terabox] xAPIverse gagal total → fallback provider gratis (tera-core)...');
+    log.warn('[Terabox] xAPIverse gagal total → fallback provider gratis...');
   } else {
-    log.info('[Terabox] XAPIVERSE_KEY kosong → langsung pakai provider gratis (tera-core)...');
+    log.info('[Terabox] XAPIVERSE_KEY kosong → langsung pakai provider gratis...');
   }
 
   // FALLBACK: provider gratis (tera-core, dst)

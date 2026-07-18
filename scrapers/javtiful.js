@@ -384,7 +384,7 @@ async function scrapeDetail(detailUrl) {
         sources = parsed
           .filter(s => s && s.src)
           .map(s => ({
-            url: s.src,
+            url: resolveUrl(s.src),
             size: s.size || null,
             type: s.type || 'video/mp4',
             label: s.size ? `${s.size}p` : 'Auto',
