@@ -426,6 +426,8 @@ function _hasPlaywright() {
 
 /**
  * Resolve share Terabox via provider gratis (urut). Return provider pertama yang sukses.
+ * Provider yang return file tapi SEMUA tanpa directLink akan di-skip —
+ * supaya browser provider (Playwright) tetap bisa dicoba.
  * @returns {{files: Array, source: string}}
  * @throws {Error} kalau semua provider gagal
  */
@@ -434,6 +436,13 @@ async function resolve(teraboxUrl) {
   for (const p of PROVIDERS) {
     try {
       const files = await p.fn(teraboxUrl);
+      // Skip provider kalau semua file tidak punya directLink —
+      // kasus umum: direct scraper sukses list file dari SPA tapi tanpa dlink (no cookies).
+      const hasLink = files.some(f => f.directLink);
+      if (!hasLink) {
+        errors.push(`${p.name}: file ter-listing tapi tidak ada direct download link (butuh cookies/browser)`);
+        continue;
+      }
       return { files, source: p.name };
     } catch (e) {
       errors.push(`${p.name}: ${e.message}`);
