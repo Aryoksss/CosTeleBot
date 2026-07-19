@@ -25,6 +25,12 @@ const cheerio = require('cheerio');
 const BASE_URL = 'https://javtiful.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
+// ─── RETRY CONFIG ────────────────────────────────────────────────────────────
+const RETRY_MAX = 3;
+const RETRY_BASE_MS = 2000;       // mulai 2 detik
+const RETRY_MAX_MS = 15000;       // cap 15 detik
+const REQUEST_JITTER_MS = 500;    // random jitter 0-500ms tiap request
+
 const log = {
   info: (m) => console.log(`\x1b[36m[INFO]\x1b[0m  ${m}`),
   warn: (m) => console.log(`\x1b[33m[WARN]\x1b[0m  ${m}`),
@@ -45,6 +51,43 @@ const client = axios.create({
 });
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+/** Jittered sleep untuk anti-rate-limit + backoff. */
+function sleep(ms) {
+  const jitter = Math.random() * REQUEST_JITTER_MS;
+  return new Promise(r => setTimeout(r, ms + jitter));
+}
+
+/** Cek apakah error adalah TLS/socket disconnect (transient). */
+function isTransientError(err) {
+  const msg = (err.message || '').toLowerCase();
+  return /socket disconnect|tls|econnreset|econnrefused|etimedout|enotfound|429|503|502|cloudflare/i.test(msg);
+}
+
+/**
+ * Wrapper retry untuk HTTP GET dengan exponential backoff.
+ * Hanya retry pada error transient (TLS drop, ECONNRESET, timeout, 429, 5xx).
+ */
+async function getWithRetry(url, maxRetries = RETRY_MAX) {
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // Jitter kecil tiap request untuk hindari detection pattern.
+      if (attempt > 0) {
+        const delay = Math.min(RETRY_BASE_MS * Math.pow(2, attempt - 1), RETRY_MAX_MS);
+        log.warn(`[Javtiful] retry ${attempt}/${maxRetries} dalam ${Math.round(delay / 1000)}s...`);
+        await sleep(delay);
+      } else {
+        await sleep(0); // jitter saja
+      }
+      return await client.get(url);
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientError(e)) break; // non-transient: jangan retry
+    }
+  }
+  throw lastErr;
+}
 
 function resolveUrl(href) {
   if (!href) return null;
@@ -171,7 +214,7 @@ function parsePagination(html) {
 
 async function scrapeListingByUrl(url, label) {
   try {
-    const r = await client.get(url);
+    const r = await getWithRetry(url);
     if (r.status !== 200) {
       log.warn(`[Javtiful] ${label} HTTP ${r.status}`);
       return { items: [], pagination: { hasNext: false } };
@@ -333,7 +376,7 @@ function extractRelatedVideos($, currentVideoId) {
  */
 async function scrapeDetail(detailUrl) {
   try {
-    const r = await client.get(detailUrl);
+    const r = await getWithRetry(detailUrl);
     if (r.status !== 200) {
       log.warn(`[Javtiful] detail HTTP ${r.status} ${detailUrl}`);
       return null;
