@@ -18,6 +18,7 @@
  */
 
 const groq = require('./groqClient');
+const { normalizeJavCode } = require('./scrapers/javtiful');
 
 const log = {
   info: (m) => console.log(`\x1b[36m[INFO]\x1b[0m  ${m}`),
@@ -38,13 +39,6 @@ const TRIGGERS = [
   /^(?:i(?:\s+am|\'m)?)\s+looking\s+(?:for\s+)?(.+)/i,
   /^(?:can\s+you\s+(?:find|search)\s+(?:me\s+)?)(.+)/i,
 ];
-
-// Kode JAV: 2-6 huruf + (opsional pemisah) + 2-5 digit. Mis. "mide232", "ssni 001", "ABP-123".
-const JAV_CODE_RE = /^([a-z]{2,6})[\s-]?(\d{2,5})$/i;
-function normalizeJavCode(text) {
-  const m = String(text || '').trim().match(JAV_CODE_RE);
-  return m ? `${m[1].toUpperCase()}-${m[2]}` : null;
-}
 
 // Kata kunci eksplisit untuk preferredSource di query
 const SOURCE_HINTS = {

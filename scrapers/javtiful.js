@@ -95,16 +95,38 @@ function resolveUrl(href) {
   return `${BASE_URL}${href.startsWith('/') ? '' : '/'}${href}`;
 }
 
+// Judul dari situs memakai format berhubung "MIDE-232" atau dibungkus [MIDE-232].
+// Wajib ada dash / bracket supaya judul bebas seperti "girl 123" tidak ikut dikenali.
+const JAV_CODE_TITLE_RE = /(?:^|\s|[([【])\s*([A-Za-z][A-Za-z0-9]{1,7})-(\d{2,5})\s*(?=$|\s|[)\]】])/;
+
 /**
- * Deteksi kode JAV standar dari title (misal MIDE-232, SSNI-001, AVSA-432).
- * Return: { full, prefix, number } atau null.
+ * Return { full, prefix, number } kalau title mengandung kode JAV berhubung, else null.
+ * Dipakai untuk judul hasil scraping (bukan input mentah user).
  */
 function detectJavCode(title) {
   if (!title) return null;
-  // Pattern: 2-6 huruf kapital/angka kombinasi + dash + 2-5 digit
-  const m = String(title).match(/\b([A-Z]{2,6}[A-Z0-9]{0,2})-(\d{2,5})\b/);
+  const m = String(title).match(JAV_CODE_TITLE_RE);
   if (!m) return null;
-  return { full: `${m[1]}-${m[2]}`, prefix: m[1], number: m[2] };
+  const prefix = m[1].toUpperCase();
+  return { full: `${prefix}-${m[2]}`, prefix, number: m[2] };
+}
+
+// Input user boleh tanpa dash ("mide232"). Tanpa pemisah prefix wajib huruf murni
+// (MIDE232 → MIDE-232); dengan pemisah prefix boleh alfanumerik (T28-123).
+const JAV_INPUT_RE = /^([A-Za-z][A-Za-z0-9]{1,7})[\s-]+(\d{2,5})$|^([A-Za-z]{2,8})(\d{2,5})$/;
+
+/**
+ * "mide232" / "MIDE 232" → "MIDE-232"; input non-kode dikembalikan apa adanya (trimmed).
+ */
+function normalizeJavCode(text) {
+  const raw = String(text == null ? '' : text).trim();
+  if (!raw) return null;
+  const m = raw.match(JAV_INPUT_RE);
+  if (m) {
+    const prefix = (m[1] || m[3]).toUpperCase();
+    return `${prefix}-${m[2] || m[4]}`;
+  }
+  return raw;
 }
 
 /**
@@ -468,11 +490,10 @@ async function scrapeDetail(detailUrl) {
 
 async function probeSourceSize(url) {
   try {
-    const r = await axios.get(url, {
+    const r = await client.get(url, {
       headers: { 'User-Agent': UA, 'Range': 'bytes=0-0' },
       timeout: 15000,
       responseType: 'arraybuffer',
-      validateStatus: () => true,
     });
     if (r.status !== 206 && r.status !== 200) return null;
     const range = r.headers['content-range'] || '';
@@ -492,5 +513,6 @@ module.exports = {
   scrapeDetail,
   probeSourceSize,
   detectJavCode,
+  normalizeJavCode,
   parseIsoDuration,
 };

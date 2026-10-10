@@ -2505,19 +2505,6 @@ async function doPinSendItem(bot, chatId, pin) {
 
 // ─── JAVTIFUL HELPERS ────────────────────────────────────────────────────────
 
-/**
- * Normalisasi input user: `mide232` / `mide 232` → `MIDE-232`.
- * Kalau bukan kode JAV, kembalikan apa adanya (trimmed).
- */
-function normalizeJavQuery(q) {
-  const trimmed = String(q || '').trim();
-  if (!trimmed) return trimmed;
-  // Pattern: 2-6 huruf + (optional dash/space) + 2-5 digit
-  const m = trimmed.match(/^([a-zA-Z]{2,6})[\s-]?(\d{2,5})$/);
-  if (m) return `${m[1].toUpperCase()}-${m[2]}`;
-  return trimmed;
-}
-
 function formatViews(n) {
   if (!n || n < 0) return '?';
   if (n < 1000) return String(n);
@@ -2546,7 +2533,7 @@ function formatRelativeDate(iso) {
  * contextLabel dipakai untuk heading (nama aktris/kategori humanized).
  */
 async function doJavBrowse(bot, chatId, query, page = 1, mode = 'search', contextLabel = null) {
-  const normalized = mode === 'search' ? normalizeJavQuery(query) : query;
+  const normalized = mode === 'search' ? javtifulScraper.normalizeJavCode(query) : query;
   log.info(`[User ${chatId}] Javtiful ${mode} "${normalized}" page=${page}`);
 
   const headerEmoji = mode === 'actress' ? '👤' : mode === 'category' ? '🏷️' : '🎥';
@@ -2897,14 +2884,23 @@ async function doJavGacha(bot, chatId, mode = 'latest') {
   }
 }
 
-async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
-  // Ambil detail dari cache kalau ada, re-scrape kalau expired
-  const cache = javBrowseCache.get(chatId);
-  let detail = cache?.detailCache?.[item.id];
+async function doJavDownload(bot, chatId, item, sourceIdx = 0, forceRefresh = false) {
+  // S3 pre-signed URL expire 1 jam; cache detail lama bisa berisi URL mati.
+  // forceRefresh (dipakai retry) memaksa re-scrape supaya dapat URL segar.
+  let detail;
+  if (!forceRefresh) {
+    const cache = javBrowseCache.get(chatId);
+    detail = cache?.detailCache?.[item.id];
+  }
   if (!detail) {
     detail = await javtifulScraper.scrapeDetail(item.link);
     if (!detail) {
       return bot.sendMessage(chatId, '❌ Gagal resolve video detail.');
+    }
+    const cache = javBrowseCache.get(chatId);
+    if (cache) {
+      cache.detailCache = cache.detailCache || {};
+      cache.detailCache[item.id] = detail;
     }
   }
 
@@ -2966,7 +2962,7 @@ async function doJavDownload(bot, chatId, item, sourceIdx = 0) {
       await rimraf(jobDir);
     } catch (err) {
       log.error(`[Javtiful] download error: ${err.message}`);
-      setRetry(chatId, () => doJavDownload(bot, chatId, item, sourceIdx));
+      setRetry(chatId, () => doJavDownload(bot, chatId, item, sourceIdx, true));
       bot.editMessageText(`❌ Download gagal: <code>${escHtml(err.message.slice(0, 200))}</code>`, {
         chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'HTML',
         reply_markup: { inline_keyboard: retryKeyboardRows() },
