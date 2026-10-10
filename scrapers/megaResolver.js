@@ -60,7 +60,7 @@ async function getLoggedStorage() {
 
   _loginPromise = new Promise((resolve, reject) => {
     // Pass agent in constructor options so login itself goes through proxy
-    const opts = { email, password, userAgent: UA_BOT };
+    const opts = { email, password, userAgent: UA };
     if (agent) {
       opts.httpAgent = agent;
       opts.httpsAgent = agent;
@@ -91,7 +91,7 @@ async function getLoggedStorage() {
   }
 }
 
-const { UA, UA_BOT } = require('../utils/ua');
+const UA = require('../utils/ua').UA;
 
 /**
  * Resolve redirector URL (link.desustream.com) to final Mega URL via 302 redirect.
@@ -139,7 +139,7 @@ async function createFile(megaUrl) {
 
   // Anonymous mode — apply proxy if available
   const file = File.fromURL(megaUrl);
-  file.api.userAgent = UA_BOT;
+  file.api.userAgent = UA;
   if (agent) {
     file.api.httpAgent = agent;
     file.api.httpsAgent = agent;

@@ -20,7 +20,7 @@ const https = require('https');
 // kita longgarkan verifikasi TLS khusus request kemono.
 const insecureAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
 
-const MIRROR_HOSTS = ['kemono.cr', 'kemono.su'];
+const MIRROR_HOSTS = ['kemono.cr'];
 
 const log = {
   info: (m) => console.log(`\x1b[36m[INFO]\x1b[0m  ${m}`),
@@ -163,7 +163,7 @@ async function getKemonoPostMedia(postUrl) {
 }
 
 /** Mirror host kemono (urutan prioritas). Semua berbagi backend /data/ yang sama. */
-const MIRRORS = ['kemono.cr', 'kemono.su'];
+const MIRRORS = MIRROR_HOSTS;
 
 /** Ganti host sebuah URL kemono ke mirror lain (untuk fallback download). */
 function mirrorize(url, host) {
