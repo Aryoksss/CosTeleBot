@@ -24,14 +24,14 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
  * Extract file ID from various GDrive URL formats.
  */
 function extractFileId(url) {
-  // Format 1: drive.google.com/uc?export=download&id=FILE_ID
-  let m = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  // Format 1: drive.google.com/file/d/FILE_ID/view
+  let m = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
   if (m) return m[1];
-  // Format 2: drive.google.com/file/d/FILE_ID/view
-  m = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  // Format 2: drive.google.com/uc?...&id=FILE_ID  atau  drive.google.com/open?id=FILE_ID
+  m = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
   if (m) return m[1];
-  // Format 3: drive.google.com/open?id=FILE_ID
-  m = url.match(/[?&]open\?id=([a-zA-Z0-9_-]+)/);
+  // Format 3: drive.google.com/drive/folders/... (folder share link, id setelah /folders/)
+  m = url.match(/\/folders\/([a-zA-Z0-9_-]+)/);
   if (m) return m[1];
   return null;
 }
@@ -55,7 +55,7 @@ async function downloadGDrive(gdriveUrl, destPath, onProgress) {
 
   const res1 = await axios.get(initialUrl, {
     maxRedirects: 5,
-    responseType: 'arraybuffer',
+    responseType: 'stream',
     headers: { 'User-Agent': UA },
     timeout: 30000,
     validateStatus: () => true,
@@ -70,18 +70,26 @@ async function downloadGDrive(gdriveUrl, destPath, onProgress) {
   const contentType = (res1.headers['content-type'] || '').toLowerCase();
   const contentDisp = res1.headers['content-disposition'] || '';
 
-  // Case 1: direct file download (small file)
+  // Case 1: direct file download (bukan HTML) — stream langsung ke disk, tanpa buffer ke RAM.
   if (!contentType.includes('text/html')) {
-    // This IS the file content — save it
     filename = parseFilename(contentDisp) || `gdrive_${fileId}`;
-    fs.writeFileSync(destPath, res1.data);
-    const size = res1.data.length;
-    if (onProgress) onProgress(100, size, 0);
-    return { name: filename, size, path: destPath };
+    return await new Promise((resolve, reject) => {
+      const writeStream = fs.createWriteStream(destPath);
+      let downloaded = 0;
+      const total = parseInt(res1.headers['content-length'] || '0', 10);
+      res1.data.on('data', (chunk) => {
+        downloaded += chunk.length;
+        if (onProgress) onProgress(downloaded, total);
+      });
+      res1.data.on('error', (err) => { try { writeStream.close(); } catch (_) {} reject(err); });
+      writeStream.on('error', (err) => { try { res1.data.destroy(); } catch (_) {} reject(err); });
+      writeStream.on('finish', () => resolve({ name: filename, size: downloaded, path: destPath }));
+      res1.data.pipe(writeStream);
+    });
   }
 
-  // Case 2: HTML page (large file virus scan warning OR quota error)
-  const html = res1.data.toString('utf8');
+  // Case 2: HTML page (large file virus scan warning OR quota error) — aman di-buffer.
+  const html = (await readStream(res1.data)).toString('utf8');
 
   // Check for quota error
   if (/quota|can't\s+view\s+or\s+download|sorry/i.test(html)) {
@@ -155,6 +163,15 @@ async function downloadGDrive(gdriveUrl, destPath, onProgress) {
     });
 
     res2.data.pipe(writeStream);
+  });
+}
+
+function readStream(stream) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on('data', (c) => chunks.push(c));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
   });
 }
 
