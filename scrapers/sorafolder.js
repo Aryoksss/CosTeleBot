@@ -9,9 +9,9 @@
  *      → https://cdn.sorafolder.com/<jwt>.
  *   4. Return URL CDN (file di-stream langsung; signed-link berumur pendek → langsung unduh).
  *
- * Catatan: PASSPHRASE statik di JS SoraFolder. Kalau suatu saat diganti & dekripsi gagal,
- * ekstrak ulang dengan: node tools/soraSniff.js <url>  (lihat request /file-down + responsnya),
- * lalu cari passphrase via hook CryptoJS.AES.decrypt.
+ * Catatan: PASSPHRASE berasal dari env SORAFOLDER_KEY (lihat .env.example). Kalau nilainya
+ * berganti & dekripsi gagal, ekstrak ulang dengan: node tools/soraSniff.js <url>
+ * (lihat request /file-down + responsnya), lalu cari passphrase via hook CryptoJS.AES.decrypt.
  */
 
 const axios = require('axios');
@@ -24,8 +24,16 @@ const log = {
 };
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-// Passphrase statik dari decryptLink() di JS SoraFolder (override via env kalau berganti).
-const PASSPHRASE = process.env.SORAFOLDER_KEY || 'Ak7qrvvH4WKYxV2OgaeHAEg2a5eh16vE';
+
+// Passphrase dekripsi link SoraFolder: wajib dari env (jangan hardcode di repo).
+// Nilai default sengaja tidak disertakan agar kunci tidak bocor lewat source publik.
+function getPassphrase() {
+  const key = (process.env.SORAFOLDER_KEY || '').trim();
+  if (!key) {
+    throw new Error('SORAFOLDER_KEY belum di-set di .env — dekripsi link SoraFolder membutuhkannya. Lihat .env.example.');
+  }
+  return key;
+}
 
 const http = axios.create({ headers: { 'User-Agent': UA }, timeout: 30000, validateStatus: () => true, maxRedirects: 5 });
 
@@ -98,7 +106,7 @@ async function getDirectLink(url) {
   // 3) Dekripsi → direct CDN URL
   let link;
   try {
-    link = decryptOpenSSL(enc, PASSPHRASE).trim();
+    link = decryptOpenSSL(enc, getPassphrase()).trim();
   } catch (e) {
     throw new Error('Gagal dekripsi link SoraFolder (passphrase mungkin berganti): ' + e.message);
   }
