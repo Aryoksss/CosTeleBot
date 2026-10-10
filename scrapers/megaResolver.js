@@ -24,22 +24,11 @@ if (!globalThis.crypto) {
 const axios = require('axios');
 
 // SOCKS5 proxy support (bypass Mega IP throttle di datacenter).
-// Reuse GOFILE_PROXY atau set MEGA_PROXY terpisah.
-let _proxyAgent = null;
-function getProxyAgent() {
-  if (_proxyAgent !== null) return _proxyAgent || null; // cached (null = no proxy, false = not checked)
-  const proxyUrl = process.env.MEGA_PROXY || process.env.GOFILE_PROXY;
-  if (!proxyUrl) { _proxyAgent = false; return null; }
-  try {
-    const { SocksProxyAgent } = require('socks-proxy-agent');
-    _proxyAgent = new SocksProxyAgent(proxyUrl);
-    return _proxyAgent;
-  } catch (_) {
-    console.warn('\x1b[33m[WARN]\x1b[0m  [Mega] socks-proxy-agent not available, no proxy');
-    _proxyAgent = false;
-    return null;
-  }
-}
+// Reuse GOFILE_PROXY atau set MEGA_PROXY terpisah. Di-cache karena login Mega berumur panjang.
+const getProxyAgent = require('../utils/proxy').createProxyAgent(
+  ['MEGA_PROXY', 'GOFILE_PROXY'],
+  { cache: true }
+);
 
 // megajs package — lazy-required supaya bot tidak crash kalau package missing
 let megajs = null;

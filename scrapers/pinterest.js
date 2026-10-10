@@ -27,18 +27,9 @@ const log = {
   error: (m) => console.log(`\x1b[31m[ERROR]\x1b[0m ${m}`),
 };
 
-function getProxyAgent() {
-  const raw = process.env.PINTEREST_PROXY || process.env.GOFILE_PROXY || process.env.HTTPS_PROXY;
-  if (!raw) return null;
-  try {
-    let HttpsProxyAgent, SocksProxyAgent;
-    ({ HttpsProxyAgent } = require('https-proxy-agent'));
-    ({ SocksProxyAgent } = require('socks-proxy-agent'));
-    return raw.startsWith('socks') ? new SocksProxyAgent(raw) : new HttpsProxyAgent(raw);
-  } catch (_) {
-    return null;
-  }
-}
+const getProxyAgent = require('../utils/proxy').createProxyAgent(
+  ['PINTEREST_PROXY', 'GOFILE_PROXY', 'HTTPS_PROXY']
+);
 
 const httpClient = axios.create({
   timeout: 20000,
