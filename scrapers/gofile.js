@@ -1,12 +1,10 @@
 const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 
 chromium.use(StealthPlugin());
 
-const PROFILE_DIR = path.resolve('./browser_profile_gofile');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 /**
@@ -83,6 +81,7 @@ function collectGofileFiles(data) {
 
 async function resolveGofile(gofileUrl) {
   let ctx;
+  let browser;
   const proxy = getProxyConfig();
 
   // Strategi: setiap resolve pakai context BARU (non-persistent) agar Gofile ngasih
@@ -93,13 +92,12 @@ async function resolveGofile(gofileUrl) {
   try {
     console.log(`[Gofile] resolveGofile START url=${gofileUrl.split('#')[0]} proxy=${proxy ? proxy.server : 'none'} (fresh guest)`);
     // launch() bukan launchPersistentContext — tidak akan bikin/pakai disk profile.
-    const browser = await chromium.launch({
+    browser = await chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
       ...(proxy ? { proxy } : {}),
     });
     ctx = await browser.newContext({ userAgent: UA });
-    ctx._browser = browser; // simpan ref untuk close di finally
     console.log(`[Gofile] fresh context OK`);
 
     const page = await ctx.newPage();
@@ -133,7 +131,13 @@ async function resolveGofile(gofileUrl) {
       console.log(`[Gofile] page.goto gagal/timeout: ${e.message}`);
     });
     console.log(`[Gofile] page loaded, menunggu XHR /contents/...`);
-    await Promise.race([apiInterception, page.waitForTimeout(8000)]);
+    const intercepted = await Promise.race([
+      apiInterception,
+      page.waitForTimeout(8000).then(() => false),
+    ]);
+    if (intercepted === false && files.length === 0) {
+      console.log(`[Gofile] intercept timeout: XHR /contents/ tidak terlihat dalam 8s (fallback ke Node-side API)`);
+    }
     console.log(`[Gofile] Files ditemukan: ${files.length}`);
 
     // Ambil daftar file via API DARI NODE (axios), BUKAN dari dalam browser.
@@ -211,8 +215,8 @@ async function resolveGofile(gofileUrl) {
     console.error(`[Gofile] stack: ${err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : 'n/a'}`);
     return null;
   } finally {
-    if (ctx && ctx._browser) {
-      await ctx._browser.close().catch(() => { });
+    if (browser) {
+      await browser.close().catch(() => { });
     } else if (ctx) {
       await ctx.close().catch(() => { });
     }
@@ -271,7 +275,7 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
     method: 'GET',
     url: directUrl,
     responseType: 'stream',
-    timeout: 3600000, // 1 jam untuk file raksasa
+    timeout: 1800000, // 30 menit; stream besar dilindungi resume+Range di bawah
     headers: {
       'User-Agent': UA,
       'Referer': 'https://gofile.io/',
@@ -314,7 +318,8 @@ async function downloadGofileFile(directUrl, destPath, onProgress = null, accoun
       let bodyPreview = '';
       try {
         const chunks = [];
-        for await (const c of res.data) { chunks.push(c); if (chunks.reduce((a, b) => a + b.length, 0) > 500) break; }
+        let got = 0;
+        for await (const c of res.data) { chunks.push(c); got += c.length; if (got > 500) break; }
         bodyPreview = Buffer.concat(chunks).toString('utf8').slice(0, 200).replace(/\s+/g, ' ');
       } catch (_) { }
       console.log(`[Gofile-DL] attempt ${attempt}/${MAX_RETRIES} → HTTP ${status} body="${bodyPreview}"`);
