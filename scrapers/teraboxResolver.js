@@ -201,6 +201,18 @@ function extractTokens(html, finalUrl) {
   return tokens;
 }
 
+// ─── Helper: URL akhir setelah redirect, tahan terhadap bentuk respons axios ───
+// axios menyimpan URL redirect di request.res.responseUrl, tapi struktur ini internal
+// dan bisa berbeda antar versi/adapter. Baca berlapis + fallback ke config.url.
+function extractFinalUrl(response) {
+  return (
+    (response && response.request && response.request.res && response.request.res.responseUrl) ||
+    (response && response.request && response.request.responseURL) ||
+    (response && response.config && response.config.url) ||
+    null
+  );
+}
+
 /**
  * Strip leading "1" dari shorturl (format 1024tera.com).
  * Contoh: "182LURMwETEYdY6qgyJHycg" → "82LURMwETEYdY6qgyJHycg"
@@ -232,7 +244,7 @@ async function resolveViaDirect(teraboxUrl) {
   }
 
   const html = typeof pageRes.data === 'string' ? pageRes.data : String(pageRes.data);
-  const finalUrl = pageRes.request.res.responseUrl || teraboxUrl;
+  const finalUrl = extractFinalUrl(pageRes) || teraboxUrl;
 
   // Step 2: Extract tokens dari HTML + final URL
   const tokens = extractTokens(html, finalUrl);
@@ -332,9 +344,7 @@ async function resolveViaBrowser(teraboxUrl) {
           headless: true,
           args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
-        const ctx = await browser.newContext({
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        });
+        const ctx = await browser.newContext({ userAgent: UA });
         const page = await ctx.newPage();
 
         // Buka halaman & tunggu SPA render
