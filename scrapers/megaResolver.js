@@ -71,7 +71,7 @@ async function getLoggedStorage() {
 
   _loginPromise = new Promise((resolve, reject) => {
     // Pass agent in constructor options so login itself goes through proxy
-    const opts = { email, password, userAgent: 'CosTeleBot/1.0' };
+    const opts = { email, password, userAgent: UA_BOT };
     if (agent) {
       opts.httpAgent = agent;
       opts.httpsAgent = agent;
@@ -102,7 +102,7 @@ async function getLoggedStorage() {
   }
 }
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+const { UA, UA_BOT } = require('../utils/ua');
 
 /**
  * Resolve redirector URL (link.desustream.com) to final Mega URL via 302 redirect.
@@ -150,7 +150,7 @@ async function createFile(megaUrl) {
 
   // Anonymous mode — apply proxy if available
   const file = File.fromURL(megaUrl);
-  file.api.userAgent = 'CosTeleBot/1.0';
+  file.api.userAgent = UA_BOT;
   if (agent) {
     file.api.httpAgent = agent;
     file.api.httpsAgent = agent;

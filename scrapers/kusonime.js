@@ -17,7 +17,7 @@ const cheerio = require('cheerio');
 
 const BASE = () => process.env.KUSONIME_DOMAIN || 'https://kusonime.com';
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+const UA = require('../utils/ua').UA;
 
 const http = axios.create({ timeout: 15000, headers: { 'User-Agent': UA } });
 

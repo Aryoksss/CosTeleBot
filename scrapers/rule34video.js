@@ -11,7 +11,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 
 const BASE_URL = 'https://rule34video.com';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const UA = require('../utils/ua').UA;
 
 const r34Axios = axios.create({
   headers: { 'User-Agent': UA, 'Referer': BASE_URL },

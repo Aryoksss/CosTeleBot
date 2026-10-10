@@ -23,7 +23,7 @@ const log = {
   error: (m) => console.log(`\x1b[31m[ERROR]\x1b[0m ${m}`),
 };
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const UA = require('../utils/ua').UA;
 
 // Passphrase dekripsi link SoraFolder: wajib dari env (jangan hardcode di repo).
 // Nilai default sengaja tidak disertakan agar kunci tidak bocor lewat source publik.

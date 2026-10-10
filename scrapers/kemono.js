@@ -30,7 +30,7 @@ const log = {
 };
 
 const PAGE_SIZE = 50; // kemono melayani 50 post per halaman
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const UA = require('../utils/ua').UA;
 
 // Header WAJIB untuk hit JSON API kemono (lihat catatan di atas).
 const apiHeaders = (host) => ({

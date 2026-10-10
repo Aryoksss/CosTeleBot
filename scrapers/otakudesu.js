@@ -18,7 +18,7 @@ const DOMAINS = () => {
   return ['https://otakudesu.blog', 'https://otakudesu.fit', 'https://otakudesu.la'];
 };
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+const UA = require('../utils/ua').UA;
 
 const http = axios.create({ timeout: 12000, headers: { 'User-Agent': UA } });
 

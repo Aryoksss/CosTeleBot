@@ -18,7 +18,7 @@
 const axios = require('axios');
 const fs = require('fs');
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+const UA = require('../utils/ua').UA;
 
 /**
  * Extract file ID from various GDrive URL formats.
